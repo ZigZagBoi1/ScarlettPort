@@ -43,11 +43,12 @@ The launcher embeds the XCL runtime (`xcl.exe`, Agility SDK DLLs, `dxcompiler.dl
 ```powershell
 cd launcher
 cargo build --release --locked
+cargo test --release --locked
 ```
 
 `build.rs` copies the runtime files into `launcher\runtime` from `XCL_SRC` (a folder holding `xcl.exe` and `D3D12\`) and `DXC_SRC` (a folder holding `dxcompiler.dll` and `dxil.dll`, for example the Windows SDK `bin\<version>\x64`). Files already in `launcher\runtime` are used as is.
 
-To compile the launcher without any runtime files (CI does this), set `SCARLETT_NO_EMBED=1`. It embeds empty placeholders; the result builds but cannot run a game.
+To build and test the launcher without any runtime files (CI does this), set `SCARLETT_NO_EMBED=1`. It embeds empty placeholders; the result builds but cannot run a game.
 
 ## Where things live
 
