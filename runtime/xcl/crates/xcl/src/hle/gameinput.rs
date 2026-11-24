@@ -262,6 +262,17 @@ fn scripted() -> u32 {
     at.iter().filter(|&&(s, _)| t >= s && t < s + 0.2).fold(0, |b, &(_, g)| b | g) | live_press(t)
 }
 
+/// The text of a press file as an editor or shell wrote it: UTF-8 (with or without a BOM) or the
+/// UTF-16 that Windows PowerShell 5.1's `>` and `Out-File` produce.
+fn decode_press_text(b: &[u8]) -> String {
+    let u16s = |c: &[u8], f: fn([u8; 2]) -> u16| String::from_utf16_lossy(&c.chunks_exact(2).map(|p| f([p[0], p[1]])).collect::<Vec<_>>());
+    match b {
+        [0xFF, 0xFE, rest @ ..] => u16s(rest, u16::from_le_bytes),
+        [0xFE, 0xFF, rest @ ..] => u16s(rest, u16::from_be_bytes),
+        _ => String::from_utf8_lossy(b.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(b)).into_owned(),
+    }
+}
+
 /// `XCL_PRESS_FILE=<path>`: button names written to that file ("A", "DOWN A") are pressed one
 /// after another, 150 ms each, then the file is emptied – the menus driven while the title runs.
 fn live_press(t: f64) -> u32 {
@@ -271,10 +282,18 @@ fn live_press(t: f64) -> u32 {
     let mut q = Q.lock().unwrap_or_else(|e| e.into_inner());
     if q.2.is_empty() && t - q.0 >= 0.05 {
         q.0 = t;
-        if let Ok(s) = std::fs::read_to_string(path) {
+        if let Ok(bytes) = std::fs::read(path) {
+            let s = decode_press_text(&bytes);
             if !s.trim().is_empty() {
                 let _ = std::fs::write(path, "");
-                q.2 = s.split_whitespace().rev().filter_map(button_named).collect();
+                q.2 = s
+                    .split_whitespace()
+                    .rev()
+                    .filter_map(|n| button_named(n).or_else(|| {
+                        crate::xlog_warn!("GameInput: XCL_PRESS_FILE button {n:?} not understood");
+                        None
+                    }))
+                    .collect();
                 q.1 = t;
             }
         }
@@ -1388,5 +1407,15 @@ mod tests {
         assert!(unsafe { unregister_callback(g, token, 5_000_000) });
         assert!(gate.finished.load(Ordering::Acquire));
         releaser.join().unwrap();
+    }
+
+    #[test]
+    fn press_file_text_decodes_utf8_bom_and_utf16() {
+        let utf16le: Vec<u8> = [0xFF, 0xFE].into_iter().chain("DOWN A\r\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        let utf16be: Vec<u8> = [0xFE, 0xFF].into_iter().chain("DOWN A".encode_utf16().flat_map(u16::to_be_bytes)).collect();
+        for b in [&b"DOWN A\r\n"[..], b"\xEF\xBB\xBFDOWN A", &utf16le, &utf16be] {
+            let names: Vec<_> = decode_press_text(b).split_whitespace().filter_map(button_named).collect();
+            assert_eq!(names, [DPAD_DOWN, A], "{b:?}");
+        }
     }
 }
