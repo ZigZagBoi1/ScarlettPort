@@ -13,7 +13,9 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
 Write-Host '==> Building XCL runtime (release)...' -ForegroundColor Cyan
 Push-Location (Join-Path $root 'runtime\xcl')
 cargo build --release
+$code = $LASTEXITCODE
 Pop-Location
+if ($code -ne 0) { throw "cargo build failed (exit $code)." }
 
 $agility = Join-Path $bin 'D3D12'
 if (-not (Test-Path (Join-Path $agility 'D3D12Core.dll'))) {
@@ -35,6 +37,7 @@ if ($Game) {
     Write-Host '==> Precompiling all ~26,500 shaders + GPU pipelines (about 45 min, once; resumable)...' -ForegroundColor Cyan
     $env:XCL_DXC_THREADS = '8'; $env:XCL_PIPELINE_THREADS = '3'
     & (Join-Path $bin 'xcl.exe') shaders $pack --precompile --pipelines
+    if ($LASTEXITCODE -ne 0) { throw "Shader precompile failed (exit $LASTEXITCODE). Run setup.ps1 again to resume." }
 }
 
 Write-Host ''

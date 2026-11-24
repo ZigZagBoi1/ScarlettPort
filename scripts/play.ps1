@@ -28,4 +28,8 @@ $logs = Join-Path $root 'logs'
 New-Item -ItemType Directory -Force $logs | Out-Null
 $log = Join-Path $logs ("run-{0:yyyyMMdd-HHmmss}.log" -f (Get-Date))
 Write-Host "Starting... log: $log" -ForegroundColor Cyan
+# Windows PowerShell 5.1 turns a native program's stderr into a terminating error under 'Stop'
+# when it is redirected, which would kill the run on the first log line.
+$ErrorActionPreference = 'Continue'
 & $xcl run $Game *> $log
+exit $LASTEXITCODE
