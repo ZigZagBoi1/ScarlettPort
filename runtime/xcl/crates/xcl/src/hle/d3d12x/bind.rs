@@ -716,6 +716,11 @@ pub(super) unsafe extern "system" fn execute_indirect(this: *mut c_void, sig: us
         // hung the GPU, 0x887a0006). Skipped, like a draw or dispatch of such a pipeline.
         if super::pso_async::is_pending(with(this, |s| s.pso)) || super::real::two_pass_of(pso).is_some() {
             count(DRAWS_SKIPPED);
+            // a compute pipeline that is late (`XCL_PSO_WAIT_MS`): what it would have written
+            // (arguments / counts of the indirect calls after it) is not written
+            if signature_dispatches(sig) {
+                note_skipped_compute(this);
+            }
             static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             if N.fetch_add(1, Ordering::Relaxed) < 4 {
                 crate::xlog_warn!("D3D12.X: ExecuteIndirect with a pending or two-pass pipeline skipped");
@@ -728,6 +733,7 @@ pub(super) unsafe extern "system" fn execute_indirect(this: *mut c_void, sig: us
         // A native PC compute pipeline is not one of these and still goes to the PC call.
         if signature_dispatches(sig) && super::real::is_console_compute(pso) {
             count(DISPATCHES_SKIPPED);
+            note_skipped_compute(this);
             static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             if N.fetch_add(1, Ordering::Relaxed) < 4 {
                 crate::xlog_warn!("D3D12.X: ExecuteIndirect dispatch with a pipeline that has no translated console shader ({pso:#x}) skipped");
@@ -743,6 +749,9 @@ pub(super) unsafe extern "system" fn execute_indirect(this: *mut c_void, sig: us
         return pc(this, sig, max, args, args_off, count_buf, count_off);
     }
     if ROOT_SIGNATURES.lock().unwrap().as_ref().is_some_and(|s| s.contains(&sig)) {
+        if compute {
+            note_skipped_compute(this);
+        }
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         if N.fetch_add(1, Ordering::Relaxed) < 4 {
             crate::xlog_warn!("D3D12.X: ExecuteIndirect that changes root arguments with a translated pipeline skipped");
@@ -1714,6 +1723,51 @@ mod tests {
         real::forget_pso_for_test(real_ok);
         real::forget_pso_for_test(standin_fail);
         assert!(!real::is_console_compute(standin_fail), "a released pipeline's address does not stay a console one");
+    }
+
+    /// An ExecuteIndirect dispatch that is skipped writes none of the arguments / counts the
+    /// indirect calls after it read, as a skipped Dispatch: the list is marked for
+    /// `XCL_INDIRECT_GUARD` (a translated compute pipeline with a root-changing signature, and an
+    /// untranslated console compute pipeline with a Dispatch signature).
+    #[test]
+    fn a_skipped_execute_indirect_dispatch_marks_the_list_for_the_indirect_guard() {
+        let mut orig_vt = [0usize; 64];
+        orig_vt[1] = fake_add_ref as usize;
+        orig_vt[2] = fake_release as usize;
+        orig_vt[59] = fake_execute_indirect as usize;
+        let mut ext_vt = vec![0usize; 65];
+        ext_vt[0] = orig_vt.as_ptr() as usize;
+        ext_vt[1..].copy_from_slice(&orig_vt);
+        let fake = Box::new(FakeAdoptedList {
+            vt: unsafe { ext_vt.as_ptr().add(1) },
+            refs: AtomicUsize::new(1),
+            dispatch_calls: AtomicUsize::new(0),
+            set_compute_rs_calls: AtomicUsize::new(0),
+            set_compute_uav_calls: AtomicUsize::new(0),
+            set_pso_calls: AtomicUsize::new(0),
+            execute_indirect_calls: AtomicUsize::new(0),
+        });
+        let list_ptr = &*fake as *const FakeAdoptedList as *mut c_void;
+        let (translated, untranslated) = (0x7200_0301usize, 0x7200_0302usize);
+        let (sig_root_changing, sig_dispatch) = (0x7200_03F0usize, 0x7200_03F8usize);
+        real::register_translated_compute_for_test(translated);
+        real::register_console_compute_for_test(untranslated);
+        note_root_changing_signature(sig_root_changing);
+        note_signature_dispatches(sig_dispatch, true);
+
+        reset(list_ptr, 0x7200_0300, translated);
+        unsafe { execute_indirect(list_ptr, sig_root_changing, 1, 0, 0, 0, 0) };
+        assert!(with(list_ptr, |s| s.skipped_compute), "a root-changing dispatch with a translated pipeline is skipped: the list's later indirect arguments are untrusted");
+
+        reset(list_ptr, 0x7200_0300, untranslated);
+        unsafe { execute_indirect(list_ptr, sig_dispatch, 1, 0, 0, 0, 0) };
+        assert!(with(list_ptr, |s| s.skipped_compute), "a dispatch of an untranslated console pipeline is skipped: the list's later indirect arguments are untrusted");
+        assert_eq!(fake.execute_indirect_calls.load(Ordering::Relaxed), 0);
+
+        note_signature_dispatches(sig_dispatch, false);
+        forget(list_ptr);
+        real::forget_pso_for_test(translated);
+        real::forget_pso_for_test(untranslated);
     }
 
     /// A two-pass mesh/GS pipeline is built with XCL's mesh root signature and registered in
