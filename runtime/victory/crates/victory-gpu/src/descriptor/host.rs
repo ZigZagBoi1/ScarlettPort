@@ -739,6 +739,16 @@ fn view_stride(view: &View) -> Option<u32> {
     })
 }
 
+/// What the table of strides ([`victory_shader::emit::SLOT_STRIDES`]) says
+/// of a slot that holds `view`: a buffer view's bytes per element, the mark
+/// of a constant buffer view, or 0.
+fn slot_entry(view: Option<&View>) -> u32 {
+    match view {
+        Some(View::Constant(..)) => victory_shader::emit::SLOT_CONSTANTS,
+        view => view.and_then(view_stride).unwrap_or(0),
+    }
+}
+
 /// The console descriptor a translated shader would read for the title's
 /// `view`, for the descriptor-words table ([`HostHeap::words`]): a buffer
 /// view's title address, stride field and records; an image view's first
@@ -989,6 +999,27 @@ mod words_tests {
         d[5] = 1;
         let s = texture_shape(Some(d), &texture(16, 16, 6, 1), false, 0);
         assert!(matches!(s, Shape::Image { depth: 6, levels: 1, ty: ImageType::Cube, .. }), "{s:?}");
+    }
+
+    /// The table of strides marks constant buffer views apart from buffer
+    /// views and from slots that hold neither.
+    #[test]
+    fn slot_entries_tell_constant_buffers_from_buffers_and_the_rest() {
+        assert_eq!(
+            slot_entry(Some(&View::Constant(0x1_0000, 256))),
+            victory_shader::emit::SLOT_CONSTANTS
+        );
+        // A structured buffer view of 16-byte elements: its stride.
+        let mut buffer = [0u32; 10];
+        buffer[1] = D3D12_SRV_DIMENSION_BUFFER.0 as u32;
+        buffer[7] = 16;
+        assert_eq!(slot_entry(Some(&View::Shader(0, Some(buffer)))), 16);
+        // A texture view, a sampler and an empty slot: nothing.
+        let mut texture = buffer;
+        texture[1] = D3D12_SRV_DIMENSION_TEXTURE2D.0 as u32;
+        assert_eq!(slot_entry(Some(&View::Shader(0, Some(texture)))), 0);
+        assert_eq!(slot_entry(Some(&View::Sampler([0; 13]))), 0);
+        assert_eq!(slot_entry(None), 0);
     }
 
     #[test]
@@ -2049,7 +2080,7 @@ impl HostHeap {
         {
             // SAFETY: inside the mapping; shaders read it while we write (a
             // dword, either value is one the slot had).
-            unsafe { (*data as *mut u32).add(index as usize).write_volatile(stride.unwrap_or(0)) };
+            unsafe { (*data as *mut u32).add(index as usize).write_volatile(slot_entry(view)) };
             // The title address of the buffer view, after the strides
             // (`victory_shader::emit::SLOT_ADDRESSES`): low dword, then high.
             let address = view
