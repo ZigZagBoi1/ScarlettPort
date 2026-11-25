@@ -6893,7 +6893,7 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
 mod title_memory_io {
     use super::{copy_mapped, write_mapped};
     use windows_sys::Win32::System::Memory::{
-        MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
+        MEM_COMMIT, MEM_DECOMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
     };
 
     const PAGE: usize = 4096;
@@ -6924,6 +6924,23 @@ mod title_memory_io {
         // SAFETY: the two committed pages of `region`.
         let written = unsafe { std::slice::from_raw_parts(base, 2 * PAGE) };
         assert!(written.iter().all(|&b| b == 0xab));
+        release(base);
+    }
+
+    #[test]
+    fn write_mapped_resumes_after_an_unmapped_page() {
+        let base = region();
+        let mut data = vec![11u8; 3 * PAGE];
+        data[2 * PAGE..].fill(22);
+        // SAFETY: region reserves all three pages and commits the first two.
+        unsafe {
+            let last = base.add(2 * PAGE);
+            assert_eq!(VirtualAlloc(last.cast(), PAGE, MEM_COMMIT, PAGE_READWRITE), last.cast());
+            assert_ne!(VirtualFree(base.add(PAGE).cast(), PAGE, MEM_DECOMMIT), 0);
+            write_mapped(base, data.as_ptr(), data.len());
+            assert_eq!(std::slice::from_raw_parts(base, PAGE), &data[..PAGE]);
+            assert_eq!(std::slice::from_raw_parts(last, PAGE), &data[2 * PAGE..]);
+        }
         release(base);
     }
 
