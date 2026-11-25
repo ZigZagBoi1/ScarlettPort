@@ -11,7 +11,7 @@
 # It does not include the ScarlettPort naming changes (version resource, window caption prefix).
 #
 diff --git a/Cargo.lock b/Cargo.lock
-index bab4a7e..a31d9bd 100644
+index bab4a7e..11a3acb 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -669,6 +669,7 @@ dependencies = [
@@ -44,7 +44,14 @@ index bab4a7e..a31d9bd 100644
   "victory-formats",
   "victory-gpu",
   "victory-loader",
-@@ -754,6 +760,7 @@ dependencies = [
+@@ -748,12 +754,14 @@ dependencies = [
+  "tempfile",
+  "tracing",
+  "victory-core",
++ "windows-sys",
+ ]
+
+ [[package]]
  name = "victory-shader"
  version = "0.1.0"
  dependencies = [
@@ -734,7 +741,7 @@ index 0000000..b603078
 +    Ok(())
 +}
 diff --git a/apps/victory/src/translate.rs b/apps/victory/src/translate.rs
-index 1d13ae2..0dbd1a9 100644
+index 1d13ae2..164f713 100644
 --- a/apps/victory/src/translate.rs
 +++ b/apps/victory/src/translate.rs
 @@ -293,6 +293,7 @@ pub fn run(
@@ -745,10 +752,30 @@ index 1d13ae2..0dbd1a9 100644
      let mut lines = t.lines;
      lines.sort();
      for l in lines {
-@@ -306,6 +307,266 @@ pub fn run(
+@@ -306,6 +307,297 @@ pub fn run(
      Ok(())
  }
  
++// Most large files in a dump have no shader containers. Scan them in a reusable
++// buffer before allocating the entire file for sources(). Both signatures can
++// occur anywhere, including across a read boundary.
++fn has_shader_marker(mut input: impl std::io::Read, buf: &mut [u8]) -> std::io::Result<bool> {
++    let mut carry = 0;
++    loop {
++        let n = input.read(&mut buf[carry..])?;
++        if n == 0 {
++            return Ok(false);
++        }
++        let end = carry + n;
++        let chunk = &buf[..end];
++        if victory_game::sgd5::is_sgd5(chunk) || memchr::memmem::find(chunk, b"DXBC").is_some() {
++            return Ok(true);
++        }
++        carry = end.min(3);
++        buf.copy_within(end - carry..end, 0);
++    }
++}
++
 +/// `victory warm`: fills the caches a run reads (`Command::Warm`).
 +pub fn warm(paths: Vec<PathBuf>, jobs: Option<usize>, pipelines: bool, incremental: bool, verify_all: bool) -> Result<()> {
 +    let paths = crate::default_paths(paths)?;
@@ -761,10 +788,21 @@ index 1d13ae2..0dbd1a9 100644
 +    let seen = Mutex::new(HashSet::new());
 +    let [done, refused, made, unmade] = [const { AtomicUsize::new(0) }; 4];
 +    let started = std::time::Instant::now();
++    let mut scan_buf = vec![0; 1024 * 1024];
 +    for root in &paths {
 +        for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
-+            if !entry.file_type().is_file() || entry.metadata().map_or(0, |m| m.len()) > MAX_FILE {
++            if !entry.file_type().is_file() {
 +                continue;
++            }
++            let size = entry.metadata().map_or(0, |m| m.len());
++            if size > MAX_FILE {
++                continue;
++            }
++            if size > scan_buf.len() as u64 {
++                let Ok(file) = std::fs::File::open(entry.path()) else { continue };
++                if matches!(has_shader_marker(file, &mut scan_buf), Ok(false)) {
++                    continue;
++                }
 +            }
 +            let Ok(data) = std::fs::read(entry.path()) else {
 +                continue;
@@ -1012,7 +1050,7 @@ index 1d13ae2..0dbd1a9 100644
  fn translate(
      source: &Source,
      path: &Path,
-@@ -334,7 +595,53 @@ fn translate(
+@@ -334,7 +626,53 @@ fn translate(
      if !only.is_empty() && !only.iter().any(|o| hash.starts_with(o.as_str())) {
          return;
      }
@@ -1066,7 +1104,7 @@ index 1d13ae2..0dbd1a9 100644
      t.containers += 1;
      let Ok(container) = Container::parse(&bytes) else {
          return t.fail("no DXIL part (SM5 or older)".into(), example);
-@@ -380,7 +687,7 @@ fn translate(
+@@ -380,7 +718,7 @@ fn translate(
      // has them (`.cdxil`), to work on a translator gap offline
      let dump = std::env::var_os("VICTORY_FAIL_DUMP");
      let before: Option<BTreeMap<String, usize>> = dump.as_ref().map(|_| t.failed.iter().map(|(k, v)| (k.clone(), v.0)).collect());
@@ -1075,7 +1113,7 @@ index 1d13ae2..0dbd1a9 100644
      if let (Some(dir), Some(before)) = (dump, before) {
          for (reason, (n, _)) in &t.failed {
              let was = before.get(reason).copied().unwrap_or(0);
-@@ -393,7 +700,7 @@ fn translate(
+@@ -393,7 +731,7 @@ fn translate(
      }
  }
  
@@ -1084,7 +1122,7 @@ index 1d13ae2..0dbd1a9 100644
      for p in programs {
          t.programs += 1;
          match victory_shader::spill::build(&p) {
-@@ -423,7 +730,7 @@ fn translate_programs(container: &Container, programs: Vec<NativeProgram>, examp
+@@ -423,7 +761,7 @@ fn translate_programs(container: &Container, programs: Vec<NativeProgram>, examp
                  let graphics = matches!(p.stage, HwStage::Vs | HwStage::Ps);
                  let compute = p.stage == HwStage::Cs;
                  let mut raised = None;
@@ -1093,7 +1131,7 @@ index 1d13ae2..0dbd1a9 100644
                      t.io_programs += usize::from(graphics);
                      match io::raise(&program, &p) {
                          Ok(r) => {
-@@ -457,7 +764,8 @@ fn translate_programs(container: &Container, programs: Vec<NativeProgram>, examp
+@@ -457,7 +795,8 @@ fn translate_programs(container: &Container, programs: Vec<NativeProgram>, examp
                  if let (Some(r), Some(i), Some(s)) = (res, raised, structured) {
                      let label = || format!("{} {:?}", example(), p.stage);
                      *counter(t, p.stage, 0) += 1;
@@ -1103,7 +1141,7 @@ index 1d13ae2..0dbd1a9 100644
                          Ok(shader) => {
                              census_line(&label(), &p, &program, &shader);
                              *counter(t, p.stage, 1) += 1;
-@@ -550,7 +858,11 @@ fn check(
+@@ -550,7 +889,11 @@ fn check(
              &shader.dxil,
          );
      }
@@ -1116,6 +1154,28 @@ index 1d13ae2..0dbd1a9 100644
          let made = match shader.stage {
              HwStage::Vs => h.pipeline(&shader, stub_ps).map(drop),
              HwStage::Cs => h.compute_pipeline(&shader).map(drop),
+@@ -783,3 +1126,21 @@ fn tally_structured(program: &ir::Program, s: &structure::Structured, t: &mut Ta
+ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+     m.lock().unwrap_or_else(|e| e.into_inner())
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::has_shader_marker;
++
++    #[test]
++    fn shader_scan_preserves_markers_across_reads() {
++        for marker in [b"SGD5", b"DXBC"] {
++            for offset in 0..20 {
++                let mut file = vec![0; offset];
++                file.extend(marker);
++                assert!(has_shader_marker(file.as_slice(), &mut [0; 8]).unwrap());
++                file.pop();
++                assert!(!has_shader_marker(file.as_slice(), &mut [0; 8]).unwrap());
++            }
++        }
++    }
++}
 diff --git a/crates/victory-core/Cargo.toml b/crates/victory-core/Cargo.toml
 index 19f69d5..52aaa9a 100644
 --- a/crates/victory-core/Cargo.toml
@@ -9131,10 +9191,10 @@ index affa682..7281990 100644
  /// A specific build of the title executable we know how to run.
 diff --git a/crates/victory-game/src/pso_cache.rs b/crates/victory-game/src/pso_cache.rs
 new file mode 100644
-index 0000000..04eeb8e
+index 0000000..e46d9a9
 --- /dev/null
 +++ b/crates/victory-game/src/pso_cache.rs
-@@ -0,0 +1,454 @@
+@@ -0,0 +1,461 @@
 +//! The title's precompiled pipelines: `platform:/shaders/v2.d3d12PipelineCache`
 +//! (the title appends the extension at title+0x554cc50 and loads the file
 +//! at title+0x248e070). It is the last file of the shader archive, stored as
@@ -9377,9 +9437,10 @@ index 0000000..04eeb8e
 +/// whose first unpacks to a cache header, each next stream starting at most
 +/// 64 bytes after the end of the one before.
 +pub fn find_in_archive(archive: &[u8]) -> Option<Vec<u8>> {
-+    let mut from = 0;
-+    while let Some(at) = memchr::memmem::find(&archive[from..], &[0x78]).map(|p| from + p) {
-+        from = at + 1;
++    for at in memchr::memchr_iter(0x78, archive) {
++        if !zlib_header_at(archive, at) {
++            continue;
++        }
 +        let Some((first, _)) = inflate_one(&archive[at..], 0x80) else {
 +            continue;
 +        };
@@ -9389,6 +9450,12 @@ index 0000000..04eeb8e
 +        return chain(archive, at);
 +    }
 +    None
++}
++
++fn zlib_header_at(bytes: &[u8], at: usize) -> bool {
++    bytes.get(at..at + 2).is_some_and(|h| {
++        h[0] == 0x78 && u16::from_be_bytes([h[0], h[1]]) % 31 == 0
++    })
 +}
 +
 +/// The streams from `at` on, until the header's size is reached.
@@ -9406,7 +9473,7 @@ index 0000000..04eeb8e
 +        }
 +        let next = at + used;
 +        at = (next..(next + 64).min(archive.len().saturating_sub(1)))
-+            .find(|&i| archive[i] == 0x78 && (u16::from(archive[i]) << 8 | u16::from(archive[i + 1])) % 31 == 0)?;
++            .find(|&i| zlib_header_at(archive, i))?;
 +    }
 +    (out.len() == want).then_some(out)
 +}
@@ -25297,10 +25364,10 @@ index 0000000..833f654
 +}
 diff --git a/crates/victory-gpu/src/pipeline/precompiled.rs b/crates/victory-gpu/src/pipeline/precompiled.rs
 new file mode 100644
-index 0000000..57f8ba3
+index 0000000..d01033c
 --- /dev/null
 +++ b/crates/victory-gpu/src/pipeline/precompiled.rs
-@@ -0,0 +1,772 @@
+@@ -0,0 +1,841 @@
 +//! Precompiled pipelines: device methods 0x1c8 (graphics) and 0x218
 +//! (compute), the console's `DeserializeGraphicsPipelineStateX` and
 +//! `DeserializeComputePipelineStateX` (slots 57 and 67; 56 and 66 serialise).
@@ -25767,6 +25834,50 @@ index 0000000..57f8ba3
 +    pub left_out: usize,
 +}
 +
++// Each launcher batch runs in a new process. Keep the unpacked record table in
++// the derived-data cache, keyed by the contents of the original shader archive.
++#[cfg(windows)]
++struct PipelineTable;
++
++#[cfg(windows)]
++impl victory_pipeline::Converter for PipelineTable {
++    fn id(&self) -> &'static str { "graphics.pipeline-table" }
++    fn version(&self) -> u32 { 1 }
++
++    fn convert(&self, archive: &[u8]) -> anyhow::Result<Vec<u8>> {
++        pso_cache::find_in_archive(archive)
++            .ok_or_else(|| anyhow::anyhow!("no pipeline cache in the shader archive"))
++    }
++}
++
++#[cfg(windows)]
++fn pipeline_table(archive: &[u8], dir: Option<&std::path::Path>) -> Result<Vec<u8>, String> {
++    use victory_pipeline::{Cache, CacheKey, Converter};
++
++    let extract = || PipelineTable.convert(archive).map_err(|e| e.to_string());
++    let Some(cache) = dir.and_then(|dir| Cache::open(dir).ok()) else { return extract() };
++    let key = CacheKey::new(&PipelineTable, archive);
++    cache.reclaim_staging_files(&key);
++    if let Some(mut bytes) = cache.read(&key) {
++        if let Some(size) = bytes.len().checked_sub(32) {
++            let (table, digest) = bytes.split_at(size);
++            if blake3::hash(table).as_bytes() == digest {
++                bytes.truncate(size);
++                return Ok(bytes);
++            }
++        }
++    }
++    let mut table = extract()?;
++    let size = table.len();
++    let digest = blake3::hash(&table);
++    table.extend_from_slice(digest.as_bytes());
++    if let Err(e) = cache.write(&key, &table) {
++        tracing::warn!(error = %e, "could not cache the extracted graphics pipeline table");
++    }
++    table.truncate(size);
++    Ok(table)
++}
++
 +/// Offline: makes the host pipeline of every graphics record of the
 +/// title's pipeline cache (found in the shader archive `archive`) into
 +/// the pipeline library, so that a run finds them there, at the key a
@@ -25795,7 +25906,7 @@ index 0000000..57f8ba3
 +    }
 +    let shaders = pack::use_blocking(archive, index).map_err(|e| format!("shader archive {}: {e}", archive.display()))?;
 +    let bytes = std::fs::read(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
-+    let file = pso_cache::find_in_archive(&bytes).ok_or("no pipeline cache in the shader archive")?;
++    let file = pipeline_table(&bytes, index.and_then(std::path::Path::parent))?;
 +    drop(bytes);
 +    let cache = pso_cache::Cache::parse(&file)?;
 +    // The record numbers to make, in order.
@@ -25889,6 +26000,31 @@ index 0000000..57f8ba3
 +pub(crate) mod tests {
 +    use super::*;
 +    use crate::object::{S_OK, slot};
++
++    #[cfg(windows)]
++    #[test]
++    fn cached_pipeline_table_follows_the_archive_and_repairs_corruption() {
++        use victory_pipeline::{Cache, CacheKey};
++        let dir = tempfile::tempdir().unwrap();
++        let path = Some(dir.path());
++        let cache = Cache::open(dir.path()).unwrap();
++        let mut table = vec![0; 0x80];
++        table[..4].copy_from_slice(&pso_cache::MAGIC.to_le_bytes());
++        for build in [b'A', b'B'] {
++            table[4] = build;
++            let archive = miniz_oxide::deflate::compress_to_vec_zlib(&table, 6);
++            let key = CacheKey::new(&PipelineTable, &archive);
++            assert!(cache.read(&key).is_none());
++            assert_eq!(pipeline_table(&archive, path).unwrap(), table);
++            let original = cache.read(&key).unwrap();
++            let mut damaged = original.clone();
++            damaged[4] ^= 1;
++            cache.write(&key, &damaged).unwrap();
++            assert_eq!(pipeline_table(&archive, path).unwrap(), table);
++            assert_eq!(cache.read(&key).unwrap(), original);
++            assert_eq!(pipeline_table(&archive, None).unwrap(), table);
++        }
++    }
 +
 +    /// A container with only a `HASH` part of `digest` and some code bytes.
 +    pub(crate) fn container_with_hash(digest: [u8; 16], code: &[u8]) -> Vec<u8> {
@@ -28153,7 +28289,7 @@ index 2367d8b..a9b9f17 100644
 +    }
  }
 diff --git a/crates/victory-gpu/src/shader_cache.rs b/crates/victory-gpu/src/shader_cache.rs
-index eabd0f3..40eeb49 100644
+index eabd0f3..434e0ad 100644
 --- a/crates/victory-gpu/src/shader_cache.rs
 +++ b/crates/victory-gpu/src/shader_cache.rs
 @@ -1,29 +1,114 @@
@@ -28378,7 +28514,7 @@ index eabd0f3..40eeb49 100644
          let limit = victory_shader::emit::loop_limit();
          if limit != victory_shader::emit::DEFAULT_LOOP_LIMIT {
              tracing::warn!(
-@@ -51,106 +207,380 @@ fn build() -> &'static [u8; 32] {
+@@ -51,106 +207,389 @@ fn build() -> &'static [u8; 32] {
                  "VICTORY_SHADER_LOOP_LIMIT: translated loops stop sooner"
              );
          }
@@ -28502,8 +28638,7 @@ index eabd0f3..40eeb49 100644
 -        None => translate(container),
 +    if !output_key() {
 +        return legacy::host_shader(container);
-     }
-+    use victory_shader::emit;
++    }
 +    if let Some(s) = stand_in(container) {
 +        return Ok(s);
 +    }
@@ -28511,13 +28646,7 @@ index eabd0f3..40eeb49 100644
 +    // per-program switches take.
 +    let hash = blake3::hash(container).to_hex()[..16].to_owned();
 +    let r = match CACHE.get() {
-+        Some(cache) => {
-+            // (`wave64_retried` second: it parses the container, and only a
-+            // program a list names, or with `VICTORY_WAVE_DEEP_SKIPS=0`
-+            // any, gets there)
-+            let off = !emit::deep_skips_allowed(Some(&hash)) && emit::wave64_retried(container);
-+            cached(cache, &program_key(build(), off), container, &hash)
-+        }
++        Some(cache) => cached(cache, &translation_key(build(), container, &hash), container, &hash),
 +        None => translate(container, &hash).and_then(|(payload, _)| decode(&payload).ok_or_else(damaged)),
 +    };
 +    match r {
@@ -28528,13 +28657,8 @@ index eabd0f3..40eeb49 100644
 +
 +fn damaged() -> String {
 +    "a translation that does not decode".to_owned()
- }
- 
--/// The cache entry's converter: the build and the container in, the
--/// encoded translation out. `ran` tells a miss from a hit.
--struct Translate<F> {
--    translate: F,
--    ran: AtomicBool,
++}
++
 +/// The translation of `container` by this translator: encoded, with the rules it went through.
 +fn translate(container: &[u8], hash: &str) -> Result<(Vec<u8>, Rules), String> {
 +    use victory_shader::{emit, rules};
@@ -28546,11 +28670,8 @@ index eabd0f3..40eeb49 100644
 +        .map(|rule| (rule.to_owned(), rules::fingerprint(rule).unwrap_or([0; 32])))
 +        .collect();
 +    Ok((encode(&shader), stamp))
- }
- 
--impl<F: Fn(&[u8]) -> Result<HostShader, String> + Send + Sync> Converter for Translate<F> {
--    fn id(&self) -> &'static str {
--        "shader.dxil"
++}
++
 +/// The stand-ins of `victory_shader::emit::stand_in`, each opt-in:
 +/// `VICTORY_AMBIENT_STUB=1` (the diffuse illumination's last pass writes
 +/// `VICTORY_AMBIENT_STUB_VALUE`, 0.1 by default) and
@@ -28605,12 +28726,14 @@ index eabd0f3..40eeb49 100644
 +            }
 +        }
      }
--    fn version(&self) -> u32 {
--        // The build fingerprint in the input does the versioning.
--        1
 +    None
-+}
-+
+ }
+
+-/// The cache entry's converter: the build and the container in, the
+-/// encoded translation out. `ran` tells a miss from a hit.
+-struct Translate<F> {
+-    translate: F,
+-    ran: AtomicBool,
 +/// `VICTORY_EXPOSURE_STUB=1`: the auto-exposure average, when it does not
 +/// translate, replaced by a stand-in writing a constant luminance
 +/// (`victory_shader::emit::exposure`; `VICTORY_EXPOSURE_STUB_VALUE`, 0.18 by
@@ -28621,11 +28744,7 @@ index eabd0f3..40eeb49 100644
 +    use victory_shader::emit::exposure;
 +    if std::env::var("VICTORY_EXPOSURE_STUB").ok()?.trim() != "1" {
 +        return None;
-     }
--    fn convert(&self, input: &[u8]) -> anyhow::Result<Vec<u8>> {
--        self.ran.store(true, Ordering::Relaxed);
--        let shader = (self.translate)(&input[32..]).map_err(anyhow::Error::msg)?;
--        Ok(encode(&shader))
++    }
 +    let hash = blake3::hash(container).to_hex()[..16].to_owned();
 +    let listed = match std::env::var("VICTORY_EXPOSURE_STUB_HASHES") {
 +        Ok(v) => v
@@ -28650,8 +28769,11 @@ index eabd0f3..40eeb49 100644
 +            None
 +        }
 +    }
-+}
-+
+ }
+
+-impl<F: Fn(&[u8]) -> Result<HostShader, String> + Send + Sync> Converter for Translate<F> {
+-    fn id(&self) -> &'static str {
+-        "shader.dxil"
 +/// The key of one program's entries: the settings', mixed with the
 +/// per-program decision when the program is kept out of the wave64 form
 +/// "without skips, scalars followed" (`VICTORY_WAVE_DEEP_SKIPS_NOT`,
@@ -28663,10 +28785,30 @@ index eabd0f3..40eeb49 100644
 +fn program_key(build: &[u8; 32], deep_skips_off: bool) -> [u8; 32] {
 +    if !deep_skips_off {
 +        return *build;
-+    }
+     }
+-    fn version(&self) -> u32 {
+-        // The build fingerprint in the input does the versioning.
+-        1
 +    let mut h = blake3::Hasher::new();
 +    h.update(build);
 +    h.update(b"VICTORY_WAVE_DEEP_SKIPS off for this program");
++    *h.finalize().as_bytes()
++}
++
++fn translation_key(build: &[u8; 32], container: &[u8], hash: &str) -> [u8; 32] {
++    use victory_shader::emit;
++    let off = !emit::deep_skips_allowed(Some(hash)) && emit::wave64_retried(container);
++    let key = program_key(build, off);
++    if !emit::activate_rays_cleanup(hash) {
++        return key;
+     }
+-    fn convert(&self, input: &[u8]) -> anyhow::Result<Vec<u8>> {
+-        self.ran.store(true, Ordering::Relaxed);
+-        let shader = (self.translate)(&input[32..]).map_err(anyhow::Error::msg)?;
+-        Ok(encode(&shader))
++    let mut h = blake3::Hasher::new();
++    h.update(&key);
++    h.update(b"ActivateRays module cleanup v1");
 +    *h.finalize().as_bytes()
 +}
 +
@@ -28679,12 +28821,10 @@ index eabd0f3..40eeb49 100644
      }
 +    CACHE
 +        .get()
-+        .is_some_and(|cache| has_entry(cache, build(), container))
-+}
-+
-+/// Whether `cache` holds an entry for `container` under the settings `context`.
-+fn has_entry(cache: &Cache, context: &[u8; 32], container: &[u8]) -> bool {
-+    cache.path_for(&stamped::entry_key(context, container)).exists()
++        .is_some_and(|cache| {
++            let hash = blake3::hash(container).to_hex();
++            has_entry(cache, &translation_key(build(), container, &hash[..16]), container)
++        })
  }
  
 -fn cached(
@@ -28697,6 +28837,11 @@ index eabd0f3..40eeb49 100644
 -    let converter = Translate {
 -        translate,
 -        ran: AtomicBool::new(false),
++/// Whether `cache` holds an entry for `container` under the settings `context`.
++fn has_entry(cache: &Cache, context: &[u8; 32], container: &[u8]) -> bool {
++    cache.path_for(&stamped::entry_key(context, container)).exists()
++}
++
 +/// The translation of `container` under the settings `context`, as the module notes say:
 +/// from its entry, which is brought up to date now or in the background, else translated
 +/// and stored.
@@ -28750,12 +28895,8 @@ index eabd0f3..40eeb49 100644
 +            let (payload, rules) = translate(container, hash)?;
 +            let _ = stamped::store(cache, &key, source(), rules, payload.clone());
 +            decode(&payload).ok_or_else(damaged)
-         }
--        tracing::debug!(path = %path.display(), "unreadable shader cache entry; translating again");
--        let _ = std::fs::remove_file(&path);
-     }
--    MISSES.fetch_add(1, Ordering::Relaxed);
--    (converter.translate)(container)
++        }
++    }
 +}
 +
 +fn outcome(found: Revalidated) -> usize {
@@ -28812,7 +28953,9 @@ index eabd0f3..40eeb49 100644
 +        if QUEUED.fetch_add(container.len(), Ordering::Relaxed) + container.len() > QUEUED_MAX {
 +            QUEUED.fetch_sub(container.len(), Ordering::Relaxed);
 +            return;
-+        }
+         }
+-        tracing::debug!(path = %path.display(), "unreadable shader cache entry; translating again");
+-        let _ = std::fs::remove_file(&path);
 +        let job = Job { key: *key, container: container.to_vec(), hash: hash.to_owned() };
 +        let sent = queue().lock().ok().and_then(|q| q.as_ref().map(|tx| tx.send(job).is_ok()));
 +        if sent != Some(true) {
@@ -28835,11 +28978,13 @@ index eabd0f3..40eeb49 100644
 +        };
 +        count(outcome(found));
 +        tracing::debug!(hash = %job.hash, ?found, "shader of another translator revalidated");
-+    }
+     }
+-    MISSES.fetch_add(1, Ordering::Relaxed);
+-    (converter.translate)(container)
  }
  
  const MAGIC: &[u8; 4] = b"VSH1";
-@@ -359,49 +789,78 @@ mod tests {
+@@ -359,49 +798,86 @@ mod tests {
          }
      }
  
@@ -28910,13 +29055,12 @@ index eabd0f3..40eeb49 100644
 -        assert_eq!(cached(&cache, &[8; 32], container, translate), Ok(shader()));
 -        assert_eq!(runs.load(Ordering::Relaxed), 2);
 +    #[test]
-+    fn a_program_kept_out_of_the_deep_skips_form_has_a_key_of_its_own() {
-+        let build = [7u8; 32];
-+        assert_eq!(program_key(&build, false), build, "allowed: the settings' key, as without lists");
-+        let off = program_key(&build, true);
-+        assert_ne!(off, build);
-+        assert_eq!(program_key(&build, true), off, "the same decision, the same key");
-+        assert_ne!(program_key(&[8; 32], true), off, "and still the settings'");
++    fn activate_rays_uses_a_separate_key_only_with_targeted_cleanup() {
++        let build = [42; 32];
++        assert_eq!(translation_key(&build, b"", "39f0e9aeb156a61d"), build);
++        let target = translation_key(&build, b"", "39f0e9aeb156a61c");
++        assert_eq!(target != build, std::env::var_os("VICTORY_SHADER_OPT").is_none());
++    }
  
 -        // A damaged entry is a miss, translated and stored again.
 -        for e in walk(dir.path()) {
@@ -28940,6 +29084,15 @@ index eabd0f3..40eeb49 100644
 -            } else {
 -                files.push(e.path());
 -            }
++    #[test]
++    fn a_program_kept_out_of_the_deep_skips_form_has_a_key_of_its_own() {
++        let build = [7u8; 32];
++        assert_eq!(program_key(&build, false), build, "allowed: the settings' key, as without lists");
++        let off = program_key(&build, true);
++        assert_ne!(off, build);
++        assert_eq!(program_key(&build, true), off, "the same decision, the same key");
++        assert_ne!(program_key(&[8; 32], true), off, "and still the settings'");
++
 +        // So only the program whose decision changed has another entry.
 +        let dir = tempfile::tempdir().unwrap();
 +        let cache = Cache::open(dir.path()).unwrap();
@@ -28957,10 +29110,10 @@ index eabd0f3..40eeb49 100644
      #[test]
 diff --git a/crates/victory-gpu/src/shader_cache/legacy.rs b/crates/victory-gpu/src/shader_cache/legacy.rs
 new file mode 100644
-index 0000000..e38a6bb
+index 0000000..6040810
 --- /dev/null
 +++ b/crates/victory-gpu/src/shader_cache/legacy.rs
-@@ -0,0 +1,767 @@
+@@ -0,0 +1,751 @@
 +//! The translated-shader cache as fx-final (26f8afd) has it, kept as the default of fx-cand:
 +//! keyed by the container's content and by the translator that made it. The two-level cache
 +//! that keys by settings and rule stamps (`super`) is opt-in with `VICTORY_SHADER_CACHE_KEY=output`.
@@ -29132,11 +29285,7 @@ index 0000000..e38a6bb
 +    let translate = |c: &[u8]| emit::for_program(&hash, || emit::translate(c)).map_err(|e| e.to_string());
 +    let r = match CACHE.get() {
 +        Some(cache) => {
-+            // (`wave64_retried` second: it parses the container, and only a
-+            // program a list names, or with `VICTORY_WAVE_DEEP_SKIPS=0`
-+            // any, gets there)
-+            let off = !emit::deep_skips_allowed(Some(&hash)) && emit::wave64_retried(container);
-+            cached(cache, &program_key(build(), off), container, translate)
++            cached(cache, &super::translation_key(build(), container, &hash), container, translate)
 +        }
 +        None => translate(container),
 +    };
@@ -29240,30 +29389,18 @@ index 0000000..e38a6bb
 +    }
 +}
 +
-+/// The key of one program's entries: the build's, mixed with the
-+/// per-program decision when the program is kept out of the wave64 form
-+/// "without skips, scalars followed" (`VICTORY_WAVE_DEEP_SKIPS_NOT`,
-+/// `_ONLY`: `victory_shader::emit::deep_skips_allowed`). Only for a wave64
-+/// compute program on a host of 32-lane waves, the only ones it can change.
-+/// So the lists are in no key: changing one translates again only the
-+/// programs whose decision it changes, and a program allowed the form keeps
-+/// the key it had without any list.
-+fn program_key(build: &[u8; 32], deep_skips_off: bool) -> [u8; 32] {
-+    if !deep_skips_off {
-+        return *build;
-+    }
-+    let mut h = blake3::Hasher::new();
-+    h.update(build);
-+    h.update(b"VICTORY_WAVE_DEEP_SKIPS off for this program");
-+    *h.finalize().as_bytes()
-+}
++#[cfg(test)]
++use super::program_key;
 +
 +/// Whether the translation of `container` is in the cache already (nothing is read or
 +/// translated: the entry's file is looked for).
 +pub(crate) fn is_cached(container: &[u8]) -> bool {
 +    CACHE
 +        .get()
-+        .is_some_and(|cache| has_entry(cache, build(), container))
++        .is_some_and(|cache| {
++            let hash = blake3::hash(container).to_hex();
++            has_entry(cache, &super::translation_key(build(), container, &hash[..16]), container)
++        })
 +}
 +
 +/// Whether `cache` holds the translation of `container` made in context `build`.
@@ -39015,11 +39152,25 @@ index e709d11..0084a73 100644
      tracing::info!(
          base = format_args!("{:#x}", loaded.base()),
          preferred = format_args!("{:#x}", loaded.info.image_base),
+diff --git a/crates/victory-pipeline/Cargo.toml b/crates/victory-pipeline/Cargo.toml
+index f5d5ccb..573bd36 100644
+--- a/crates/victory-pipeline/Cargo.toml
++++ b/crates/victory-pipeline/Cargo.toml
+@@ -13,6 +13,9 @@ anyhow.workspace = true
+ blake3.workspace = true
+ tracing.workspace = true
+
++[target.'cfg(windows)'.dependencies]
++windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
++
+ [dev-dependencies]
+ tempfile.workspace = true
+
 diff --git a/crates/victory-pipeline/src/cache.rs b/crates/victory-pipeline/src/cache.rs
-index 81e57de..95fb929 100644
+index 81e57de..85d086c 100644
 --- a/crates/victory-pipeline/src/cache.rs
 +++ b/crates/victory-pipeline/src/cache.rs
-@@ -55,23 +55,41 @@ impl Cache {
+@@ -55,25 +55,63 @@ impl Cache {
          let output = converter
              .convert(input)
              .with_context(|| format!("converter {} v{}", converter.id(), converter.version()))?;
@@ -39036,11 +39187,30 @@ index 81e57de..95fb929 100644
 -        let published = written.and_then(|()| std::fs::rename(&tmp, &path));
 -        if published.is_err() {
 -            let _ = std::fs::remove_file(&tmp);
--        }
--        published?;
 +        publish(&path, &output)?;
-         Ok(path)
-     }
++        Ok(path)
++    }
++
++    /// Reclaims partial writes from terminated processes in this key's cache directory.
++    /// Called before reading a large entry so a cache hit also cleans up interrupted writes.
++    #[cfg(windows)]
++    pub fn reclaim_staging_files(&self, key: &CacheKey) {
++        let path = self.path_for(key);
++        let Ok(entries) = std::fs::read_dir(path.parent().expect("hashed path has a parent")) else { return };
++        for entry in entries.flatten() {
++            let name = entry.file_name();
++            let Some((pid, seq)) = name.to_str().and_then(|s| s.strip_prefix(".tmp-")).and_then(|s| s.split_once('-')) else {
++                continue;
++            };
++            let (Ok(owner), Ok(counter)) = (pid.parse::<u32>(), seq.parse::<u64>()) else { continue };
++            if owner != 0 && name == format!(".tmp-{owner}-{counter}").as_str()
++                && entry.file_type().is_ok_and(|t| t.is_file()) && writer_exited(owner)
++            {
++                remove_abandoned_stage(&entry.path(), owner);
++            }
+         }
+-        published?;
++    }
 +
 +    /// The stored bytes of `key`, if there are any.
 +    pub fn read(&self, key: &CacheKey) -> Option<Vec<u8>> {
@@ -39052,10 +39222,10 @@ index 81e57de..95fb929 100644
 +    pub fn write(&self, key: &CacheKey, bytes: &[u8]) -> Result<PathBuf> {
 +        let path = self.path_for(key);
 +        publish(&path, bytes)?;
-+        Ok(path)
-+    }
-+}
-+
+         Ok(path)
+     }
+ }
+
 +/// Writes `output` to `path` through a staging file in its folder.
 +fn publish(path: &Path, output: &[u8]) -> Result<()> {
 +    let dir = path.parent().expect("hashed path has a parent");
@@ -39073,10 +39243,55 @@ index 81e57de..95fb929 100644
 +        let _ = std::fs::remove_file(&tmp);
 +    }
 +    Ok(published?)
++}
++
+ fn tempfile_in(dir: &Path) -> PathBuf {
+     use std::sync::atomic::{AtomicU64, Ordering};
+     static COUNTER: AtomicU64 = AtomicU64::new(0);
+@@ -81,6 +119,42 @@ fn tempfile_in(dir: &Path) -> PathBuf {
+     dir.join(format!(".tmp-{}-{n}", std::process::id()))
  }
  
- fn tempfile_in(dir: &Path) -> PathBuf {
-@@ -119,6 +137,25 @@ mod tests {
++#[cfg(windows)]
++fn writer_exited(pid: u32) -> bool {
++    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, WAIT_OBJECT_0};
++    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
++    // SAFETY: we only query the process and close the handle returned by OpenProcess.
++    unsafe {
++        let process = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
++        if process.is_null() {
++            return GetLastError() == ERROR_INVALID_PARAMETER;
++        }
++        let exited = WaitForSingleObject(process, 0) == WAIT_OBJECT_0;
++        CloseHandle(process);
++        exited
++    }
++}
++
++#[cfg(windows)]
++fn remove_abandoned_stage(path: &Path, pid: u32) {
++    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
++    use windows_sys::Win32::Storage::FileSystem::{
++        DELETE, FILE_DISPOSITION_INFO, FILE_FLAG_OPEN_REPARSE_POINT, FileDispositionInfo, SetFileInformationByHandle,
++    };
++    // Pin this directory entry before rechecking the PID. A concurrent cleaner or a
++    // process reusing the PID must not replace the file between the check and deletion.
++    let Ok(file) = std::fs::OpenOptions::new().access_mode(DELETE).share_mode(0)
++        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(path) else { return };
++    if writer_exited(pid) {
++        let info = FILE_DISPOSITION_INFO { DeleteFile: true };
++        // SAFETY: file owns the handle and info has the layout required by FileDispositionInfo.
++        unsafe {
++            SetFileInformationByHandle(file.as_raw_handle(), FileDispositionInfo,
++                (&raw const info).cast(), size_of::<FILE_DISPOSITION_INFO>() as u32);
++        }
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -119,6 +193,25 @@ mod tests {
          assert_eq!(conv.runs.load(Ordering::Relaxed), 1);
      }
  
@@ -39102,6 +39317,40 @@ index 81e57de..95fb929 100644
      #[test]
      fn failed_publication_removes_the_staging_file() {
          let tmp = tempfile::tempdir().unwrap();
+@@ -138,6 +231,33 @@ mod tests {
+         );
+     }
+
++    #[cfg(windows)]
++    #[test]
++    fn a_retry_reclaims_only_a_dead_writers_stages() {
++        use std::process::{Command, Stdio};
++        let tmp = tempfile::tempdir().unwrap();
++        let cache = Cache::open(tmp.path()).unwrap();
++        let conv = Upper { version: 1, runs: AtomicUsize::new(0) };
++        let key = CacheKey::new(&conv, b"table");
++        let path = cache.write(&key, b"published").unwrap();
++        let shard = path.parent().unwrap();
++        let mut child = Command::new("cmd.exe").args(["/d", "/q"])
++            .stdin(Stdio::piped()).stdout(Stdio::null()).spawn().unwrap();
++        let stage = shard.join(format!(".tmp-{}-7", child.id()));
++        let unrelated = stage.with_extension("backup");
++        std::fs::write(&stage, b"partial table").unwrap();
++        std::fs::write(&unrelated, b"keep").unwrap();
++        cache.reclaim_staging_files(&key);
++        let live_stage = stage.is_file();
++        child.kill().unwrap();
++        child.wait().unwrap();
++        assert!(live_stage);
++        cache.reclaim_staging_files(&key);
++        assert!(!stage.exists());
++        assert_eq!(cache.read(&key).unwrap(), b"published");
++        assert_eq!(std::fs::read(unrelated).unwrap(), b"keep");
++    }
++
+     #[test]
+     fn version_bump_invalidates() {
+         let v1 = Upper {
 diff --git a/crates/victory-pipeline/src/lib.rs b/crates/victory-pipeline/src/lib.rs
 index c417e5c..639322e 100644
 --- a/crates/victory-pipeline/src/lib.rs
@@ -43734,7 +43983,7 @@ index 600139a..e4b01d7 100644
 +    }
 +}
 diff --git a/crates/victory-shader/src/emit/mod.rs b/crates/victory-shader/src/emit/mod.rs
-index b667241..5835164 100644
+index b667241..aad9f71 100644
 --- a/crates/victory-shader/src/emit/mod.rs
 +++ b/crates/victory-shader/src/emit/mod.rs
 @@ -1,5 +1,7 @@
@@ -43792,13 +44041,16 @@ index b667241..5835164 100644
  
  use crate::dxbc::{Container, FourCC};
  use crate::native::{HwStage, NativeProgram, RootType};
-@@ -110,12 +123,13 @@ use crate::{ShaderError, io, ir, resource, structure};
+@@ -110,12 +123,16 @@ use crate::{ShaderError, io, ir, resource, structure};
  
  pub use bitcode::census;
  pub use sampler::StaticSampler;
 -pub use lower::set_host_max_wave;
 +pub use lower::{host_max_wave, set_host_max_wave};
 +pub use per_program::{deep_skips_allowed, for_program, wave64_retried};
++// rule-region: begin program:activate-rays-cleanup
++pub use per_program::activate_rays_cleanup;
++// rule-region: end
  pub use rect::rect_list_gs;
  pub use shader::{
 -    MEMORY_FAULTS, MEMORY_PAGES, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_FAULTS, SLOT_MEMORY, SLOT_STRIDES,
@@ -43810,7 +44062,7 @@ index b667241..5835164 100644
  };
  
  /// The loop limit without an override: 2^20.
-@@ -164,6 +178,7 @@ pub fn group_sync() -> u8 {
+@@ -164,6 +181,7 @@ pub fn group_sync() -> u8 {
      *MODE.get_or_init(|| match std::env::var("VICTORY_GROUP_SYNC").ok().as_deref().map(str::trim) {
          Some("0") => 0,
          Some("1") => 1,
@@ -43818,7 +44070,7 @@ index b667241..5835164 100644
          _ => 2,
      })
  }
-@@ -173,8 +188,12 @@ pub fn group_sync() -> u8 {
+@@ -173,8 +191,12 @@ pub fn group_sync() -> u8 {
  /// is exact, so the switch is for telling a translator fault from a
  /// clean-up fault, and for measuring what the clean-up is worth.
  /// `VICTORY_SHADER_OPT`:
@@ -43832,7 +44084,7 @@ index b667241..5835164 100644
  /// - a number (decimal or `0x` hex): those passes; 1 dead code, 2 constants
  ///   and identities, 4 one instruction for one value, 8 what a branch taken
  ///   says about its condition, 16 one read for one place within a block,
-@@ -188,16 +207,18 @@ pub fn shader_opt() -> u32 {
+@@ -188,16 +210,18 @@ pub fn shader_opt() -> u32 {
      *PASSES.get_or_init(|| parse_shader_opt(std::env::var("VICTORY_SHADER_OPT").ok().as_deref()))
  }
  
@@ -43860,7 +44112,7 @@ index b667241..5835164 100644
  }
  
  /// `VICTORY_SHADER_LOOP_LIMIT`'s value; the default when it is unset,
-@@ -271,30 +292,49 @@ pub struct UserData {
+@@ -271,30 +295,49 @@ pub struct UserData {
  /// Translates the vertex, pixel, compute or mesh program of a console
  /// shader container.
  pub fn translate(container: &[u8]) -> Result<HostShader, ShaderError> {
@@ -43922,7 +44174,7 @@ index b667241..5835164 100644
  }
  
  /// Emits a program whose earlier stages already ran.
-@@ -308,7 +348,30 @@ pub fn emit(
+@@ -308,7 +351,30 @@ pub fn emit(
  ) -> Result<HostShader, ShaderError> {
      // (what an earlier program's lowering on this thread left behind)
      lower::take_needs();
@@ -43953,7 +44205,7 @@ index b667241..5835164 100644
      // A console wave64 compute program on a host of 32-lane waves that
      // still needs 64 lanes, or whose cross-lane code sits where not every
      // lane runs: once more with its early-outs left out
-@@ -324,11 +387,14 @@ pub fn emit(
+@@ -324,11 +390,14 @@ pub fn emit(
      let exact_only = matches!(&original, Err(ShaderError::Unsupported { what, .. }) if *what == lower::MASK_ELSEWHERE);
      if stuck && native.stage == HwStage::Cs && native.wave64 && lower::host_max_wave() == 32 {
          let why = std::env::var_os("VICTORY_WAVE_WHY").is_some();
@@ -43970,7 +44222,7 @@ index b667241..5835164 100644
                  }
              }
          };
-@@ -346,7 +412,7 @@ pub fn emit(
+@@ -346,7 +415,7 @@ pub fn emit(
              Ok(()) => true,
              Err((offset, what)) => {
                  if why {
@@ -43979,7 +44231,7 @@ index b667241..5835164 100644
                  }
                  false
              }
-@@ -388,8 +454,13 @@ pub fn emit(
+@@ -388,8 +457,13 @@ pub fn emit(
                  // Every skip left out that the code after it cannot see
                  // ([`ir::without_skips`], `deep`): most of the body is then code every
                  // lane runs, where the two host waves can exchange.
@@ -43995,7 +44247,7 @@ index b667241..5835164 100644
                  let deep = if deep_on { form(ir::without_skips(p, true)) } else { None };
                  if let Some((p, st, io, res)) = &deep {
                      let again = emit_program(c, native, p, st, io, res);
-@@ -485,6 +556,7 @@ pub fn emit(
+@@ -485,6 +559,7 @@ pub fn emit(
      if !matches!(original, Err(ShaderError::Unsupported { .. })) {
          return original;
      }
@@ -44003,7 +44255,7 @@ index b667241..5835164 100644
      let edges = threading::constant_edges(p, st);
      if edges.is_empty() {
          return original;
-@@ -496,6 +568,51 @@ pub fn emit(
+@@ -496,6 +571,51 @@ pub fn emit(
      emit_program(c, native, &p, &st, &io, &res).map(|(shader, _)| shader)
  }
  
@@ -44055,7 +44307,7 @@ index b667241..5835164 100644
  /// `p` (a console wave64 compute program on a host of 32-lane waves) with the per-lane
  /// branches around its cross-lane code taken wave-wide ([`structure::structure_wide`]): the
  /// lowering names the blocks where the two host waves must meet and could not
-@@ -593,6 +710,38 @@ fn emit_program(
+@@ -593,6 +713,38 @@ fn emit_program(
              _ => 0,
          };
      }
@@ -44094,7 +44346,7 @@ index b667241..5835164 100644
      // With a conservative depth output (SV_DepthLessEqual, GreaterEqual) DXIL
      // wants the position centroid (or per sample), as DXC declares it then.
      if pixel && outputs.iter().any(|e| matches!(e.kind, 18 | 19)) {
-@@ -625,6 +774,25 @@ fn emit_program(
+@@ -625,6 +777,25 @@ fn emit_program(
          }
          _ => 0,
      };
@@ -44120,7 +44372,7 @@ index b667241..5835164 100644
      let l = lower::lower(&lower::Parts {
          native,
          p,
-@@ -635,6 +803,7 @@ fn emit_program(
+@@ -635,6 +806,7 @@ fn emit_program(
          outputs,
          prims,
          mesh_stride,
@@ -44128,7 +44380,7 @@ index b667241..5835164 100644
      })?;
      let wave_size = l.wave_size;
      let shader = HostShader {
-@@ -662,6 +831,52 @@ fn emit_program(
+@@ -662,6 +834,52 @@ fn emit_program(
      Ok((shader, wave_size))
  }
  
@@ -44181,7 +44433,7 @@ index b667241..5835164 100644
  /// The rows of an `ISG1`/`OSG1` part.
  fn signature(part: &[u8]) -> Result<Vec<container::SigElement>, ShaderError> {
      use crate::dxbc::u32_at;
-@@ -761,9 +976,11 @@ mod tests {
+@@ -761,9 +979,11 @@ mod tests {
      use super::parse_loop_limit;
  
      #[test]
@@ -44195,7 +44447,7 @@ index b667241..5835164 100644
          assert_eq!(parse_shader_opt(Some("0")), 0);
          assert_eq!(parse_shader_opt(Some(" 1 ")), 1);
          assert_eq!(parse_shader_opt(Some("0x1")), 1);
-@@ -781,6 +998,49 @@ mod tests {
+@@ -781,6 +1001,49 @@ mod tests {
              assert_eq!(parse_loop_limit(Some(bad)), LOOP_LIMIT, "{bad:?}");
          }
      }
@@ -44245,7 +44497,7 @@ index b667241..5835164 100644
      use super::container::SigElement;
      use super::shader::Shader;
      use super::*;
-@@ -848,6 +1108,94 @@ mod tests {
+@@ -848,6 +1111,94 @@ mod tests {
          assert_ne!(features & 0x200, 0, "SFI0 {features:#x}: no StencilRef");
      }
  
@@ -44340,7 +44592,7 @@ index b667241..5835164 100644
      /// A wave64 compute program that writes only EXEC's high dword
      /// (`s_mov_b32 exec_hi, 0`) before a vector instruction. The new mask was
      /// opaque and keyed by the unchanged low dword, so building its lane bit
-@@ -1313,6 +1661,7 @@ mod tests {
+@@ -1313,6 +1664,7 @@ mod tests {
              outputs: Vec::new(),
              prims: Vec::new(),
              mesh_stride: 0,
@@ -44348,7 +44600,7 @@ index b667241..5835164 100644
          })
          .unwrap();
          let mut dxil = l.dxil;
-@@ -1544,6 +1893,122 @@ mod barycentric_tests {
+@@ -1544,6 +1896,122 @@ mod barycentric_tests {
          emit(&c, &native, &p, &st, &io, &res)
      }
  
@@ -44473,10 +44725,10 @@ index b667241..5835164 100644
          let c = Container::parse(&shader.dxil).unwrap();
 diff --git a/crates/victory-shader/src/emit/per_program.rs b/crates/victory-shader/src/emit/per_program.rs
 new file mode 100644
-index 0000000..2bbd7fa
+index 0000000..d0a2f66
 --- /dev/null
 +++ b/crates/victory-shader/src/emit/per_program.rs
-@@ -0,0 +1,195 @@
+@@ -0,0 +1,237 @@
 +//! Switches that pick a translation per program, by the hash a run's log
 +//! names the shader by: the first 16 hex digits of the BLAKE3 of the
 +//! container as the title passes it (`hash=` in "shader translated" and
@@ -44529,6 +44781,26 @@ index 0000000..2bbd7fa
 +    PROGRAM.with_borrow(Clone::clone)
 +}
 +
++// rule-region: begin program:activate-rays-cleanup
++/// Clean up ActivateRays before handing its large compute program to the driver.
++/// An explicit VICTORY_SHADER_OPT still selects the passes for every program.
++pub fn activate_rays_cleanup(hash: &str) -> bool {
++    static AUTO: OnceLock<bool> = OnceLock::new();
++    hash == "39f0e9aeb156a61c"
++        && *AUTO.get_or_init(|| std::env::var_os("VICTORY_SHADER_OPT").is_none())
++}
++
++pub(super) fn module_passes(default: u32) -> u32 {
++    use super::bitcode::opt::MODULE;
++    if PROGRAM.with_borrow(|hash| hash.as_deref().is_some_and(activate_rays_cleanup)) {
++        crate::rules::note("program:activate-rays-cleanup");
++        MODULE
++    } else {
++        default
++    }
++}
++
++// rule-region: end
 +/// Whether the deep-skips form may be tried for the program whose hash is
 +/// `hash` (`None`: not known, as for a translation outside
 +/// [`for_program`]), by the switches in the module notes.
@@ -44649,6 +44921,28 @@ index 0000000..2bbd7fa
 +        assert!(decide(true, Some(&only), Some(&both), Some(B)));
 +    }
 +
++    // rule-region: begin program:activate-rays-cleanup
++    #[test]
++    fn activate_rays_cleanup_is_scoped_to_its_program() {
++        let global = super::super::shader_opt() & super::super::bitcode::opt::MODULE;
++        let target = if std::env::var_os("VICTORY_SHADER_OPT").is_none() {
++            super::super::bitcode::opt::MODULE
++        } else {
++            global
++        };
++        let passes = || module_passes(global);
++        let rule = "program:activate-rays-cleanup";
++        assert!(crate::rules::fingerprint(rule).is_some());
++        let (actual, used) = crate::rules::record(|| for_program("39f0e9aeb156a61c", passes));
++        assert_eq!(actual, target);
++        assert_eq!(used.contains(&rule), std::env::var_os("VICTORY_SHADER_OPT").is_none());
++        let (actual, used) = crate::rules::record(|| for_program("39f0e9aeb156a61d", passes));
++        assert_eq!(actual, global);
++        assert_eq!(used, [crate::rules::CORE]);
++        assert_eq!(passes(), global);
++    }
++
++    // rule-region: end
 +    #[test]
 +    fn the_program_hash_is_seen_inside_its_translation_only() {
 +        assert_eq!(current(), None);
@@ -44673,7 +44967,7 @@ index 0000000..2bbd7fa
 +    }
 +}
 diff --git a/crates/victory-shader/src/emit/shader.rs b/crates/victory-shader/src/emit/shader.rs
-index b49bc6d..1748224 100644
+index b49bc6d..4ea55c4 100644
 --- a/crates/victory-shader/src/emit/shader.rs
 +++ b/crates/victory-shader/src/emit/shader.rs
 @@ -26,6 +26,27 @@ pub const ROOT_CBV_SPACE: u32 = 1;
@@ -44786,7 +45080,7 @@ index b49bc6d..1748224 100644
          // (as `dx.op.binary` UMin: a compare and select emitted here made the bitcode invalid)
          let index = if !sampler && limit != 0 {
              let null = self.m.i32(limit);
-@@ -439,6 +516,8 @@ impl Shader {
+@@ -439,12 +516,17 @@ impl Shader {
  
      /// The finished container.
      pub fn finish(mut self) -> Vec<u8> {
@@ -44795,7 +45089,16 @@ index b49bc6d..1748224 100644
          let ud_size = (self.user_data * 4).next_multiple_of(16);
          self.fix_user_data_size(ud_size);
          // The clean-up, before anything is declared about the code: a
-@@ -762,6 +841,8 @@ impl Shader {
+         // feature whose last use it removed must not be declared (the
+         // validator compares the flags with what the code uses).
+         let passes = super::shader_opt() & super::bitcode::opt::MODULE;
++        // rule-region: begin program:activate-rays-cleanup
++        let passes = super::per_program::module_passes(passes);
++        // rule-region: end
+         if passes != 0 {
+             self.m.optimise(passes);
+             let used = self.m.usage();
+@@ -762,6 +844,8 @@ impl Shader {
  
          let bitcode = self.m.write();
          super::bitcode::census::note(&self.m, &bitcode);
@@ -44804,7 +45107,7 @@ index b49bc6d..1748224 100644
          let mut dxil = Vec::with_capacity(24 + bitcode.len());
          dxil.extend((kind << 16 | 0x66).to_le_bytes());
          dxil.extend((((24 + bitcode.len()) / 4) as u32).to_le_bytes());
-@@ -772,6 +853,12 @@ impl Shader {
+@@ -772,6 +856,12 @@ impl Shader {
          dxil.extend(&bitcode);
  
          let mut features = 0u64;

@@ -464,6 +464,50 @@ pub struct PrecompileReport {
     pub left_out: usize,
 }
 
+// Each launcher batch runs in a new process. Keep the unpacked record table in
+// the derived-data cache, keyed by the contents of the original shader archive.
+#[cfg(windows)]
+struct PipelineTable;
+
+#[cfg(windows)]
+impl victory_pipeline::Converter for PipelineTable {
+    fn id(&self) -> &'static str { "graphics.pipeline-table" }
+    fn version(&self) -> u32 { 1 }
+
+    fn convert(&self, archive: &[u8]) -> anyhow::Result<Vec<u8>> {
+        pso_cache::find_in_archive(archive)
+            .ok_or_else(|| anyhow::anyhow!("no pipeline cache in the shader archive"))
+    }
+}
+
+#[cfg(windows)]
+fn pipeline_table(archive: &[u8], dir: Option<&std::path::Path>) -> Result<Vec<u8>, String> {
+    use victory_pipeline::{Cache, CacheKey, Converter};
+
+    let extract = || PipelineTable.convert(archive).map_err(|e| e.to_string());
+    let Some(cache) = dir.and_then(|dir| Cache::open(dir).ok()) else { return extract() };
+    let key = CacheKey::new(&PipelineTable, archive);
+    cache.reclaim_staging_files(&key);
+    if let Some(mut bytes) = cache.read(&key) {
+        if let Some(size) = bytes.len().checked_sub(32) {
+            let (table, digest) = bytes.split_at(size);
+            if blake3::hash(table).as_bytes() == digest {
+                bytes.truncate(size);
+                return Ok(bytes);
+            }
+        }
+    }
+    let mut table = extract()?;
+    let size = table.len();
+    let digest = blake3::hash(&table);
+    table.extend_from_slice(digest.as_bytes());
+    if let Err(e) = cache.write(&key, &table) {
+        tracing::warn!(error = %e, "could not cache the extracted graphics pipeline table");
+    }
+    table.truncate(size);
+    Ok(table)
+}
+
 /// Offline: makes the host pipeline of every graphics record of the
 /// title's pipeline cache (found in the shader archive `archive`) into
 /// the pipeline library, so that a run finds them there, at the key a
@@ -492,7 +536,7 @@ pub fn precompile_graphics(
     }
     let shaders = pack::use_blocking(archive, index).map_err(|e| format!("shader archive {}: {e}", archive.display()))?;
     let bytes = std::fs::read(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
-    let file = pso_cache::find_in_archive(&bytes).ok_or("no pipeline cache in the shader archive")?;
+    let file = pipeline_table(&bytes, index.and_then(std::path::Path::parent))?;
     drop(bytes);
     let cache = pso_cache::Cache::parse(&file)?;
     // The record numbers to make, in order.
@@ -586,6 +630,31 @@ fn background() {
 pub(crate) mod tests {
     use super::*;
     use crate::object::{S_OK, slot};
+
+    #[cfg(windows)]
+    #[test]
+    fn cached_pipeline_table_follows_the_archive_and_repairs_corruption() {
+        use victory_pipeline::{Cache, CacheKey};
+        let dir = tempfile::tempdir().unwrap();
+        let path = Some(dir.path());
+        let cache = Cache::open(dir.path()).unwrap();
+        let mut table = vec![0; 0x80];
+        table[..4].copy_from_slice(&pso_cache::MAGIC.to_le_bytes());
+        for build in [b'A', b'B'] {
+            table[4] = build;
+            let archive = miniz_oxide::deflate::compress_to_vec_zlib(&table, 6);
+            let key = CacheKey::new(&PipelineTable, &archive);
+            assert!(cache.read(&key).is_none());
+            assert_eq!(pipeline_table(&archive, path).unwrap(), table);
+            let original = cache.read(&key).unwrap();
+            let mut damaged = original.clone();
+            damaged[4] ^= 1;
+            cache.write(&key, &damaged).unwrap();
+            assert_eq!(pipeline_table(&archive, path).unwrap(), table);
+            assert_eq!(cache.read(&key).unwrap(), original);
+            assert_eq!(pipeline_table(&archive, None).unwrap(), table);
+        }
+    }
 
     /// A container with only a `HASH` part of `digest` and some code bytes.
     pub(crate) fn container_with_hash(digest: [u8; 16], code: &[u8]) -> Vec<u8> {

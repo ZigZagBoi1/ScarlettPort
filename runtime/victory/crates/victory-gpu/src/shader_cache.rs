@@ -290,7 +290,6 @@ pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
     if !output_key() {
         return legacy::host_shader(container);
     }
-    use victory_shader::emit;
     if let Some(s) = stand_in(container) {
         return Ok(s);
     }
@@ -298,13 +297,7 @@ pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
     // per-program switches take.
     let hash = blake3::hash(container).to_hex()[..16].to_owned();
     let r = match CACHE.get() {
-        Some(cache) => {
-            // (`wave64_retried` second: it parses the container, and only a
-            // program a list names, or with `VICTORY_WAVE_DEEP_SKIPS=0`
-            // any, gets there)
-            let off = !emit::deep_skips_allowed(Some(&hash)) && emit::wave64_retried(container);
-            cached(cache, &program_key(build(), off), container, &hash)
-        }
+        Some(cache) => cached(cache, &translation_key(build(), container, &hash), container, &hash),
         None => translate(container, &hash).and_then(|(payload, _)| decode(&payload).ok_or_else(damaged)),
     };
     match r {
@@ -442,6 +435,19 @@ fn program_key(build: &[u8; 32], deep_skips_off: bool) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
+fn translation_key(build: &[u8; 32], container: &[u8], hash: &str) -> [u8; 32] {
+    use victory_shader::emit;
+    let off = !emit::deep_skips_allowed(Some(hash)) && emit::wave64_retried(container);
+    let key = program_key(build, off);
+    if !emit::activate_rays_cleanup(hash) {
+        return key;
+    }
+    let mut h = blake3::Hasher::new();
+    h.update(&key);
+    h.update(b"ActivateRays module cleanup v1");
+    *h.finalize().as_bytes()
+}
+
 /// Whether the translation of `container` is in the cache already (nothing is read or
 /// translated: the entry's file is looked for). An entry of another translator counts: it
 /// is used as it is (see the module notes).
@@ -451,7 +457,10 @@ pub(crate) fn is_cached(container: &[u8]) -> bool {
     }
     CACHE
         .get()
-        .is_some_and(|cache| has_entry(cache, build(), container))
+        .is_some_and(|cache| {
+            let hash = blake3::hash(container).to_hex();
+            has_entry(cache, &translation_key(build(), container, &hash[..16]), container)
+        })
 }
 
 /// Whether `cache` holds an entry for `container` under the settings `context`.
@@ -839,6 +848,14 @@ mod tests {
         let entry = stamped::read(&cache, &key).unwrap();
         assert_eq!(decode(&entry.payload), Some(shader()));
         assert!(has_entry(&cache, &mine, container));
+    }
+
+    #[test]
+    fn activate_rays_uses_a_separate_key_only_with_targeted_cleanup() {
+        let build = [42; 32];
+        assert_eq!(translation_key(&build, b"", "39f0e9aeb156a61d"), build);
+        let target = translation_key(&build, b"", "39f0e9aeb156a61c");
+        assert_eq!(target != build, std::env::var_os("VICTORY_SHADER_OPT").is_none());
     }
 
     #[test]

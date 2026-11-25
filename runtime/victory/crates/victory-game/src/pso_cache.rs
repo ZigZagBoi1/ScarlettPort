@@ -240,9 +240,10 @@ pub fn stage_shader_hash(code: &[u8], meta: &[u8]) -> Option<[u8; 16]> {
 /// whose first unpacks to a cache header, each next stream starting at most
 /// 64 bytes after the end of the one before.
 pub fn find_in_archive(archive: &[u8]) -> Option<Vec<u8>> {
-    let mut from = 0;
-    while let Some(at) = memchr::memmem::find(&archive[from..], &[0x78]).map(|p| from + p) {
-        from = at + 1;
+    for at in memchr::memchr_iter(0x78, archive) {
+        if !zlib_header_at(archive, at) {
+            continue;
+        }
         let Some((first, _)) = inflate_one(&archive[at..], 0x80) else {
             continue;
         };
@@ -252,6 +253,12 @@ pub fn find_in_archive(archive: &[u8]) -> Option<Vec<u8>> {
         return chain(archive, at);
     }
     None
+}
+
+fn zlib_header_at(bytes: &[u8], at: usize) -> bool {
+    bytes.get(at..at + 2).is_some_and(|h| {
+        h[0] == 0x78 && u16::from_be_bytes([h[0], h[1]]) % 31 == 0
+    })
 }
 
 /// The streams from `at` on, until the header's size is reached.
@@ -269,7 +276,7 @@ fn chain(archive: &[u8], mut at: usize) -> Option<Vec<u8>> {
         }
         let next = at + used;
         at = (next..(next + 64).min(archive.len().saturating_sub(1)))
-            .find(|&i| archive[i] == 0x78 && (u16::from(archive[i]) << 8 | u16::from(archive[i + 1])) % 31 == 0)?;
+            .find(|&i| zlib_header_at(archive, i))?;
     }
     (out.len() == want).then_some(out)
 }

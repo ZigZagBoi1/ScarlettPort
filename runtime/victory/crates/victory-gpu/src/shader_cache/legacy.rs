@@ -169,11 +169,7 @@ pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
     let translate = |c: &[u8]| emit::for_program(&hash, || emit::translate(c)).map_err(|e| e.to_string());
     let r = match CACHE.get() {
         Some(cache) => {
-            // (`wave64_retried` second: it parses the container, and only a
-            // program a list names, or with `VICTORY_WAVE_DEEP_SKIPS=0`
-            // any, gets there)
-            let off = !emit::deep_skips_allowed(Some(&hash)) && emit::wave64_retried(container);
-            cached(cache, &program_key(build(), off), container, translate)
+            cached(cache, &super::translation_key(build(), container, &hash), container, translate)
         }
         None => translate(container),
     };
@@ -277,30 +273,18 @@ fn exposure_stub(container: &[u8]) -> Option<HostShader> {
     }
 }
 
-/// The key of one program's entries: the build's, mixed with the
-/// per-program decision when the program is kept out of the wave64 form
-/// "without skips, scalars followed" (`VICTORY_WAVE_DEEP_SKIPS_NOT`,
-/// `_ONLY`: `victory_shader::emit::deep_skips_allowed`). Only for a wave64
-/// compute program on a host of 32-lane waves, the only ones it can change.
-/// So the lists are in no key: changing one translates again only the
-/// programs whose decision it changes, and a program allowed the form keeps
-/// the key it had without any list.
-fn program_key(build: &[u8; 32], deep_skips_off: bool) -> [u8; 32] {
-    if !deep_skips_off {
-        return *build;
-    }
-    let mut h = blake3::Hasher::new();
-    h.update(build);
-    h.update(b"VICTORY_WAVE_DEEP_SKIPS off for this program");
-    *h.finalize().as_bytes()
-}
+#[cfg(test)]
+use super::program_key;
 
 /// Whether the translation of `container` is in the cache already (nothing is read or
 /// translated: the entry's file is looked for).
 pub(crate) fn is_cached(container: &[u8]) -> bool {
     CACHE
         .get()
-        .is_some_and(|cache| has_entry(cache, build(), container))
+        .is_some_and(|cache| {
+            let hash = blake3::hash(container).to_hex();
+            has_entry(cache, &super::translation_key(build(), container, &hash[..16]), container)
+        })
 }
 
 /// Whether `cache` holds the translation of `container` made in context `build`.
