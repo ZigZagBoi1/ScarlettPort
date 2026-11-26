@@ -1423,6 +1423,9 @@ fn present_now(this: This, planes: u32, plane_parameters: *const Plane) -> HRESU
         #[cfg(not(feature = "diagnostics"))]
         let _ = shown;
     }
+    // After the frame is shown: its probed levels are known by now.
+    #[cfg(all(windows, feature = "diagnostics"))]
+    crate::capture::log_frame(frame);
     #[cfg(not(windows))]
     let _ = (planes, plane_parameters);
     S_OK
