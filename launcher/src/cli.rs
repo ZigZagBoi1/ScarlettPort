@@ -56,7 +56,7 @@ pub struct Slot {
     pub users: Vec<User>,
 }
 
-/// Parses `victory saves list`:
+/// Parses `scarlett saves list`:
 /// `title 7A4E5C29:` / `  default` / `    user 0009... (Ziggy), config ...` /
 /// `      Player (v3, 1234 bytes, 4 backups)`.
 pub fn parse_saves(text: &str) -> Vec<Slot> {
@@ -106,7 +106,7 @@ pub struct Backup {
     pub age: String,
 }
 
-/// Parses the listing `victory saves restore <slot>` prints without a container:
+/// Parses the listing `scarlett saves restore <slot>` prints without a container:
 /// `  user X: Player` / `    <id>  v3  1234 bytes  5m ago`.
 pub fn parse_backups(text: &str) -> Vec<Backup> {
     let mut out = Vec::new();
@@ -131,19 +131,19 @@ pub fn parse_backups(text: &str) -> Vec<Backup> {
 /// `(xuid, gamertag)` pairs of the runtime's local profiles file.
 pub fn profiles() -> Vec<(String, String)> {
     let Some(base) = std::env::var_os("LOCALAPPDATA") else { return Vec::new() };
-    let text = std::fs::read_to_string(Path::new(&base).join("VIctory").join("profiles.txt")).unwrap_or_default();
+    let text = std::fs::read_to_string(Path::new(&base).join("ScarlettPort").join("profiles.txt")).unwrap_or_default();
     text.lines()
         .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
         .filter_map(|l| l.trim().split_once(char::is_whitespace).map(|(a, b)| (a.to_string(), b.trim().to_string())))
         .collect()
 }
 
-/// The runtime's save folder: `VICTORY_DATA_DIR`, else `%LOCALAPPDATA%\victory\data`.
+/// The runtime's save folder: `SCARLETT_DATA_DIR`, else `%LOCALAPPDATA%\ScarlettPort\data`.
 pub fn saves_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("SCARLETT_DATA_DIR").or_else(|| std::env::var_os("VICTORY_DATA_DIR")) {
+    if let Some(d) = std::env::var_os("SCARLETT_DATA_DIR") {
         return PathBuf::from(d);
     }
-    std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("victory").join("data")
+    std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("ScarlettPort").join("data")
 }
 
 /// The runtime's crash folder default (`crashes` beside the data folder).
@@ -151,7 +151,7 @@ pub fn crash_dir() -> PathBuf {
     saves_dir().with_file_name("crashes")
 }
 
-/// A crash folder from the stability watchdogs, read directly (for builds without `victory crashes`).
+/// A crash folder from the stability watchdogs, read directly (for builds without `scarlett crashes`).
 pub fn crashes_from_folder(dir: &Path) -> Vec<String> {
     let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut v: Vec<(String, String)> = rd

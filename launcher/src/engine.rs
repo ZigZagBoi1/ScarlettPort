@@ -9,30 +9,30 @@ pub const CLASSIC: &str = "classic";
 pub const WORLD_LABEL: &str = "World (furthest: 3D world + gameplay, slow)";
 pub const CLASSIC_LABEL: &str = "Classic (menus at 30 fps)";
 
-/// Distinct shader programs `victory warm` translates for the supported title (measured).
+/// Distinct shader programs `scarlett warm` translates for the supported title (measured).
 pub const WARM_TOTAL: u64 = 25_889;
 /// Graphics records in the title's precompiled pipeline cache (measured; refined as chunks finish).
 pub const GRAPHICS_TOTAL: u64 = 25_471;
-/// Records per `victory precompile-graphics` run: each run saves the pipeline library when it
+/// Records per `scarlett precompile-graphics` run: each run saves the pipeline library when it
 /// ends, so a stop loses at most one chunk.
 pub const CHUNK: u64 = 1000;
 /// The runtime vendored here decodes rectangle-list pipelines right (the tile-grid fix), so play
-/// runs set VICTORY_PRECOMPILED_GRAPHICS=1 (as play-victory.ps1 does) and the graphics-pipeline
+/// runs set SCARLETT_PRECOMPILED_GRAPHICS=1 (as play-scarlett.ps1 does) and the graphics-pipeline
 /// phase of the shader build runs. Both follow this one constant.
 pub const PRECOMPILED_GRAPHICS: bool = true;
 
-/// The other verified speed settings (play-victory.ps1 sets the same ones, besides the precise
+/// The other verified speed settings (play-scarlett.ps1 sets the same ones, besides the precise
 /// syncs and settles): the read-back fix, copy-back only for read-backs, narrow root signatures,
 /// views and BVH, and the prepared barriers, tables and reuse.
 pub const SPEED_SETTINGS: [&str; 8] = [
-    "VICTORY_READFIX",
-    "VICTORY_COPY_BACK_ONLY_READBACK",
-    "VICTORY_NARROW_ROOT",
-    "VICTORY_NARROW_VIEWS",
-    "VICTORY_NARROW_BVH",
-    "VICTORY_PREP_BARRIERS",
-    "VICTORY_PREP_TABLES",
-    "VICTORY_PREP_REUSE",
+    "SCARLETT_READFIX",
+    "SCARLETT_COPY_BACK_ONLY_READBACK",
+    "SCARLETT_NARROW_ROOT",
+    "SCARLETT_NARROW_VIEWS",
+    "SCARLETT_NARROW_BVH",
+    "SCARLETT_PREP_BARRIERS",
+    "SCARLETT_PREP_TABLES",
+    "SCARLETT_PREP_REUSE",
 ];
 
 /// True when the config selects the World engine (anything else is Classic).
@@ -41,8 +41,11 @@ pub fn is_world(c: &Config) -> bool {
 }
 
 /// The World engine's cache folder (translated shaders, pipeline library) inside the launcher's cache.
-pub fn victory_cache(cache_dir: &str) -> PathBuf {
-    Path::new(cache_dir.trim()).join("victory")
+pub fn scarlett_cache(cache_dir: &str) -> PathBuf {
+    let cache = Path::new(cache_dir.trim());
+    let dir = cache.join("scarlett");
+    crate::runtime::migrate_legacy_cache(cache, &dir);
+    dir
 }
 
 /// Arguments after the executable: `run "<game exe>" --execute [--console series-s]`.
@@ -76,35 +79,35 @@ pub fn graphics_args(game: &Path, jobs: usize, skip: u64, limit: u64) -> Vec<Str
 
 /// Environment every World engine process gets: the game and the cache.
 pub fn base_env(game: &Path, cache_dir: &str) -> Vec<(&'static str, String)> {
-    vec![("VICTORY_GAME_DIR", game.display().to_string()), ("VICTORY_CACHE_DIR", victory_cache(cache_dir).display().to_string())]
+    vec![("SCARLETT_GAME_DIR", game.display().to_string()), ("SCARLETT_CACHE_DIR", scarlett_cache(cache_dir).display().to_string())]
 }
 
 /// Environment for a World play run (display settings are added separately). The defaults are
-/// play-victory.ps1's.
+/// play-scarlett.ps1's.
 pub fn world_env(c: &Config, game: &Path, cache_dir: &str) -> Vec<(&'static str, String)> {
     let flag = |b: bool| if b { "1" } else { "0" }.to_string();
     let mut v = base_env(game, cache_dir);
     v.extend([
-        ("VICTORY_OWN_UPSCALER", "1".to_string()),
-        ("VICTORY_NO_WATCHDOG", "1".to_string()),
-        ("VICTORY_RELAY", "2".to_string()),
-        ("VICTORY_SYNC_PRECISE", "1".to_string()),
-        ("VICTORY_READ_SETTLE_PRECISE", "1".to_string()),
-        ("VICTORY_PIPELINE_WAIT_MS", "0".to_string()),
-        ("VICTORY_RAYTRACING", flag(c.raytracing)),
-        ("VICTORY_FALLBACK_LIGHT", flag(c.fallback_light)),
-        ("VICTORY_PAD_PS", "1".to_string()),
+        ("SCARLETT_OWN_UPSCALER", "1".to_string()),
+        ("SCARLETT_NO_WATCHDOG", "1".to_string()),
+        ("SCARLETT_RELAY", "2".to_string()),
+        ("SCARLETT_SYNC_PRECISE", "1".to_string()),
+        ("SCARLETT_READ_SETTLE_PRECISE", "1".to_string()),
+        ("SCARLETT_PIPELINE_WAIT_MS", "0".to_string()),
+        ("SCARLETT_RAYTRACING", flag(c.raytracing)),
+        ("SCARLETT_FALLBACK_LIGHT", flag(c.fallback_light)),
+        ("SCARLETT_PAD_PS", "1".to_string()),
     ]);
     if PRECOMPILED_GRAPHICS {
-        v.push(("VICTORY_PRECOMPILED_GRAPHICS", "1".to_string()));
+        v.push(("SCARLETT_PRECOMPILED_GRAPHICS", "1".to_string()));
     }
     v.extend(SPEED_SETTINGS.iter().map(|k| (*k, "1".to_string())));
     if c.debug_view {
-        v.push(("VICTORY_DEBUG_PS", "1".to_string()));
-        v.push(("VICTORY_SHOW_TARGET", "2560x1440-f28".to_string()));
+        v.push(("SCARLETT_DEBUG_PS", "1".to_string()));
+        v.push(("SCARLETT_SHOW_TARGET", "2560x1440-f28".to_string()));
     }
     if c.auto_menu {
-        v.push(("VICTORY_AUTO_INPUT", "1".to_string()));
+        v.push(("SCARLETT_AUTO_INPUT", "1".to_string()));
     }
     v
 }
@@ -117,14 +120,14 @@ pub fn jobs(cores: usize, free_mb: Option<u64>, per_job_mb: u64) -> usize {
     by_cpu.min(by_ram).max(1)
 }
 
-/// `victory warm` progress: `   123 s  4000 shaders` -> 4000.
+/// `scarlett warm` progress: `   123 s  4000 shaders` -> 4000.
 pub fn parse_warm(line: &str) -> Option<u64> {
     let t = line.trim();
     let rest = t.strip_suffix(" shaders")?;
     rest.rsplit(' ').next()?.parse().ok()
 }
 
-/// `victory warm`'s summary: `warm  25889 translated, 0 refused; ...` -> (translated, refused).
+/// `scarlett warm`'s summary: `warm  25889 translated, 0 refused; ...` -> (translated, refused).
 pub fn parse_warm_end(line: &str) -> Option<(u64, u64)> {
     let t = line.trim().strip_prefix("warm")?.trim_start();
     let (a, rest) = t.split_once(" translated, ")?;
@@ -132,7 +135,7 @@ pub fn parse_warm_end(line: &str) -> Option<(u64, u64)> {
     Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
 }
 
-/// `victory precompile-graphics` progress: `   40 s  500 records: 480 made, ...` -> 500.
+/// `scarlett precompile-graphics` progress: `   40 s  500 records: 480 made, ...` -> 500.
 pub fn parse_graphics(line: &str) -> Option<u64> {
     let t = line.trim();
     let (head, _) = t.split_once(" records:")?;
@@ -142,7 +145,7 @@ pub fn parse_graphics(line: &str) -> Option<u64> {
     head.rsplit(' ').next()?.parse().ok()
 }
 
-/// `victory precompile-graphics`'s summary: `precompile-graphics  800 records: ...` -> 800.
+/// `scarlett precompile-graphics`'s summary: `precompile-graphics  800 records: ...` -> 800.
 pub fn parse_graphics_end(line: &str) -> Option<u64> {
     let t = line.trim().strip_prefix("precompile-graphics")?.trim_start();
     t.split_once(" records:")?.0.trim().parse().ok()
@@ -195,20 +198,20 @@ mod tests {
         let g = PathBuf::from("D:/game");
         let mut c = Config::default();
         let e = world_env(&c, &g, "E:/ScarlettCache");
-        assert_eq!(get(&e, "VICTORY_CACHE_DIR").map(PathBuf::from), Some(PathBuf::from("E:/ScarlettCache").join("victory")));
-        assert_eq!(get(&e, "VICTORY_RELAY").as_deref(), Some("2"));
-        assert_eq!(get(&e, "VICTORY_PIPELINE_WAIT_MS").as_deref(), Some("0"));
-        assert_eq!(get(&e, "VICTORY_PRECOMPILED_GRAPHICS").is_some(), PRECOMPILED_GRAPHICS);
+        assert_eq!(get(&e, "SCARLETT_CACHE_DIR").map(PathBuf::from), Some(PathBuf::from("E:/ScarlettCache").join("scarlett")));
+        assert_eq!(get(&e, "SCARLETT_RELAY").as_deref(), Some("2"));
+        assert_eq!(get(&e, "SCARLETT_PIPELINE_WAIT_MS").as_deref(), Some("0"));
+        assert_eq!(get(&e, "SCARLETT_PRECOMPILED_GRAPHICS").is_some(), PRECOMPILED_GRAPHICS);
         for k in SPEED_SETTINGS {
             assert_eq!(get(&e, k).as_deref(), Some("1"), "{k}");
         }
-        assert!(get(&e, "VICTORY_SHADER_LOOP_LIMIT").is_none());
-        assert!(get(&e, "VICTORY_AUTO_INPUT").is_none());
+        assert!(get(&e, "SCARLETT_SHADER_LOOP_LIMIT").is_none());
+        assert!(get(&e, "SCARLETT_AUTO_INPUT").is_none());
         c.auto_menu = true;
         c.raytracing = true;
         let e = world_env(&c, &g, "E:/c");
-        assert_eq!(get(&e, "VICTORY_AUTO_INPUT").as_deref(), Some("1"));
-        assert_eq!(get(&e, "VICTORY_RAYTRACING").as_deref(), Some("1"));
+        assert_eq!(get(&e, "SCARLETT_AUTO_INPUT").as_deref(), Some("1"));
+        assert_eq!(get(&e, "SCARLETT_RAYTRACING").as_deref(), Some("1"));
     }
 
     #[test]

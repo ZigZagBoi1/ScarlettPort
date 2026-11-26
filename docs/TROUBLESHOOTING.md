@@ -29,7 +29,7 @@ The title ships tens of thousands of GPU programs. Each is translated for your c
 
 **Where saves live:**
 
-- World engine (default, ScarlettPort runtime): `%LOCALAPPDATA%\VIctory\data\<title id>\saves\`.
+- World engine (default, ScarlettPort runtime): `%LOCALAPPDATA%\ScarlettPort\data\<title id>\saves\`.
 - Classic engine (XCL): `%LOCALAPPDATA%\XCL\<package name>\`, in the `saves` and `pls` folders (or under `%XCL_DATA_ROOT%` if you set it).
 
 **Back up:**
@@ -50,7 +50,7 @@ The title ships tens of thousands of GPU programs. Each is translated for your c
 | Black picture with certain switches | the opt-in `SCARLETT_COPY_BACK_ONLY_READBACK` mode left stale data in memory | fix in testing; leave that switch off |
 | Some HUD text cut off | not known yet | open |
 
-If you changed environment switches (see [RUNTIMES.md](RUNTIMES.md)) and the picture breaks, go back to the defaults (the launcher's default settings, or `play-victory.ps1` with no extra switches) before reporting.
+If you changed environment switches (see [RUNTIMES.md](RUNTIMES.md)) and the picture breaks, go back to the defaults (the launcher's default settings, or `play-scarlett.ps1` with no extra switches) before reporting.
 
 ## Controller not working
 
@@ -64,12 +64,12 @@ If you changed environment switches (see [RUNTIMES.md](RUNTIMES.md)) and the pic
 - **Update your graphics driver** first; old drivers are a common cause of failed pipeline builds.
 - **NVIDIA:** the tested vendor (RTX 3060).
 - **AMD:** expected to work but not measured by us yet. Please send a hardware report.
-- **Windows 10:** the runtime needs the D3D12 Agility SDK 1.614 in a `D3D12` folder next to the runtime executable (`D3D12Core.dll` and `d3d12SDKLayers.dll`). The release ZIP includes it, so keep the `runtime` folder intact when you extract. If you build yourself, run `scripts\setup-victory.ps1`.
+- **Windows 10:** the runtime needs the D3D12 Agility SDK 1.614 in a `D3D12` folder next to the runtime executable (`D3D12Core.dll` and `d3d12SDKLayers.dll`). The release ZIP includes it, so keep the `runtime` folder intact when you extract. If you build yourself, run `scripts\setup-scarlett.ps1`.
 
 ## Logs
 
 - **Launcher:** the **Logs** page shows the run output. **Send report** opens a prefilled GitHub hardware-report issue with your user name and folders removed from the log.
-- **Scripts:** `play.ps1` and `play-victory.ps1` write to the `logs\` folder of the repo.
+- **Scripts:** `play.ps1` and `play-scarlett.ps1` write to the `logs\` folder of the repo.
 - **Crash reports (Classic engine):** `%LOCALAPPDATA%\xcl\crash-reports`.
 
 **To attach a log to an issue:** open an issue with the [bug report template](https://github.com/ZigZagBoi1/ScarlettPort/issues/new/choose), then drag the log file into the text box (zip it first if it is large). Include your GPU, driver version, CPU, RAM, Windows version, launcher version and any switches you changed. Before attaching, check the log for anything private such as user names in paths. Never attach game files.

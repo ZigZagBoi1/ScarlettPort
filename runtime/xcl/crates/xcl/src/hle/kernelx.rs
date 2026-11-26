@@ -304,7 +304,7 @@ pub mod mirrors {
     /// them at +16 – each range three u32: the kind (0: `count` pool pages from `start` on,
     /// 1: pool page `start` at each of `count` pages, 2: unmapped, 3: left as they are),
     /// `start` and `count`. Pages are 64 KiB; the pool is `pool_pages` of them at `pool`.
-    /// The layout as VIctory describes it (`crates/victory-gpu/src/queue.rs`, a reference
+    /// The layout as ScarlettPort describes it (`crates/scarlett-gpu/src/queue.rs`, a reference
     /// only: no code taken). Only pages of GPU views are recorded (the retail title maps into
     /// nothing else). `None` – nothing recorded – when a batch or a range is not readable, a
     /// range leaves the pool or has an unknown kind, or the call names over `MOST` pages.

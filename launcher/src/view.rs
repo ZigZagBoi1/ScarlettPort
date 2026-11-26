@@ -933,7 +933,7 @@ impl Launcher {
 
         let top = row.max.y + 28.;
         caption(&p, pos2(c.min.x, top), Align2::LEFT_TOP, "Cache location");
-        p.text(pos2(c.min.x, top + 20.), Align2::LEFT_TOP, "Translated shaders go to <folder>\\victory (World) or <folder>\\dxil (Classic, about 40 GB).", font(12.5, "regular"), TEXT_MUTED);
+        p.text(pos2(c.min.x, top + 20.), Align2::LEFT_TOP, "Translated shaders go to <folder>\\scarlett (World) or <folder>\\dxil (Classic, about 40 GB).", font(12.5, "regular"), TEXT_MUTED);
         let field = Rect::from_min_size(pos2(c.min.x, top + 46.), vec2(c.width().min(640.), 44.));
         let busy = self.running.is_some();
         if text_field(ui, field, "cache-edit", &mut self.config.cache_dir, "Folder", Some(Icon::Folder), !busy).changed() {
@@ -1048,7 +1048,7 @@ impl Launcher {
         }
         let y = y + 126.;
         caption(&p, pos2(c.min.x, y), Align2::LEFT_TOP, "Built on");
-        let built = "The Classic engine is built on XCL (github.com/ivall/xcl, GPL-2.0-only). The World engine is the ScarlettPort runtime, which started as a fork of VIctory by Marvisak (github.com/Marvisak/VIctory, GPL-3.0-or-later) via fxceless/victory-fork; full credits in CREDITS.md. ScarlettPort's own code and changes are licensed as set out in LICENSE.md. No game code or assets are included.";
+        let built = "The Classic engine is built on XCL (github.com/ivall/xcl, GPL-2.0-only). The World engine is the ScarlettPort runtime, (GPL-3.0-or-later); its upstream lineage and full credits are in CREDITS.md. ScarlettPort's own code and changes are licensed as set out in LICENSE.md. No game code or assets are included.";
         let g = p.layout(built.into(), font(12.5, "regular"), TEXT_MUTED, c.width().min(620.));
         p.galley(pos2(c.min.x, y + 20.), g, TEXT_MUTED);
     }

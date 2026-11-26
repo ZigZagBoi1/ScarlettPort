@@ -23,7 +23,7 @@ You must dump your own copy. This repository and its releases contain **no game 
 
 ## Does it work on AMD? On Windows 10?
 
-NVIDIA (RTX 3060) is the card we test on. AMD RX 6000 and newer meet the requirements and the runtime includes community AMD work, but we have no measured AMD result yet, so a [hardware report](https://github.com/ZigZagBoi1/ScarlettPort/issues/new/choose) helps a lot. Windows 10 is supported: it needs Microsoft's D3D12 Agility SDK runtime (1.614) in a `D3D12` folder beside the runtime executable. The release ZIP already includes it; if you build yourself, `scripts\setup-victory.ps1` fetches it.
+NVIDIA (RTX 3060) is the card we test on. AMD RX 6000 and newer meet the requirements and the runtime includes community AMD work, but we have no measured AMD result yet, so a [hardware report](https://github.com/ZigZagBoi1/ScarlettPort/issues/new/choose) helps a lot. Windows 10 is supported: it needs Microsoft's D3D12 Agility SDK runtime (1.614) in a `D3D12` folder beside the runtime executable. The release ZIP already includes it; if you build yourself, `scripts\setup-scarlett.ps1` fetches it.
 
 ## Can I use a controller?
 

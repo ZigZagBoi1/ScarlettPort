@@ -1,8 +1,8 @@
 //! The shader build, run on its own thread and reported phase by phase.
 //!
-//! World engine: `victory warm` translates every shader into the cache and makes the compute
+//! World engine: `scarlett warm` translates every shader into the cache and makes the compute
 //! pipelines (about 3 min); when the runtime uses them (`engine::PRECOMPILED_GRAPHICS`),
-//! `victory precompile-graphics` then makes the title's graphics pipelines in chunks of
+//! `scarlett precompile-graphics` then makes the title's graphics pipelines in chunks of
 //! `engine::CHUNK` records, each chunk saved when it ends.
 //! Classic engine: `xcl shaders <pack> --precompile --pipelines --only cs`, which already skips
 //! what is in its cache.
@@ -43,7 +43,7 @@ pub struct Progress {
 #[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
 pub struct State {
     pub hash: String,
-    /// World: `victory warm` finished.
+    /// World: `scarlett warm` finished.
     #[serde(default)]
     pub warm: bool,
     /// World: the first graphics record not done yet.
@@ -255,7 +255,7 @@ fn world(job: &Job) -> Result<String, String> {
                 st.warm = true;
                 st.save(&path);
             }
-            Outcome::Exit(c) => return Err(format!("victory warm failed (exit code {c:?}); see Logs")),
+            Outcome::Exit(c) => return Err(format!("scarlett warm failed (exit code {c:?}); see Logs")),
             Outcome::Stopped | Outcome::Idle => return Err("Stopped. Press Build shaders again to resume.".into()),
         }
     }
@@ -308,7 +308,7 @@ fn world(job: &Job) -> Result<String, String> {
                     st.next = skip + engine::CHUNK;
                     p.on_demand += engine::CHUNK;
                 }
-                Outcome::Exit(c) => return Err(format!("victory precompile-graphics failed (exit code {c:?}); see Logs")),
+                Outcome::Exit(c) => return Err(format!("scarlett precompile-graphics failed (exit code {c:?}); see Logs")),
                 Outcome::Stopped => {
                     st.save(&path);
                     return Err("Stopped. Press Build shaders again to resume.".into());

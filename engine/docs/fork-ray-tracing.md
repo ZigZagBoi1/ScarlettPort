@@ -1,9 +1,9 @@
 # Ray tracing in this fork: what the title does and what has been built
 
-Status, 2026-11-25, midday: **with `VICTORY_BVH_BUILDER=1` rooms get their
+Status, 2026-11-25, midday: **with `SCARLETT_BVH_BUILDER=1` rooms get their
 indirect light** (runs light-10, light-11, n19), for some 40 ms more of the
 card's time a frame (the dorm: 75 of 90 ms busy against 34 of 64). Off by
-default. **`VICTORY_AMBIENT=1`** puts an estimate of that light in its place
+default. **`SCARLETT_AMBIENT=1`** puts an estimate of that light in its place
 for next to nothing (below).
 
 ## What the title does
@@ -50,7 +50,7 @@ shaders and emulates the one instruction.
 3. **The ray test, emulated in DXIL.** Four slab tests and a sorting network
    for box nodes; a watertight ray/triangle test for triangle nodes; both forms
    of the instruction. A plain Rust reference lives in
-   `crates/victory-shader/src/bvh.rs`; tests run the emitted DXIL on the GPU
+   `crates/scarlett-shader/src/bvh.rs`; tests run the emitted DXIL on the GPU
    over 311 ray/node cases and compare with the reference bit for bit.
 4. **The trace and shading programs translate** (59 of 64 trace programs, and
    the irradiance-cache shading program). This needed lane masks treated as
@@ -58,12 +58,12 @@ shaders and emulates the one instruction.
    64-lane waves running on a GPU with 32-lane waves.
 5. **A safety rule on the host side.** The builder's stages run only while
    every builder pipeline the title has created has a host pipeline; otherwise
-   none run (`VICTORY_BVH_BUILDER=1` asks for it; `VICTORY_BVH_QUARANTINE=1`
+   none run (`SCARLETT_BVH_BUILDER=1` asks for it; `SCARLETT_BVH_QUARANTINE=1`
    also keeps the builder's stores out of title memory, for a first test). A
    partly working builder wrote garbage bounds into title memory and crashed
    the title.
 
-## The structures (from dumps of the arenas, `VICTORY_MEMORY_DUMP`)
+## The structures (from dumps of the arenas, `SCARLETT_MEMORY_DUMP`)
 
 - Header, 64 bytes: dword 0 the version 6 in the low half and marks in the high
   (0x8000 bottom level, 0x4 compacted, 0x2 rehydrated, 0x100 still packed),
@@ -91,15 +91,15 @@ after it was given them as an unordered access view.
 
 | variable | does |
 |---|---|
-| `VICTORY_BVH_BUILDER=1` | the builder's stages run |
-| `VICTORY_BVH_FENCES=0` | no fences around the builder's buffer atomics (beloooo's 72e748ea has them too) |
-| `VICTORY_BVH_SIZES_WAIT=1` | submissions that ask for structures' sizes are waited for (off: no help, slow) |
-| `VICTORY_BVH_BOUNDS=0` | the builder's accesses are not bounded |
-| `VICTORY_BVH_TRACE=1` | logs what sizes are asked, when they came, and the copies (diagnostics) |
-| `VICTORY_BVH_QUARANTINE=1` | nothing it stores comes back to title memory |
-| `VICTORY_MEMORY_CARD_MB` | the most of it on the card (4096) |
-| `VICTORY_MEMORY_DUMP=<folder>` | a file `go` there writes the arenas out (diagnostics) |
-| `VICTORY_UPLOAD_LOW=0`, `VICTORY_LENT_HEAP=0` | lists' upload memory above 2^40, no view heap for lists without one, as before |
+| `SCARLETT_BVH_BUILDER=1` | the builder's stages run |
+| `SCARLETT_BVH_FENCES=0` | no fences around the builder's buffer atomics (beloooo's 72e748ea has them too) |
+| `SCARLETT_BVH_SIZES_WAIT=1` | submissions that ask for structures' sizes are waited for (off: no help, slow) |
+| `SCARLETT_BVH_BOUNDS=0` | the builder's accesses are not bounded |
+| `SCARLETT_BVH_TRACE=1` | logs what sizes are asked, when they came, and the copies (diagnostics) |
+| `SCARLETT_BVH_QUARANTINE=1` | nothing it stores comes back to title memory |
+| `SCARLETT_MEMORY_CARD_MB` | the most of it on the card (4096) |
+| `SCARLETT_MEMORY_DUMP=<folder>` | a file `go` there writes the arenas out (diagnostics) |
+| `SCARLETT_UPLOAD_LOW=0`, `SCARLETT_LENT_HEAP=0` | lists' upload memory above 2^40, no view heap for lists without one, as before |
 
 Every ten seconds the log has a line "title memory by address: ..." with pages,
 dispatches, faults and what came.
@@ -107,17 +107,17 @@ dispatches, faults and what came.
 ## Known gaps
 
 - Dynamic structures overlap each other (8 of 65 good in run light-10, 48 of
-  275 in light-15). Part of the cause, run light-11's trace (`VICTORY_BVH_TRACE=1`): the title asks for a new
+  275 in light-15). Part of the cause, run light-11's trace (`SCARLETT_BVH_TRACE=1`): the title asks for a new
   structure's compacted size, reads it one or two frames later without looking
   whether it is there, takes memory of that size and has the structure copied
   into it. Our submissions land up to two frames late; the title read what the
   slot held before, another structure's size, and the copy wrote over the
-  neighbours. Waiting for a submission that asks (`VICTORY_BVH_SIZES_WAIT=1`)
+  neighbours. Waiting for a submission that asks (`SCARLETT_BVH_SIZES_WAIT=1`)
   did not mend it and costs some 20 ms a frame (light-15): the title asks in
   every frame, and what it read was as old as before. Open.
 - What a structure that was written over says of its size sent the builder's
   copy of it through gigabytes of other structures; bounded now
-  (`VICTORY_BVH_BOUNDS`). Pages touched that are not there: 2,500 a frame
+  (`SCARLETT_BVH_BOUNDS`). Pages touched that are not there: 2,500 a frame
   before, 90 after (the dorm).
 - The card's time in the dorm with the builder (timing run light-13, title's
   commands 84 ms): `CopyForBVHUpdate` 13.3 ms in 63 dispatches (before the
@@ -135,12 +135,12 @@ dispatches, faults and what came.
   of two boxes entered at the same distance, and the result for a ray exactly
   through an edge.
 
-## Without rays: the stand-in (`crates/victory-gpu/src/ambient.rs`)
+## Without rays: the stand-in (`crates/scarlett-gpu/src/ambient.rs`)
 
 Without structures every ray misses. The title's program that resolves the
 diffuse light of its screen probes (`CS_ScreenProbes_TemporalResolve_*`, list
 184 of a frame) then leaves the sky's light outdoors, nothing indoors, and in
-blocks of tiles what the probes' memory held. `VICTORY_AMBIENT=<share>` raises
+blocks of tiles what the probes' memory held. `SCARLETT_AMBIENT=<share>` raises
 it to an estimate right after that program: the title keeps, for its own screen
 traces, the light visible surfaces send out (`CS_CacheScreenSpaceRadiance`,
 1280x720, the frame before); its mean in 64x36 cells is gathered at 160x90
@@ -149,25 +149,25 @@ directional value; each pixel takes it between the points by depth, with its
 normal and a shade in creases. So level and tint follow the hour, the room and
 its lamps. What the program left counts up to four times the estimate.
 
-Where it can be put, and the crease shade, are beloooo's (VIctory-Belobug-AMD
-06031237, 4f45ab88, cd9f78ce); `VICTORY_AMBIENT=constant:<level>` is that
+Where it can be put, and the crease shade, are beloooo's (ScarlettPort-Belobug-AMD
+06031237, 4f45ab88, cd9f78ce); `SCARLETT_AMBIENT=constant:<level>` is that
 fork's constant.
 
 | variable | does |
 |---|---|
-| `VICTORY_AMBIENT=<share>` | the estimate, 1 all of it (unset: the title's own) |
-| `VICTORY_AMBIENT=constant:<level>` | the same light everywhere |
-| `VICTORY_AMBIENT_SHADE=<strength>,<metres>` | the creases (1,0.6) |
-| `VICTORY_AMBIENT_AIR=<multiple>` | what the air scatters is bounded by a multiple of the light around (off: the brown veil in the day room stays with it, light-14) |
+| `SCARLETT_AMBIENT=<share>` | the estimate, 1 all of it (unset: the title's own) |
+| `SCARLETT_AMBIENT=constant:<level>` | the same light everywhere |
+| `SCARLETT_AMBIENT_SHADE=<strength>,<metres>` | the creases (1,0.6) |
+| `SCARLETT_AMBIENT_AIR=<multiple>` | what the air scatters is bounded by a multiple of the light around (off: the brown veil in the day room stays with it, light-14) |
 
 It is off while the builder runs.
 
 ## Where to look
 
-- `crates/victory-shader/src/bvh.rs`: the reference for the node test.
-- `crates/victory-shader/src/emit/lower.rs`: the lowering of the two
+- `crates/scarlett-shader/src/bvh.rs`: the reference for the node test.
+- `crates/scarlett-shader/src/emit/lower.rs`: the lowering of the two
   instructions and of memory by address (`Lower::memory`).
-- `crates/victory-shader/src/resource.rs`: address tracking for descriptors
+- `crates/scarlett-shader/src/resource.rs`: address tracking for descriptors
   and raw addresses.
-- `crates/victory-gpu/src/pipeline.rs`, `draw.rs`: the builder rule and the
+- `crates/scarlett-gpu/src/pipeline.rs`, `draw.rs`: the builder rule and the
   host side of root views and title memory.

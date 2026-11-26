@@ -20,10 +20,10 @@ report (`src/report.rs`) opens a prefilled issue.
   `scarlett.exe`; updates never touch it).
 - **Settings, Features** (`src/tuning.rs`): full textures, HDR, PlayStation pads, rumble, keyboard
   hints, frame cap, upscaler/FSR/frame generation, Discord. Set as `SCARLETT_*` variables and
-  written to `%LOCALAPPDATA%\ScarlettPort\victory.toml` (passed as `SCARLETT_CONFIG`).
+  written to `%LOCALAPPDATA%\ScarlettPort\scarlett.toml` (passed as `SCARLETT_CONFIG`).
 - **Verify game files** (`src/verify.rs`): archives, a complete `pack\` (flags a missing or split
   one), `dump-manifest.log`, links, empty files. Read-only.
-- **Saves** (`victory saves`), **Logs and crashes** (`victory crashes list`, copy report), a
+- **Saves** (`scarlett saves`), **Logs and crashes** (`scarlett crashes list`, copy report), a
   performance readout after each run (`src/perf.rs`), and a first-run wizard.
 - **Progress notes**, **Links**.
 

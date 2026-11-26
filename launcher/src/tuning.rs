@@ -1,6 +1,6 @@
 //! Runtime features added on 2026-11-24/25 (full textures, HDR, PlayStation pads, rumble, keyboard
 //! hints, frame cap, upscaler and frame generation): the launcher's settings for them, the
-//! environment variables they set and the `victory.toml` keys they write. A setting at its
+//! environment variables they set and the `scarlett.toml` keys they write. A setting at its
 //! default sets nothing, so the Stable preset stays exactly play.ps1's environment.
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -23,13 +23,13 @@ pub struct Tuning {
     pub quality: String,
     pub sharpness: f32,
     pub framegen: bool,
-    /// Adds `victory_gpu::host=info` to the log level so the run log has frame times
+    /// Adds `scarlett_gpu::host=info` to the log level so the run log has frame times
     /// (the performance readout). Off keeps the log at play.ps1's `warn`.
     pub perf_log: bool,
-    /// 0.4.6 engine: the title's own ray-traced indirect light (VICTORY_BVH_BUILDER=1). Lit
+    /// the title's own ray-traced indirect light (SCARLETT_BVH_BUILDER=1). Lit
     /// interiors, about a third slower.
     pub ray_tracing: bool,
-    /// 0.4.6 engine: fps, frame time and the longest frame on the picture (VICTORY_PANEL=1; F3
+    /// fps, frame time and the longest frame on the picture (SCARLETT_PANEL=1; F3
     /// shows and hides it in game).
     pub overlay: bool,
 }
@@ -60,7 +60,7 @@ pub const UPSCALERS: [&str; 4] = ["", "title", "stretch", "fsr"];
 pub const QUALITIES: [&str; 5] = ["native", "quality", "balanced", "performance", "ultra"];
 pub const CAPS: [u32; 3] = [0, 30, 60];
 
-/// Every key the launcher owns in `victory.toml`, including the ones it writes only in some
+/// Every key the launcher owns in `scarlett.toml`, including the ones it writes only in some
 /// states. [`merge_toml`] drops the managed keys it is not asked to write, so turning a feature
 /// back off cannot leave its old value in the file for a runtime that reads these sections.
 pub const MANAGED: [(&str, &str); 10] = [
@@ -96,44 +96,44 @@ impl Tuning {
         let d = Tuning::default();
         let mut v = Vec::new();
         if self.full_textures {
-            v.push(("VICTORY_TEXTURES", "full".to_string()));
+            v.push(("SCARLETT_TEXTURES", "full".to_string()));
         }
         if self.hdr {
-            v.push(("VICTORY_HDR", "1".to_string()));
+            v.push(("SCARLETT_HDR", "1".to_string()));
         }
         if self.pad_ps {
-            v.push(("VICTORY_PAD_PS", "1".to_string()));
+            v.push(("SCARLETT_PAD_PS", "1".to_string()));
         }
         if !self.rumble {
-            v.push(("VICTORY_RUMBLE", "0".to_string()));
+            v.push(("SCARLETT_RUMBLE", "0".to_string()));
         } else if (self.rumble_strength - d.rumble_strength).abs() > 0.001 {
-            v.push(("VICTORY_RUMBLE_STRENGTH", num(self.rumble_strength)));
+            v.push(("SCARLETT_RUMBLE_STRENGTH", num(self.rumble_strength)));
         }
         if self.kbm_hints != d.kbm_hints {
-            v.push(("VICTORY_KBM_HINTS", self.kbm_hints.clone()));
+            v.push(("SCARLETT_KBM_HINTS", self.kbm_hints.clone()));
         }
         if self.frame_cap > 0 {
-            v.push(("VICTORY_PACE", "1".to_string()));
-            v.push(("VICTORY_PACE_FPS", self.frame_cap.to_string()));
+            v.push(("SCARLETT_PACE", "1".to_string()));
+            v.push(("SCARLETT_PACE_FPS", self.frame_cap.to_string()));
         }
         if !self.upscaler.is_empty() && (self.upscaler != "fsr" || fsr) {
-            v.push(("VICTORY_UPSCALER", self.upscaler.clone()));
+            v.push(("SCARLETT_UPSCALER", self.upscaler.clone()));
             if self.upscaler == "fsr" {
-                v.push(("VICTORY_UPSCALE_QUALITY", self.quality.clone()));
-                v.push(("VICTORY_UPSCALE_SHARPNESS", num(self.sharpness)));
-                v.push(("VICTORY_FRAMEGEN", if self.framegen { "1" } else { "0" }.to_string()));
+                v.push(("SCARLETT_UPSCALE_QUALITY", self.quality.clone()));
+                v.push(("SCARLETT_UPSCALE_SHARPNESS", num(self.sharpness)));
+                v.push(("SCARLETT_FRAMEGEN", if self.framegen { "1" } else { "0" }.to_string()));
             }
         }
         if self.ray_tracing {
-            v.push(("VICTORY_BVH_BUILDER", "1".to_string()));
+            v.push(("SCARLETT_BVH_BUILDER", "1".to_string()));
         }
         if self.overlay {
-            v.push(("VICTORY_PANEL", "1".to_string()));
+            v.push(("SCARLETT_PANEL", "1".to_string()));
         }
         v
     }
 
-    /// `(section, key, TOML value)` for `victory.toml`. Managed keys not returned here are
+    /// `(section, key, TOML value)` for `scarlett.toml`. Managed keys not returned here are
     /// removed by [`merge_toml`], so a setting turned back to its default is reset in the file too.
     pub fn toml_keys(&self, fsr: bool) -> Vec<(&'static str, &'static str, String)> {
         let q = |s: &str| format!("\"{s}\"");
@@ -253,18 +253,18 @@ mod tests {
         let t = Tuning { full_textures: true, hdr: true, pad_ps: true, rumble_strength: 1.5, kbm_hints: "off".into(), frame_cap: 30, upscaler: "fsr".into(), framegen: true, ..Tuning::default() };
         let e = t.env(true);
         let get = |k: &str| e.iter().find(|(n, _)| *n == k).map(|(_, v)| v.as_str());
-        assert_eq!(get("VICTORY_TEXTURES"), Some("full"));
-        assert_eq!(get("VICTORY_HDR"), Some("1"));
-        assert_eq!(get("VICTORY_PAD_PS"), Some("1"));
-        assert_eq!(get("VICTORY_RUMBLE_STRENGTH"), Some("1.5"));
-        assert_eq!(get("VICTORY_KBM_HINTS"), Some("off"));
-        assert_eq!(get("VICTORY_PACE_FPS"), Some("30"));
-        assert_eq!(get("VICTORY_UPSCALER"), Some("fsr"));
-        assert_eq!(get("VICTORY_FRAMEGEN"), Some("1"));
+        assert_eq!(get("SCARLETT_TEXTURES"), Some("full"));
+        assert_eq!(get("SCARLETT_HDR"), Some("1"));
+        assert_eq!(get("SCARLETT_PAD_PS"), Some("1"));
+        assert_eq!(get("SCARLETT_RUMBLE_STRENGTH"), Some("1.5"));
+        assert_eq!(get("SCARLETT_KBM_HINTS"), Some("off"));
+        assert_eq!(get("SCARLETT_PACE_FPS"), Some("30"));
+        assert_eq!(get("SCARLETT_UPSCALER"), Some("fsr"));
+        assert_eq!(get("SCARLETT_FRAMEGEN"), Some("1"));
         // without the DLL, FSR is not asked for
-        assert!(t.env(false).iter().all(|(k, _)| !k.starts_with("VICTORY_UPSCAL") && *k != "VICTORY_FRAMEGEN"));
+        assert!(t.env(false).iter().all(|(k, _)| !k.starts_with("SCARLETT_UPSCAL") && *k != "SCARLETT_FRAMEGEN"));
         let off = Tuning { rumble: false, ..Tuning::default() };
-        assert_eq!(off.env(false), vec![("VICTORY_RUMBLE", "0".to_string())]);
+        assert_eq!(off.env(false), vec![("SCARLETT_RUMBLE", "0".to_string())]);
     }
 
     #[test]
@@ -272,8 +272,8 @@ mod tests {
         let t = Tuning { ray_tracing: true, overlay: true, ..Tuning::default() };
         let e = t.env(false);
         let get = |k: &str| e.iter().find(|(n, _)| *n == k).map(|(_, v)| v.as_str());
-        assert_eq!(get("VICTORY_BVH_BUILDER"), Some("1"));
-        assert_eq!(get("VICTORY_PANEL"), Some("1"));
+        assert_eq!(get("SCARLETT_BVH_BUILDER"), Some("1"));
+        assert_eq!(get("SCARLETT_PANEL"), Some("1"));
         assert_eq!(e.len(), 2);
         // Settings saved before these existed load with them off.
         let old: Tuning = serde_json::from_str(r#"{"hdr": true}"#).unwrap();

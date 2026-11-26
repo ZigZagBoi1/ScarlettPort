@@ -167,8 +167,8 @@ mod tests {
 
     #[test]
     fn scrubs_names_and_paths() {
-        let s = scrub(r"loading D:\Dumps\MyGame\x.rpf from E:\Cache\victory", &[(r"D:\Dumps\MyGame", "<game>"), (r"E:\Cache", "<cache>")]);
-        assert_eq!(s, r"loading <game>\x.rpf from <cache>\victory");
+        let s = scrub(r"loading D:\Dumps\MyGame\x.rpf from E:\Cache\scarlett", &[(r"D:\Dumps\MyGame", "<game>"), (r"E:\Cache", "<cache>")]);
+        assert_eq!(s, r"loading <game>\x.rpf from <cache>\scarlett");
         assert_eq!(replace_ci("Path C:\\USERS\\Bob\\x", "c:\\users\\bob", "~"), "Path ~\\x");
     }
 

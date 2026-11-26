@@ -4,7 +4,7 @@ Current state is in [STATUS.md](STATUS.md): the lit world at 5.4 fps while walki
 
 ## 1. Light in shadow
 
-Verified in the opening cell on the Series S profile and a Radeon RX 7900 XTX. Ray-traced bounce light brightens the wall and the papers by the bunk. The table casts a shadow under the fluorescent lamps. The launcher's ray-tracing option and `-RayTracing` in `scripts/play-victory.ps1` enable the builder and traversal. [Measurements and hardware](../engine/docs/fork-ray-tracing.md)
+Verified in the opening cell on the Series S profile and a Radeon RX 7900 XTX. Ray-traced bounce light brightens the wall and the papers by the bunk. The table casts a shadow under the fluorescent lamps. The launcher's ray-tracing option and `-RayTracing` in `scripts/play-scarlett.ps1` enable the builder and traversal. [Measurements and hardware](../engine/docs/fork-ray-tracing.md)
 
 The back of the inmate shirt can still render black. A capture traced that color to the material buffer before lighting. Other interiors and GPU models still need coverage.
 

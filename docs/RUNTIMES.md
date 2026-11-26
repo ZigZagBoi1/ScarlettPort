@@ -11,47 +11,47 @@ Both runtimes run a title from your own dump. Each currently gets further at som
 | Final image | lit; shadowed areas too dark; the tile-grid overlay is fixed | black |
 | Extras | frame capture, save slots, press file, fast boot (testing), launcher (default engine) | launcher (Classic engine), pipeline journal and offline build, profiles, achievements, crash reports |
 | Shader build | `scarlett warm` (about 3 min) then `scarlett precompile-graphics` (about 8 min) | `xcl shaders --precompile`: 45 min to hours (slow tail from 83%) |
-| Scripts | `setup-victory.ps1`, `play-victory.ps1`, launcher | `setup.ps1`, `play.ps1`, launcher |
+| Scripts | `setup-scarlett.ps1`, `play-scarlett.ps1`, launcher | `setup.ps1`, `play.ps1`, launcher |
 
 Neither is verified playable.
 
 ## ScarlettPort runtime
 
-The source lives in `engine/`. It started as a fork of VIctory (GPL-3.0) via fxceless/victory-fork (`main` at `4e17478`, see `engine/UPSTREAM.md`), with the victory-amd fork, community pull requests, our speed branches and our changes merged in. It includes the `image_bvh_intersect_ray` / `image_bvh64_intersect_ray` emulation (`crates/victory-shader/src/emit/intersect.rs`), so ray-tracing compute programs translate. Credits and the full lineage: [`CREDITS.md`](../CREDITS.md). Upstream is VIctory by Marvisak.
+The source lives in `engine/`. Its fork point is in `engine/UPSTREAM.md`; upstream forks, community pull requests, our speed branches and our changes merged in. It includes the `image_bvh_intersect_ray` / `image_bvh64_intersect_ray` emulation (`crates/scarlett-shader/src/emit/intersect.rs`), so ray-tracing compute programs translate. Credits and the full lineage: [`CREDITS.md`](../CREDITS.md).
 
 ```powershell
-.\scripts\setup-victory.ps1
-.\scripts\play-victory.ps1 -Game "D:\path\to\your\dump"
+.\scripts\setup-scarlett.ps1
+.\scripts\play-scarlett.ps1 -Game "D:\path\to\your\dump"
 ```
 
-Manual equivalent: build with `cargo rustc --release -p victory --bin scarlett --features diagnostics --locked -- -C link-arg=/EXPORT:D3D12SDKVersion,DATA -C link-arg=/EXPORT:D3D12SDKPath,DATA`, put the Agility SDK 1.614 DLLs in a `D3D12` folder next to `scarlett.exe`, then `scarlett.exe run "<dump>\game_scarlett_master.exe" --execute --console series-s`.
+Manual equivalent: build with `cargo rustc --release -p scarlett --bin scarlett --features diagnostics --locked -- -C link-arg=/EXPORT:D3D12SDKVersion,DATA -C link-arg=/EXPORT:D3D12SDKPath,DATA`, put the Agility SDK 1.614 DLLs in a `D3D12` folder next to `scarlett.exe`, then `scarlett.exe run "<dump>\game_scarlett_master.exe" --execute --console series-s`.
 
 `--console series-s` (the profile the measurements here were taken on) is the recommended default; `series-x` is the runtime's own default.
 
-Every switch is read as `SCARLETT_*` first and as the older `VICTORY_*` name otherwise; both keep working. The full list is in the source and in `engine/README.md`; the ones the scripts use or that matter most:
+Every switch is a `SCARLETT_*` environment variable. The full list is in the source and in `engine/README.md`; the ones the scripts use or that matter most:
 
 | Variable | Effect |
 |---|---|
 | `SCARLETT_GAME_DIR` | the dump folder (required) |
-| `SCARLETT_OWN_UPSCALER=1` | ask for the title's own upscaler instead of FSR on the Series S profile. Set by `play-victory.ps1`; read by the source vendored here (`crates/victory-loader/src/hooks.rs`) |
-| `SCARLETT_NO_WATCHDOG=1` | disarm the title's stall watchdog so it can wait for slow first-run shader builds. Set by `play-victory.ps1` |
+| `SCARLETT_OWN_UPSCALER=1` | ask for the title's own upscaler instead of FSR on the Series S profile. Set by `play-scarlett.ps1`; read by the source vendored here (`crates/scarlett-loader/src/hooks.rs`) |
+| `SCARLETT_NO_WATCHDOG=1` | disarm the title's stall watchdog so it can wait for slow first-run shader builds. Set by `play-scarlett.ps1` |
 | `SCARLETT_FAST_BOOT=1` | testing only: press through logos and menus, stop once in the world |
 | `SCARLETT_SAVE_SLOT=<name>` | pick a save slot |
 | `SCARLETT_AUTO_INPUT=1` | press A on a timer |
 | `SCARLETT_KBM=0` | turn off keyboard and mouse as a pad (on by default; keys and settings in `engine/docs/input.md`) |
 | `SCARLETT_PRESS_FILE=<file>` | live input: button and stick tokens written to the file are pressed |
 | `SCARLETT_CAPTURE_EVERY=N` | save the frame every N frames (diagnostics build) |
-| `SCARLETT_RELAY=1\|2` | submission relay (off in the runtime by default; `play-victory.ps1` sets `2`) |
-| `SCARLETT_SYNC_PRECISE=1` | a submission waits only for the submissions it depends on. Set by `play-victory.ps1` |
-| `SCARLETT_READ_SETTLE_PRECISE=1` | read-backs settle on the exact submissions they need (needs the relay). Set by `play-victory.ps1` |
-| `SCARLETT_PRECOMPILED_GRAPHICS=1` | make graphics pipelines from the title's precompiled cache, prebuilt with `scarlett precompile-graphics` (25,200 of 25,471 made). Set by `play-victory.ps1`, which runs the precompile once; `setup-victory.ps1 -Game <dump>` can do it too |
-| `SCARLETT_PIPELINE_WAIT_MS=0` | do not hold a draw back for a pipeline build. Set by `play-victory.ps1` |
+| `SCARLETT_RELAY=1\|2` | submission relay (off in the runtime by default; `play-scarlett.ps1` sets `2`) |
+| `SCARLETT_SYNC_PRECISE=1` | a submission waits only for the submissions it depends on. Set by `play-scarlett.ps1` |
+| `SCARLETT_READ_SETTLE_PRECISE=1` | read-backs settle on the exact submissions they need (needs the relay). Set by `play-scarlett.ps1` |
+| `SCARLETT_PRECOMPILED_GRAPHICS=1` | make graphics pipelines from the title's precompiled cache, prebuilt with `scarlett precompile-graphics` (25,200 of 25,471 made). Set by `play-scarlett.ps1`, which runs the precompile once; `setup-scarlett.ps1 -Game <dump>` can do it too |
+| `SCARLETT_PIPELINE_WAIT_MS=0` | do not hold a draw back for a pipeline build. Set by `play-scarlett.ps1` |
 | `SCARLETT_SHADER_OPT=on` | opt-in shader clean-up passes (off by default; they can drop walls and roofs on some cards) |
 | `SCARLETT_FAIR_DUE=0\|1\|2` | order of the texture upload queue. `2` (default): textures showing less than the title holds first, then the longest due; `1`: plain turns; `0`: the older order |
 | `SCARLETT_TEX_SPAN_PCT=<n>` | share of a long frame the texture pass may take (25 by default; `0`: off) |
 | `SCARLETT_SHADER_LOOP_LIMIT=<n>` | cap on translated shader loop iterations (can smear hair; unset by default) |
 
-### Verified speed settings (set by `play-victory.ps1` and the launcher; each is off in the runtime itself)
+### Verified speed settings (set by `play-scarlett.ps1` and the launcher; each is off in the runtime itself)
 
 Measured together on the reference machine (RTX 3060, Series S profile): the per-frame read waits drop from about 156 to about 26 ms.
 
@@ -73,7 +73,7 @@ None of these has been measured on the reference machine in this build. Try them
 | `SCARLETT_CLAMP_SCOPED=1` | an indirect clamp waits only on its argument and count buffers |
 | `SCARLETT_CLAMP_LIGHT_RESTORE` | light state restore after a clamp; on by default, `=0` turns it off |
 | `SCARLETT_BARRIER_MERGE=1` | barriers on all resources only where unordered writes are pending; one call's barriers merged |
-| `SCARLETT_MEM2_GPU_ONLY_NOSNAP=1`, `SCARLETT_MEM2_GPU_ONLY_NOVIEW=1`, `SCARLETT_MEM2_PAGE_REHASH=1` | the second round of memory work (`engine/crates/victory-core/src/mem2.rs`): off by default and left off by `play-victory.ps1`, like the pipeline-cache fix branch (`fx-msfix`) |
+| `SCARLETT_MEM2_GPU_ONLY_NOSNAP=1`, `SCARLETT_MEM2_GPU_ONLY_NOVIEW=1`, `SCARLETT_MEM2_PAGE_REHASH=1` | the second round of memory work (`engine/crates/scarlett-core/src/mem2.rs`): off by default and left off by `play-scarlett.ps1`, like the pipeline-cache fix branch (`fx-msfix`) |
 | `SCARLETT_BARRIER_HAZARD=1` | hold waits for earlier shader work until a direct dispatch conflicts with them |
 | `SCARLETT_BARRIER_LITERAL=1` | read barrier groups exactly as D3D12 lays them out |
 | `SCARLETT_FENCE_PRECISE=1` | a blocking fence wait waits only for that fence's own signal |
@@ -91,8 +91,8 @@ None of these has been measured on the reference machine in this build. Try them
 
 The launcher's **Build shaders** runs, from the `runtime` folder beside it:
 
-1. `victory warm "<dump>" --jobs N` with `SCARLETT_GAME_DIR=<dump>` and `SCARLETT_CACHE_DIR=<cache>\victory`: translates every shader into the cache and makes the compute pipelines. About 3 min (171 s for 25,889 shaders on a 12-thread CPU). It prints a line every 2,000 shaders; between lines the launcher shows the current range and its elapsed time. `N` is the logical core count minus one, capped by free RAM (512 MB per job).
-2. `victory precompile-graphics "<dump>\shaders.rpf" --skip S --limit 1000` in chunks of 1,000 records, each saved when it ends (491 s for 25,200 pipelines in one run). **On**: the rectangle-list fix is in this copy, so play runs set `SCARLETT_PRECOMPILED_GRAPHICS=1` and the launcher runs this phase (`engine::PRECOMPILED_GRAPHICS` controls both).
+1. `scarlett warm "<dump>" --jobs N` with `SCARLETT_GAME_DIR=<dump>` and `SCARLETT_CACHE_DIR=<cache>\scarlett`: translates every shader into the cache and makes the compute pipelines. About 3 min (171 s for 25,889 shaders on a 12-thread CPU). It prints a line every 2,000 shaders; between lines the launcher shows the current range and its elapsed time. `N` is the logical core count minus one, capped by free RAM (512 MB per job).
+2. `scarlett precompile-graphics "<dump>\shaders.rpf" --skip S --limit 1000` in chunks of 1,000 records, each saved when it ends (491 s for 25,200 pipelines in one run). **On**: the rectangle-list fix is in this copy, so play runs set `SCARLETT_PRECOMPILED_GRAPHICS=1` and the launcher runs this phase (`engine::PRECOMPILED_GRAPHICS` controls both).
 
 Resuming: finished steps and chunks are recorded in `<cache>\build-world.json`, keyed by the SHA-256 of `scarlett.exe`; translated shaders are read back from the cache, so a restarted build skips them. A different `scarlett.exe` starts the record over; the translation cache is keyed by the translator's source, so only a translator change makes every shader translate again. Play runs use the same `SCARLETT_CACHE_DIR`.
 

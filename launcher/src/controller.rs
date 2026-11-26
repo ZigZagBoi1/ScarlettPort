@@ -1,6 +1,6 @@
 //! Controller detection for the Play page: Xbox pads through XInput, PlayStation pads
 //! (DualShock 4, DualSense, DualSense Edge) through the raw-input HID list. The runtime reads
-//! PlayStation pads itself over USB when `VICTORY_PAD_PS=1` (set by every World preset).
+//! PlayStation pads itself over USB when `SCARLETT_PAD_PS=1` (set by every World preset).
 //! Polled at most every two seconds; the naming and the line are pure and unit tested.
 use std::sync::Mutex;
 use std::time::{Duration, Instant};

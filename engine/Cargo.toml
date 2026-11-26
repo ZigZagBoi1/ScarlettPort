@@ -13,15 +13,15 @@ publish = false
 
 [workspace.dependencies]
 # Internal crates
-victory-core = { path = "crates/victory-core" }
-victory-pe = { path = "crates/victory-pe" }
-victory-loader = { path = "crates/victory-loader" }
-victory-hle = { path = "crates/victory-hle" }
-victory-gpu = { path = "crates/victory-gpu" }
-victory-shader = { path = "crates/victory-shader" }
-victory-formats = { path = "crates/victory-formats" }
-victory-pipeline = { path = "crates/victory-pipeline" }
-victory-game = { path = "crates/victory-game" }
+scarlett-core = { path = "crates/scarlett-core" }
+scarlett-pe = { path = "crates/scarlett-pe" }
+scarlett-loader = { path = "crates/scarlett-loader" }
+scarlett-hle = { path = "crates/scarlett-hle" }
+scarlett-gpu = { path = "crates/scarlett-gpu" }
+scarlett-shader = { path = "crates/scarlett-shader" }
+scarlett-formats = { path = "crates/scarlett-formats" }
+scarlett-pipeline = { path = "crates/scarlett-pipeline" }
+scarlett-game = { path = "crates/scarlett-game" }
 
 # External crates
 anyhow = "1.0.104"
@@ -73,7 +73,7 @@ opt-level = 2
 debug = "line-tables-only"
 
 # The development build: release code generation plus the `diagnostics`
-# feature (`cargo build --profile diag -p victory --features diagnostics`),
+# feature (`cargo build --profile diag -p scarlett --features diagnostics`),
 # kept in its own folder so it does not evict the plain release build.
 [profile.diag]
 inherits = "release"

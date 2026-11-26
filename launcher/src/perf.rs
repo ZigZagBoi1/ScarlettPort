@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn parses_intervals() {
-        let l = "2026-11-25T03:19:48.820868Z  INFO victory_gpu::host: 1.3 fps, 781.5 ms/frame (0.2 preparing: copies 0.0 ms), 0 draws/frame, dro";
+        let l = "2026-11-25T03:19:48.820868Z  INFO scarlett_gpu::host: 1.3 fps, 781.5 ms/frame (0.2 preparing: copies 0.0 ms), 0 draws/frame, dro";
         assert_eq!(interval(l), Some((1.3, 781.5, Some(0))));
         assert_eq!(timestamp(l).map(|t| t.round()), Some((3 * 3600 + 19 * 60 + 49) as f64));
         assert_eq!(strip_ansi("\u{1b}[2mA\u{1b}[0m B"), "A B");
@@ -177,9 +177,9 @@ mod tests {
     fn readout() {
         let log = [
             "2026-11-25T03:00:00.000Z  INFO x: starting",
-            "2026-11-25T03:00:30.000Z  INFO victory_gpu::host: 30.0 fps, 33.3 ms/frame (x), 40 draws/frame",
-            "2026-11-25T03:01:42.000Z  INFO victory_gpu::host: 3.0 fps, 263.0 ms/frame (x), 4200 draws/frame",
-            "2026-11-25T03:01:52.000Z  INFO victory_gpu::host: 5.0 fps, 200.0 ms/frame (x), 4300 draws/frame",
+            "2026-11-25T03:00:30.000Z  INFO scarlett_gpu::host: 30.0 fps, 33.3 ms/frame (x), 40 draws/frame",
+            "2026-11-25T03:01:42.000Z  INFO scarlett_gpu::host: 3.0 fps, 263.0 ms/frame (x), 4200 draws/frame",
+            "2026-11-25T03:01:52.000Z  INFO scarlett_gpu::host: 5.0 fps, 200.0 ms/frame (x), 4300 draws/frame",
         ];
         let p = parse(log, None);
         assert_eq!(p.samples, 2);

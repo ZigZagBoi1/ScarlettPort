@@ -32,7 +32,7 @@ CI (`.github/workflows/ci.yml`) also checks that no `.exe`, `.dll`, `.pdb`, `.rp
 ## Working on a runtime
 
 - `runtime/xcl`: read `runtime/xcl/AGENTS.md` for its build, test and code-style notes.
-- `engine`: `cargo rustc --release -p victory --bin scarlett --features diagnostics --locked -- -C link-arg=/EXPORT:D3D12SDKVersion,DATA -C link-arg=/EXPORT:D3D12SDKPath,DATA`
+- `engine`: `cargo rustc --release -p scarlett --bin scarlett --features diagnostics --locked -- -C link-arg=/EXPORT:D3D12SDKVersion,DATA -C link-arg=/EXPORT:D3D12SDKPath,DATA`
 - Fixes that are general (not title-specific) are worth upstreaming too. Each runtime has its own repo.
 
 ## Useful switches
@@ -42,7 +42,7 @@ CI (`.github/workflows/ci.yml`) also checks that no `.exe`, `.dll`, `.pdb`, `.rp
 | `XCL_LAZY_PSO=0` | XCL | compile every pipeline up front instead of on first use |
 | `XCL_PRESS_AT=20:A,23:DOWN,…` | XCL | scripted controller presses (seconds:button) |
 | `XCL_DXC_THREADS=N` | XCL | shader compile threads |
-| `SCARLETT_AUTO_INPUT=1` | VIctory | press A every 2 s for the first 2 minutes |
-| `SCARLETT_WAVE64_EMULATE=1` | VIctory | emulate 64-lane waves on 32-lane GPUs |
-| `SCARLETT_CAPTURE_EVERY=N` | VIctory | save the frame and every render target every N frames |
-| `SCARLETT_SHOW_TARGET=WxH-fN` | VIctory | show an internal render target in the window (with `SCARLETT_DEBUG_PS=1`) |
+| `SCARLETT_AUTO_INPUT=1` | ScarlettPort | press A every 2 s for the first 2 minutes |
+| `SCARLETT_WAVE64_EMULATE=1` | ScarlettPort | emulate 64-lane waves on 32-lane GPUs |
+| `SCARLETT_CAPTURE_EVERY=N` | ScarlettPort | save the frame and every render target every N frames |
+| `SCARLETT_SHOW_TARGET=WxH-fN` | ScarlettPort | show an internal render target in the window (with `SCARLETT_DEBUG_PS=1`) |

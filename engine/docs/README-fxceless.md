@@ -1,10 +1,10 @@
-> This is the README of fxceless/victory-fork as this fork had it, kept for its
+> This is the README of fxceless/scarlett-fork as this fork had it, kept for its
 > description of upstream, the commands and the debugging switches. What it says of
 > speed and state is of that fork and another PC; this fork: [README](../README.md).
 
-# VIctory fork (work in progress)
+# ScarlettPort fork (work in progress)
 
-A work-in-progress fork of [VIctory](https://github.com/Marvisak/VIctory), a
+A work-in-progress fork of the Marvisak upstream (see CREDITS.md), a
 compatibility layer that runs an Xbox Series title natively on Windows from
 files the user supplies. This fork follows upstream
 `main` and adds fixes aimed at one goal: getting the game's world to render
@@ -16,18 +16,18 @@ developer or publisher.
 
 ## Credits
 
-- **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and its
+- **the Marvisak upstream (see CREDITS.md)** by Marvisak and its
   contributors is the base of everything here: the loader, the runtime
   services, the Direct3D 12 back end and the shader recompiler. Licensed
   GPL-3.0-or-later; so is this fork. Upstream's history is kept intact below
   the single commit that carries this fork's changes.
 - **[XCL](https://github.com/ivall/xcl)** by ivall and its contributors
   (GPL-2.0-only) was used as a reference for how the same title behaves under
-  another layer. Fixes inspired by it were written anew in VIctory's code.
+  another layer. Fixes inspired by it were written anew in ScarlettPort's code.
 - The guard over every view of a memory page is code by **myokex**
-  ([victory-amd](https://github.com/myokex/victory-amd), commit `c6dc4d8`), which
+  (the myokex upstream (see CREDITS.md), commit `c6dc4d8`), which
   adapts pull request #115 here by Spexivus, its correction by joroyt and a part of
-  VIctory #1122 by tightfall. The read-beside fix for kernel reads into title
+  ScarlettPort #1122 by tightfall. The read-beside fix for kernel reads into title
   memory is by **Joshua Odom** (commit `10ea38e` of the same fork family). Both
   are carried here unchanged apart from one merge conflict.
 - This fork's changes were developed with [Claude Code](https://claude.com/claude-code).
@@ -45,8 +45,8 @@ Tested on one machine: Windows 11, Intel i7-14700KF, NVIDIA RTX 4070 12 GB,
 | Saves | the game autosaves a checkpoint and loads it again |
 | First gameplay scene (the prologue) | renders: characters, textures, sky, sunlit exterior; HUD, pause menu and pad input work |
 | Light in shadow | missing: the game's ray-traced bounce light and ray-traced lamp and sun shadows do not run yet, so anything the sun does not hit directly is black |
-| Frame rate in the world | 2-4 fps: 420-450 ms per frame by default, 240-350 ms with the newer switches (`VICTORY_RELAY=2`, or `VICTORY_LATE_WAIT=3 VICTORY_WIDE_BACK=1 VICTORY_CARD_BUFFERS_MIN_MB=1 VICTORY_CARD_BUFFERS_MB=1024`); it started at 3-6 seconds per frame |
-| Stability | no driver hang or device loss in normal runs (a hang introduced by the wave64 update was found and fixed: its barrier form for 64-lane programs is now off unless `VICTORY_WAVE_WIDE=1`) |
+| Frame rate in the world | 2-4 fps: 420-450 ms per frame by default, 240-350 ms with the newer switches (`SCARLETT_RELAY=2`, or `SCARLETT_LATE_WAIT=3 SCARLETT_WIDE_BACK=1 SCARLETT_CARD_BUFFERS_MIN_MB=1 SCARLETT_CARD_BUFFERS_MB=1024`); it started at 3-6 seconds per frame |
+| Stability | no driver hang or device loss in normal runs (a hang introduced by the wave64 update was found and fixed: its barrier form for 64-lane programs is now off unless `SCARLETT_WAVE_WIDE=1`) |
 
 ### Newest (2026-11-25, later the same day)
 
@@ -56,7 +56,7 @@ frames a second): the picture work has caught up, the frame rate has not.
 What did it, on top of the list below:
 - Descriptor records the title copies into its heap as plain bytes are
   mirrored before every submission (pull request #305 by Flyander, after
-  upstream VIctory 86a5ed6). Measured here: about 40,000 records a frame
+  upstream ScarlettPort 86a5ed6). Measured here: about 40,000 records a frame
   that no call had announced; their host slots were empty or stale.
 - A buffer view that does not start on an element of its buffer's host
   copy gets a copy of its own bytes instead of being refused (after
@@ -66,7 +66,7 @@ What did it, on top of the list below:
   the runs before made 1, and the processor no longer compares 550 to
   710 MB a frame looking for shader writes (25 MB now).
 - Levels on demand ran on the card for the first time
-  (`VICTORY_LEVELS_ON_DEMAND=1`, still off by default; with the fixes of
+  (`SCARLETT_LEVELS_ON_DEMAND=1`, still off by default; with the fixes of
   pull request #747 by AscilCH): 3.1 GB of the card not allocated for
   texture levels the title does not hold, no device loss.
 - Guarded blocks under storage writes are opened by default; 14 more
@@ -79,7 +79,7 @@ What did it, on top of the list below:
 
 Memory sync between the title's memory and the copies on the card:
 - **A write through one view of a physical page is seen by the copies taken
-  through its other views** (`VICTORY_VIEW_GUARD=0` turns it off). The title
+  through its other views** (`SCARLETT_VIEW_GUARD=0` turns it off). The title
   shows one page at several addresses and a copy was guarded at one of them
   only. Measured on the test machine: 0.8 to 1.0 million such writes in a
   five-minute run, every one of which used to leave a copy stale. Since it
@@ -91,30 +91,30 @@ Memory sync between the title's memory and the copies on the card:
 - Writes of the storage layer into physical pages are counted where the title
   has those pages mapped (10,000 to 50,000 guarded blocks of copies lay under
   them in every run) and can open the guards there:
-  `VICTORY_PAGE_WRITES=guards` (off by default; `1`, `slots`, `all` do more).
-- Failed page-destination reads are retried (`VICTORY_DSTORAGE_RETRIES=0` = as before).
+  `SCARLETT_PAGE_WRITES=guards` (off by default; `1`, `slots`, `all` do more).
+- Failed page-destination reads are retried (`SCARLETT_DSTORAGE_RETRIES=0` = as before).
 
 Card memory (the test card is full from the first frame of the world: 85 to
 99 % of its budget for a whole run, about 26,000 texture copies let go and
 3,400 made again in five minutes, 2.8 GB of render targets that are all in
 use):
-- Levels on demand, **off by default** (`VICTORY_LEVELS_ON_DEMAND=1`): a
+- Levels on demand, **off by default** (`SCARLETT_LEVELS_ON_DEMAND=1`): a
   texture the title fills takes card memory only for the levels the title
   holds (2.2 to 3.0 GB of the copies were levels it does not hold). Its test
   runs on the software adapter; it has not run on a card yet.
 - Refused texture slots are held back for a few seconds so that a pass
-  reaches the slots behind them (`VICTORY_FULL_CARD_PASS=0` = as before);
+  reaches the slots behind them (`SCARLETT_FULL_CARD_PASS=0` = as before);
   room can be kept for the card copies of title buffers
-  (`VICTORY_CARD_ROOM_FOR_BUFFERS=1`, off).
+  (`SCARLETT_CARD_ROOM_FOR_BUFFERS=1`, off).
 
 Tools and diagnostics:
-- `victory translate <shader file> --warm all --jobs N` translates every
+- `scarlett translate <shader file> --warm all --jobs N` translates every
   shader ahead of a run, on the processor only (about 4.5 to 6.5 minutes
   here); the shader cache is keyed on the translator's source, so a new
   build that does not touch the translator starts warm.
-- Counters, all off or diagnostics-only: `VICTORY_MERGE_RACE=1` (title bytes
+- Counters, all off or diagnostics-only: `SCARLETT_MERGE_RACE=1` (title bytes
   a copy-back is about to put back to older values: none found in 138,000
-  copy-backs), `VICTORY_WALLS_TRACE`, `VICTORY_CARD_ACCOUNTING`, and a census
+  copy-backs), `SCARLETT_WALLS_TRACE`, `SCARLETT_CARD_ACCOUNTING`, and a census
   of the copies the texture sweep never lets go.
 
 ### What this fork changed (summary)
@@ -132,17 +132,17 @@ Rendering:
 Speed and memory:
 - Waits for memory values, write-watch queries and page queries no longer walk page tables per call.
 - Large title buffers get a copy in card memory, with shader writes found by hashing on the card.
-- Submissions can be sent ahead of the wait for the card (`VICTORY_LATE_WAIT`), with a relay thread that lands results as the card finishes (`VICTORY_RELAY`): in a first five-minute run the card's idle time behind the submitting thread fell from about 136 to 30 ms per frame.
-- Independent host-copy refreshes run in parallel by default on systems with at least four logical CPUs (`VICTORY_WIDE_REFRESH=0` disables this; `=1` forces it). This targets the serial memory reads that previously cost about 45–50 ms per frame on the test run.
-- Title memory can be opened as a graphics heap so that buffers are used in place instead of copied (`VICTORY_INPLACE`, first stage only; a probe confirmed the approach on the test GPU).
+- Submissions can be sent ahead of the wait for the card (`SCARLETT_LATE_WAIT`), with a relay thread that lands results as the card finishes (`SCARLETT_RELAY`): in a first five-minute run the card's idle time behind the submitting thread fell from about 136 to 30 ms per frame.
+- Independent host-copy refreshes run in parallel by default on systems with at least four logical CPUs (`SCARLETT_WIDE_REFRESH=0` disables this; `=1` forces it). This targets the serial memory reads that previously cost about 45–50 ms per frame on the test run.
+- Title memory can be opened as a graphics heap so that buffers are used in place instead of copied (`SCARLETT_INPLACE`, first stage only; a probe confirmed the approach on the test GPU).
 - The bindless texture queue no longer uploads stale views; the view table no longer grows without bound; the pipeline library is mapped instead of read into memory.
 - An intermittent device loss was traced to the pipeline library file being replaced while mapped; fixed.
 
-- Translated shaders get clean-up passes over the finished module (dead code, constant folding, reuse of values, branch facts); the pack's host instruction count falls by about 43 %, worth about 20 ms of GPU time per frame on the test machine (`VICTORY_SHADER_OPT=0` turns them off).
+- Translated shaders get clean-up passes over the finished module (dead code, constant folding, reuse of values, branch facts); the pack's host instruction count falls by about 43 %, worth about 20 ms of GPU time per frame on the test machine (`SCARLETT_SHADER_OPT=0` turns them off).
 
 Most of the newer speed changes sit behind environment switches that are off
-by default (`VICTORY_LATE_WAIT`, `VICTORY_RELAY`, `VICTORY_WIDE_BACK`,
-`VICTORY_CARD_BUFFERS_MIN_MB`, `VICTORY_INPLACE`, `VICTORY_BVH_BUILDER`, ...).
+by default (`SCARLETT_LATE_WAIT`, `SCARLETT_RELAY`, `SCARLETT_WIDE_BACK`,
+`SCARLETT_CARD_BUFFERS_MIN_MB`, `SCARLETT_INPLACE`, `SCARLETT_BVH_BUILDER`, ...).
 Independent host-copy refreshes are the exception: they use parallel workers
 automatically on systems with at least four logical CPUs. Each switch is
 described in a comment where it is read.
@@ -155,17 +155,17 @@ described in a comment where it is read.
 - A few style lints are switched off for this fork in the workspace `Cargo.toml` until the newer code is tidied.
 - Many changes here are specific to this title and this GPU, and some are marked `shortcut:` in the code where they approximate what the console does.
 
-Everything below this line is upstream VIctory's own README, unchanged; its
+Everything below this line is upstream ScarlettPort's own README, unchanged; its
 status section describes upstream, not this fork.
 
 ---
 
-# VIctory
+# ScarlettPort
 
 Runs the title (Xbox Series X|S) natively on Windows, from files
 the user supplies.
 
-The title's x86-64 code runs unchanged inside our process; VIctory supplies
+The title's x86-64 code runs unchanged inside our process; ScarlettPort supplies
 the platform underneath it and converts the title's data, ahead of time where
 it can (shaders and pipelines too, see Getting started) and on first use
 otherwise. See [docs/architecture.md](architecture.md).
@@ -189,7 +189,7 @@ Tested on one machine: Windows 11, AMD RX 6700 XT.
 > builds, and Windows then resets the display driver (every monitor goes
 > black for a moment). The latest runs did not, but it is not ruled out; a
 > run can also end on a GPU fault (`crashes.log`). A diagnostics build with
-> `VICTORY_D3D12_WARP=1` renders on the software adapter instead (too slow
+> `SCARLETT_D3D12_WARP=1` renders on the software adapter instead (too slow
 > to reach the world in minutes).
 
 What each part does today and what it still needs:
@@ -227,23 +227,23 @@ the Windows paging file size, then retry.
 
 ```powershell
 cargo xtask install-hooks                # asset-policy check on every commit
-copy victory.example.toml victory.toml   # then set your paths (outside the repo)
+copy scarlett.example.toml scarlett.toml   # then set your paths (outside the repo)
 cargo test --workspace                   # needs no game data
-cargo run -p victory -- config           # check your paths
+cargo run -p scarlett -- config           # check your paths
 ```
 
 Run the title:
 
 ```powershell
-cargo build --release -p victory
-target\release\victory.exe run <game dir>\<the title's exe> --execute
+cargo build --release -p scarlett
+target\release\scarlett.exe run <game dir>\<the title's exe> --execute
 ```
 
 The window caption shows the framerate. Saves, settings and `crashes.log`
-are kept under the data folder (default `%LOCALAPPDATA%\victory\data`), derived
+are kept under the data folder (default `%LOCALAPPDATA%\ScarlettPort\data`), derived
 data under the cache folder.
 
-Set `VICTORY_WINDOW_MAX=1920x1080` before launching to limit the title's
+Set `SCARLETT_WINDOW_MAX=1920x1080` before launching to limit the title's
 top-level window to that bounding box. Smaller windows keep their size,
 larger windows keep their proportions, and the monitor's work area still
 limits them. This scales the displayed image; it does not change the
@@ -265,17 +265,17 @@ title's window has focus:
 ## Commands
 
 ```
-victory inspect <exe|dll> [--imports] [--exports]
-victory census [paths...] [--missing] [--strict]
-victory lib-exports <import.lib> [--list]
-victory shader-info [paths...] [--verbose] [--disasm]
-victory translate [paths...] [--validate] [--pipelines] [--list] [--jobs N]
-victory run <exe> [--execute] [--unimplemented trap|zero] [--strict]
+scarlett inspect <exe|dll> [--imports] [--exports]
+scarlett census [paths...] [--missing] [--strict]
+scarlett lib-exports <import.lib> [--list]
+scarlett shader-info [paths...] [--verbose] [--disasm]
+scarlett translate [paths...] [--validate] [--pipelines] [--list] [--jobs N]
+scarlett run <exe> [--execute] [--unimplemented trap|zero] [--strict]
             [--console series-x|series-s] [-- <title arguments>]
-victory config
+scarlett config
 ```
 
-Logging: `VICTORY_LOG=victory_loader=trace,info` (a release build logs
+Logging: `SCARLETT_LOG=scarlett_loader=trace,info` (a release build logs
 info and above).
 
 ### Windows shader-test validator
@@ -287,8 +287,8 @@ from [Microsoft's DirectX Shader Compiler releases](https://github.com/microsoft
 or a current Windows SDK. Set its path for the test session:
 
 ```powershell
-$env:VICTORY_DXIL = 'C:\tools\dxc\bin\x64\dxil.dll'
-cargo test -p victory-shader --lib --locked -- --test-threads=1
+$env:SCARLETT_DXIL = 'C:\tools\dxc\bin\x64\dxil.dll'
+cargo test -p scarlett-shader --lib --locked -- --test-threads=1
 ```
 
 Without this override, the validator loader selects the newest installed
@@ -301,31 +301,31 @@ the translated shaders do not require it at runtime.
 A release build has no debugging aids. Build them in with
 
 ```powershell
-cargo build --profile diag -p victory --features diagnostics   # target\diag\victory.exe
+cargo build --profile diag -p scarlett --features diagnostics   # target\diag\scarlett.exe
 ```
 
 The on/off switches below (`...=1`) are off when unset or set to `0`.
 
 | Variable | Effect |
 |----------|--------|
-| `VICTORY_LOG=<target>=debug,...` | debug and trace output |
-| `VICTORY_STACKS=20,60` | every thread's stack at those seconds |
-| `VICTORY_WATCH=<rva>,...` | logs a title u32 when it changes |
-| `VICTORY_POKE=<rva>:<byte>,...` | writes a title byte twice a second (a hang watchdog's tick, say) |
-| `VICTORY_KEYS=30:Enter,35:X` | presses keys at those seconds, focus or not |
-| `VICTORY_CRASH_SAVE=<rva>:<len>,...` | saves title memory to the cache folder on a crash |
-| `VICTORY_CAPTURE=<dir>` | saves presented frames (powers of two, or `VICTORY_CAPTURE_FRAMES=<list>`) |
-| `VICTORY_DUMP_TARGETS=1` | with the two above, saves every render target of those frames |
-| `VICTORY_D3D12_DEBUG=1` | host debug layer |
-| `VICTORY_D3D12_GBV=1` | with the above, GPU-based validation (bad descriptor use reported, not faulted; slow) |
-| `VICTORY_D3D12_DRED=1` | on a GPU failure, the allocation hit and the commands in flight |
-| `VICTORY_PIPELINE_WAIT_MS=24` | reduce the per-frame wait for background pipeline creation from the default of 500 ms. A draw can be omitted until its pipeline is ready |
-| `VICTORY_SKIP_PIPELINES=<hash>,...` | omit draws and dispatches, including indirect ones, whose pipeline contains a listed 16-digit shader hash |
-| `VICTORY_GPU_TIMING=1` | with the above, each list of a submission run and timed on its own; slow lists logged with their slowest commands |
-| `VICTORY_D3D12_WARP=1` | host device on the software adapter (slow; cannot reset the driver) |
-| `VICTORY_SHADER_LOOP_LIMIT=<n>` | translated shader loops stop after `n` iterations per lane instead of 2^20 (own shader cache entries); if a lower `n` makes world frames much faster, loops hitting the limit are what makes them slow |
-| `VICTORY_AUDIO_CAPTURE=<file.wav>` | records what the title plays (our process only) |
-| `VICTORY_XMA_DUMP=<dir>` | saves the first 32 XMA voices' context and input |
+| `SCARLETT_LOG=<target>=debug,...` | debug and trace output |
+| `SCARLETT_STACKS=20,60` | every thread's stack at those seconds |
+| `SCARLETT_WATCH=<rva>,...` | logs a title u32 when it changes |
+| `SCARLETT_POKE=<rva>:<byte>,...` | writes a title byte twice a second (a hang watchdog's tick, say) |
+| `SCARLETT_KEYS=30:Enter,35:X` | presses keys at those seconds, focus or not |
+| `SCARLETT_CRASH_SAVE=<rva>:<len>,...` | saves title memory to the cache folder on a crash |
+| `SCARLETT_CAPTURE=<dir>` | saves presented frames (powers of two, or `SCARLETT_CAPTURE_FRAMES=<list>`) |
+| `SCARLETT_DUMP_TARGETS=1` | with the two above, saves every render target of those frames |
+| `SCARLETT_D3D12_DEBUG=1` | host debug layer |
+| `SCARLETT_D3D12_GBV=1` | with the above, GPU-based validation (bad descriptor use reported, not faulted; slow) |
+| `SCARLETT_D3D12_DRED=1` | on a GPU failure, the allocation hit and the commands in flight |
+| `SCARLETT_PIPELINE_WAIT_MS=24` | reduce the per-frame wait for background pipeline creation from the default of 500 ms. A draw can be omitted until its pipeline is ready |
+| `SCARLETT_SKIP_PIPELINES=<hash>,...` | omit draws and dispatches, including indirect ones, whose pipeline contains a listed 16-digit shader hash |
+| `SCARLETT_GPU_TIMING=1` | with the above, each list of a submission run and timed on its own; slow lists logged with their slowest commands |
+| `SCARLETT_D3D12_WARP=1` | host device on the software adapter (slow; cannot reset the driver) |
+| `SCARLETT_SHADER_LOOP_LIMIT=<n>` | translated shader loops stop after `n` iterations per lane instead of 2^20 (own shader cache entries); if a lower `n` makes world frames much faster, loops hitting the limit are what makes them slow |
+| `SCARLETT_AUDIO_CAPTURE=<file.wav>` | records what the title plays (our process only) |
+| `SCARLETT_XMA_DUMP=<dir>` | saves the first 32 XMA voices' context and input |
 
 Every build appends crashes and host GPU failures to `crashes.log` in the
 title's data folder.

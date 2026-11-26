@@ -25,18 +25,18 @@ GPU tests print `SKIPPED <test>: <reason>` and pass when the adapter cannot run 
 
 ```powershell
 cd engine
-cargo rustc --release -p victory --bin scarlett --features diagnostics --locked -- -C link-arg=/EXPORT:D3D12SDKVersion,DATA -C link-arg=/EXPORT:D3D12SDKPath,DATA
+cargo rustc --release -p scarlett --bin scarlett --features diagnostics --locked -- -C link-arg=/EXPORT:D3D12SDKVersion,DATA -C link-arg=/EXPORT:D3D12SDKPath,DATA
 ```
 
-The two `/EXPORT` flags are required so Windows loads the Agility SDK placed next to the executable. `.\scripts\setup-victory.ps1` runs this command and does the Agility SDK step.
+The two `/EXPORT` flags are required so Windows loads the Agility SDK placed next to the executable. `.\scripts\setup-scarlett.ps1` runs this command and does the Agility SDK step.
 
-The source in `engine` is the ScarlettPort runtime; it started as a fork of VIctory (GPL-3.0) via fxceless/victory-fork (`engine/UPSTREAM.md`, credits in [CREDITS.md](../CREDITS.md)). The executable is `scarlett.exe` (`victory.exe` before 0.4.5). Run it with `.\scripts\play-victory.ps1 -Game <your dump>` (Series S profile by default); the environment it sets is described in [RUNTIMES.md](RUNTIMES.md).
+The source in `engine` is the ScarlettPort runtime; its fork point is in `engine/UPSTREAM.md` and the credits in [CREDITS.md](../CREDITS.md). The executable is `scarlett.exe`. Run it with `.\scripts\play-scarlett.ps1 -Game <your dump>` (Series S profile by default); the environment it sets is described in [RUNTIMES.md](RUNTIMES.md).
 
-Tests that do not need a GPU: `cargo test --release --locked --lib -p victory-core -p victory-formats -p victory-pe -p victory-loader -p victory-shader -p victory-pipeline`. Tests in `victory-gpu` and `victory-hle` need a Shader Model 6.6 device. With `SCARLETT_TEST_NO_GPU=1` they run as on a machine without a card (device tests are skipped).
+Tests that do not need a GPU: `cargo test --release --locked --lib -p scarlett-core -p scarlett-formats -p scarlett-pe -p scarlett-loader -p scarlett-shader -p scarlett-pipeline`. Tests in `scarlett-gpu` and `scarlett-hle` need a Shader Model 6.6 device. With `SCARLETT_TEST_NO_GPU=1` they run as on a machine without a card (device tests are skipped).
 
 ## Agility SDK
 
-Windows 10 needs the D3D12 Agility SDK (1.614.1) next to the executable, in a `D3D12` folder containing `D3D12Core.dll` and `d3d12SDKLayers.dll`. `setup-victory.ps1` downloads it from NuGet (`Microsoft.Direct3D.D3D12`) into `engine\target\release\D3D12`. To do it by hand, download the package, unzip it, and copy both DLLs from `build\native\bin\x64`. Do not commit these DLLs.
+Windows 10 needs the D3D12 Agility SDK (1.614.1) next to the executable, in a `D3D12` folder containing `D3D12Core.dll` and `d3d12SDKLayers.dll`. `setup-scarlett.ps1` downloads it from NuGet (`Microsoft.Direct3D.D3D12`) into `engine\target\release\D3D12`. To do it by hand, download the package, unzip it, and copy both DLLs from `build\native\bin\x64`. Do not commit these DLLs.
 
 ## Launcher
 
@@ -58,7 +58,7 @@ Releases are built by `.github/workflows/release.yml` on a `v*` tag: launcher an
 | Build output | `runtime\xcl\target`, `engine\target`, `launcher\target` |
 | Launcher engines | `runtime\` beside `ScarlettPort.exe` |
 | Launcher settings and default cache | `%LOCALAPPDATA%\ScarlettPort`, cache on the fixed drive with the most free space (`<drive>\ScarlettCache`) |
-| Shader caches | `<cache>\victory` (World), `<cache>\dxil` (Classic); build progress in `<cache>\build-world.json` / `build-classic.json` |
+| Shader caches | `<cache>\scarlett` (World), `<cache>\dxil` (Classic); build progress in `<cache>\build-world.json` / `build-classic.json` |
 | XCL title data, pipeline journal | `%XCL_DATA_ROOT%` or `%LOCALAPPDATA%\XCL`, then the package name; `cache\pipelines.bin` inside it |
 
 Caches are safe to delete; they are rebuilt on the next run (slowly: first-run shader compiles stall the world).

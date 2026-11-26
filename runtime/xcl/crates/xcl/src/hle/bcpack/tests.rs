@@ -36,7 +36,7 @@ fn fixtures_decode_to_their_lanes() {
         let (mode, units): (u8, usize) = (p.next().unwrap().parse().unwrap(), p.next().unwrap().parse().unwrap());
         let bin = data(&format!("{stem}.bin")).unwrap();
         let per = if matches!(mode, 1 | 4) { 1 } else { 2 };
-        let got = super::victory::records(mode, &bin, units / per);
+        let got = super::scarlett::records(mode, &bin, units / per);
         // bc1-1-8 has states cut to fewer bytes than an encoder that starts at 2^24 can drop
         if stem == "bc1-1-8" {
             assert!(got.is_err(), "{stem}");
@@ -62,7 +62,7 @@ fn model_matches_the_patent_excerpt() {
     let base = [0u32, 7575, 14276, 25440, 41008, 56352, 64256, 65344, 65408];
     let freq = [7575u32, 6701, 5582, 3892, 1918, 494, 34, 1, 1];
     assert_eq!(FREQ[7 * 16 + 11], freq);
-    assert_eq!(super::victory::Tables::builtin().start[7 * 16 + 11], base);
+    assert_eq!(super::scarlett::Tables::builtin().start[7 * 16 + 11], base);
     for (m, f) in FREQ.iter().enumerate().take(MODELS) {
         let total: u32 = (0..9).map(|k| f[k] << k.saturating_sub(1)).sum();
         assert_eq!(total, 65536, "model {m}");

@@ -127,7 +127,7 @@ impl Launcher {
                 }
                 let r = Self::take(ui, w, 18.);
                 let (text, color) = if me.config.local_exe.trim().is_empty() {
-                    ("Pick the scarlett.exe (or, before 0.4.5, victory.exe) of your build (its D3D12 folder must sit beside it).".to_string(), TEXT_MUTED)
+                    ("Pick the scarlett.exe of your build (its D3D12 folder must sit beside it).".to_string(), TEXT_MUTED)
                 } else if !me.local_ok() {
                     ("That file does not exist.".to_string(), WARNING)
                 } else if me.local_desc.is_empty() {
@@ -141,7 +141,7 @@ impl Launcher {
                     p.text(r.left_center(), Align2::LEFT_CENTER, "This file is inside the bundled runtime folder: a launcher update replaces it. Keep local builds elsewhere.", font(12.5, "regular"), WARNING);
                 }
                 let r = Self::take(ui, w, 18.);
-                caption(&p, pos2(r.min.x, r.min.y + 4.), Align2::LEFT_TOP, "Local build cache (VICTORY_CACHE_DIR)");
+                caption(&p, pos2(r.min.x, r.min.y + 4.), Align2::LEFT_TOP, "Local build cache (SCARLETT_CACHE_DIR)");
                 let r = Self::take(ui, w, 44.);
                 let field = Rect::from_min_size(r.min, vec2(w - 240., 44.));
                 if text_field(ui, field, "rt-cache", &mut me.config.local_cache, "Cache folder (empty: <cache>\\local)", Some(Icon::Folder), !busy).changed() {
@@ -155,7 +155,7 @@ impl Launcher {
                     me.save();
                 }
                 let r = Self::take(ui, w, 18.);
-                let note = format!("Runs use {} (Experimental adds -experimental).", me.victory_cache_base().display());
+                let note = format!("Runs use {} (Experimental adds -experimental).", me.scarlett_cache_base().display());
                 p.text(r.left_center(), Align2::LEFT_CENTER, fit(ui, &note, font(12., "regular"), w), font(12., "regular"), TEXT_FAINT);
             }
 
@@ -172,9 +172,9 @@ impl Launcher {
                 }
             }
             let env = me.play_env(&std::path::PathBuf::from(if me.config.game_path.is_empty() { "<game>" } else { &me.config.game_path }));
-            let shown: Vec<String> = env.iter().filter(|(k, _)| !matches!(*k, "VICTORY_GAME_DIR" | "VICTORY_CONFIG")).map(|(k, v)| format!("{}={v}", k.trim_start_matches("VICTORY_"))).collect();
+            let shown: Vec<String> = env.iter().filter(|(k, _)| !matches!(*k, "SCARLETT_GAME_DIR" | "SCARLETT_CONFIG")).map(|(k, v)| format!("{}={v}", k.trim_start_matches("SCARLETT_"))).collect();
             let r = Self::take(ui, w, 18.);
-            caption(&p, pos2(r.min.x, r.min.y + 4.), Align2::LEFT_TOP, "What the next run sets (VICTORY_…)");
+            caption(&p, pos2(r.min.x, r.min.y + 4.), Align2::LEFT_TOP, "What the next run sets (SCARLETT_…)");
             ui.add(egui::Label::new(egui::RichText::new(shown.join("  ")).font(egui::FontId::monospace(11.5)).color(TEXT_MUTED)).wrap());
             if me.config.preset == presets::EXPERIMENTAL {
                 let off: Vec<String> = presets::EXPERIMENTAL_OFF.iter().map(|(k, why)| format!("{k}: {why}")).collect();
@@ -201,15 +201,15 @@ impl Launcher {
     }
 
     pub(crate) fn settings_features(&mut self, ui: &mut Ui, c: Rect) {
-        let fsr = tuning::fsr_available(&self.victory_dir());
+        let fsr = tuning::fsr_available(&self.scarlett_dir());
         self.scrolled(ui, c, "ft-scroll", |me, ui, w| {
             let w = w.min(720.);
             let p = ui.painter().clone();
             let r = Self::take(ui, w, 34.);
             caption(&p, r.min, Align2::LEFT_TOP, "Game features");
-            let toml = crate::runtime::data_dir().join("victory.toml");
-            p.text(pos2(r.min.x, r.min.y + 18.), Align2::LEFT_TOP, "Set as VICTORY_* variables and written to the runtime's victory.toml at each start.", font(12., "regular"), TEXT_FAINT);
-            if link(ui, pos2(r.max.x, r.min.y + 18.), Align2::RIGHT_TOP, "ft-toml", "open victory.toml") {
+            let toml = crate::runtime::data_dir().join("scarlett.toml");
+            p.text(pos2(r.min.x, r.min.y + 18.), Align2::LEFT_TOP, "Set as SCARLETT_* variables and written to the runtime's scarlett.toml at each start.", font(12., "regular"), TEXT_FAINT);
+            if link(ui, pos2(r.max.x, r.min.y + 18.), Align2::RIGHT_TOP, "ft-toml", "open scarlett.toml") {
                 crate::saves::reveal(&toml);
             }
             let at_start = me.tuning_at_start.clone();
@@ -218,29 +218,29 @@ impl Launcher {
             let mut t = t0.clone();
             let sw = |ui: &mut Ui, r: Rect, id: &str, v: &mut bool| switch(ui, Rect::from_center_size(pos2(r.max.x - 40., r.center().y), vec2(40., 24.)), id, v);
 
-            let r = me.feature_row(ui, w, "Performance overlay", "fps, frame time and the longest frame on the picture (VICTORY_PANEL). F3 shows and hides it in game.", true, ch(&|x| x.overlay.to_string()), 70.);
+            let r = me.feature_row(ui, w, "Performance overlay", "fps, frame time and the longest frame on the picture (SCARLETT_PANEL). F3 shows and hides it in game.", true, ch(&|x| x.overlay.to_string()), 70.);
             sw(ui, r, "ft-panel", &mut t.overlay);
-            let r = me.feature_row(ui, w, "Ray tracing", "The game's own ray-traced indirect light (VICTORY_BVH_BUILDER): lit interiors, about a third slower.", true, ch(&|x| x.ray_tracing.to_string()), 70.);
+            let r = me.feature_row(ui, w, "Ray tracing", "The game's own ray-traced indirect light (SCARLETT_BVH_BUILDER): lit interiors, about a third slower.", true, ch(&|x| x.ray_tracing.to_string()), 70.);
             sw(ui, r, "ft-rt", &mut t.ray_tracing);
-            let r = me.feature_row(ui, w, "Full textures", "Series X textures on the Series S profile (VICTORY_TEXTURES=full): about +2.3 GB RAM and VRAM. fx-picture builds.", true, ch(&|x| x.full_textures.to_string()), 70.);
+            let r = me.feature_row(ui, w, "Full textures", "Series X textures on the Series S profile (SCARLETT_TEXTURES=full): about +2.3 GB RAM and VRAM. fx-picture builds.", true, ch(&|x| x.full_textures.to_string()), 70.);
             sw(ui, r, "ft-tex", &mut t.full_textures);
-            let r = me.feature_row(ui, w, "HDR", "HDR10/scRGB output when Windows HDR is on (VICTORY_HDR, [display] hdr). Turn HDR on in the game too.", true, ch(&|x| x.hdr.to_string()), 70.);
+            let r = me.feature_row(ui, w, "HDR", "HDR10/scRGB output when Windows HDR is on (SCARLETT_HDR, [display] hdr). Turn HDR on in the game too.", true, ch(&|x| x.hdr.to_string()), 70.);
             sw(ui, r, "ft-hdr", &mut t.hdr);
-            let r = me.feature_row(ui, w, "PlayStation pads", "DualSense and DualShock 4 over USB or Bluetooth as Xbox pads (VICTORY_PAD_PS).", true, ch(&|x| x.pad_ps.to_string()), 70.);
+            let r = me.feature_row(ui, w, "PlayStation pads", "DualSense and DualShock 4 over USB or Bluetooth as Xbox pads (SCARLETT_PAD_PS).", true, ch(&|x| x.pad_ps.to_string()), 70.);
             sw(ui, r, "ft-ps", &mut t.pad_ps);
-            let r = me.feature_row(ui, w, "Rumble", "Pad vibration and its strength (VICTORY_RUMBLE, VICTORY_RUMBLE_STRENGTH; [game]).", true, ch(&|x| format!("{}{}", x.rumble, x.rumble_strength)), 330.);
+            let r = me.feature_row(ui, w, "Rumble", "Pad vibration and its strength (SCARLETT_RUMBLE, SCARLETT_RUMBLE_STRENGTH; [game]).", true, ch(&|x| format!("{}{}", x.rumble, x.rumble_strength)), 330.);
             sw(ui, r, "ft-rumble", &mut t.rumble);
             let strengths = [0.5_f32, 1.0, 1.5, 2.0];
             let sel = strengths.iter().position(|s| (s - t.rumble_strength).abs() < 0.01);
             if let Some(k) = segs(ui, r.max.x - 76., r.center().y, "ft-rs", &["50%", "100%", "150%", "200%"], sel, &[t.rumble; 4], 56.) {
                 t.rumble_strength = strengths[k];
             }
-            let r = me.feature_row(ui, w, "Keyboard hints", "The on-screen key legend for keyboard and mouse (VICTORY_KBM_HINTS, [game] kbm_hints).", true, ch(&|x| x.kbm_hints.clone()), 260.);
+            let r = me.feature_row(ui, w, "Keyboard hints", "The on-screen key legend for keyboard and mouse (SCARLETT_KBM_HINTS, [game] kbm_hints).", true, ch(&|x| x.kbm_hints.clone()), 260.);
             let sel = tuning::HINTS.iter().position(|h| *h == t.kbm_hints);
             if let Some(k) = segs(ui, r.max.x - 14., r.center().y, "ft-hints", &["Off", "Auto", "Always"], sel, &[true; 3], 76.) {
                 t.kbm_hints = tuning::HINTS[k].into();
             }
-            let r = me.feature_row(ui, w, "Frame cap", "Pace frames to a fixed rate (VICTORY_PACE, VICTORY_PACE_FPS; [pace]). Off: the runtime's own pacing.", true, ch(&|x| x.frame_cap.to_string()), 260.);
+            let r = me.feature_row(ui, w, "Frame cap", "Pace frames to a fixed rate (SCARLETT_PACE, SCARLETT_PACE_FPS; [pace]). Off: the runtime's own pacing.", true, ch(&|x| x.frame_cap.to_string()), 260.);
             let sel = tuning::CAPS.iter().position(|c| *c == t.frame_cap);
             if let Some(k) = segs(ui, r.max.x - 14., r.center().y, "ft-cap", &["Off", "30", "60"], sel, &[true; 3], 76.) {
                 t.frame_cap = tuning::CAPS[k];
@@ -253,10 +253,10 @@ impl Launcher {
                 let r = Self::take(ui, w, 40.);
                 card(&p, r, fade(WARNING, 0.6));
                 icon(&p, Icon::Warning, pos2(r.min.x + 20., r.center().y), 16., WARNING);
-                let note = format!("FSR is unavailable: no FidelityFX DLL ({} or {}) next to {}.", tuning::FSR_DLLS[0], tuning::FSR_DLLS[1], me.victory_path().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+                let note = format!("FSR is unavailable: no FidelityFX DLL ({} or {}) next to {}.", tuning::FSR_DLLS[0], tuning::FSR_DLLS[1], me.scarlett_path().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
                 p.text(pos2(r.min.x + 38., r.center().y), Align2::LEFT_CENTER, fit(ui, &note, font(12., "regular"), w - 60.), font(12., "regular"), TEXT_MUTED);
             }
-            let r = me.feature_row(ui, w, "Upscaler", "Default keeps the runtime's choice. Title: the game's own; Stretch: plain scaling; FSR: AMD FidelityFX (VICTORY_UPSCALER).", true, ch(&|x| x.upscaler.clone()), 360.);
+            let r = me.feature_row(ui, w, "Upscaler", "Default keeps the runtime's choice. Title: the game's own; Stretch: plain scaling; FSR: AMD FidelityFX (SCARLETT_UPSCALER).", true, ch(&|x| x.upscaler.clone()), 360.);
             let sel = tuning::UPSCALERS.iter().position(|u| *u == t.upscaler);
             if let Some(k) = segs(ui, r.max.x - 14., r.center().y, "ft-up", &["Default", "Title", "Stretch", "FSR"], sel, &[true, true, true, fsr], 80.) {
                 t.upscaler = tuning::UPSCALERS[k].into();
@@ -267,18 +267,18 @@ impl Launcher {
                     ui.disable();
                     ui.set_opacity(0.45);
                 }
-                let r = me.feature_row(ui, w, "FSR quality", "Render scale for FSR (VICTORY_UPSCALE_QUALITY).", true, ch(&|x| x.quality.clone()), 430.);
+                let r = me.feature_row(ui, w, "FSR quality", "Render scale for FSR (SCARLETT_UPSCALE_QUALITY).", true, ch(&|x| x.quality.clone()), 430.);
                 let sel = tuning::QUALITIES.iter().position(|q| *q == t.quality);
                 if let Some(k) = segs(ui, r.max.x - 14., r.center().y, "ft-q", &["Native", "Quality", "Balanced", "Perf.", "Ultra"], sel, &[fsr_on; 5], 80.) {
                     t.quality = tuning::QUALITIES[k].into();
                 }
-                let r = me.feature_row(ui, w, "FSR sharpness", "Sharpening after the upscale, 0 to 1 (VICTORY_UPSCALE_SHARPNESS).", true, ch(&|x| format!("{}", x.sharpness)), 330.);
+                let r = me.feature_row(ui, w, "FSR sharpness", "Sharpening after the upscale, 0 to 1 (SCARLETT_UPSCALE_SHARPNESS).", true, ch(&|x| format!("{}", x.sharpness)), 330.);
                 let steps = [0.0_f32, 0.2, 0.4, 0.6, 0.8, 1.0];
                 let sel = steps.iter().position(|s| (s - t.sharpness).abs() < 0.01);
                 if let Some(k) = segs(ui, r.max.x - 14., r.center().y, "ft-sharp", &["0", ".2", ".4", ".6", ".8", "1"], sel, &[fsr_on; 6], 46.) {
                     t.sharpness = steps[k];
                 }
-                let r = me.feature_row(ui, w, "Frame generation", "FSR 3 frame generation (VICTORY_FRAMEGEN). Only at a base rate of 15 fps or more.", true, ch(&|x| x.framegen.to_string()), 70.);
+                let r = me.feature_row(ui, w, "Frame generation", "FSR 3 frame generation (SCARLETT_FRAMEGEN). Only at a base rate of 15 fps or more.", true, ch(&|x| x.framegen.to_string()), 70.);
                 let mut fg = t.framegen;
                 if sw(ui, r, "ft-fg", &mut fg) && fsr_on {
                     t.framegen = fg;
@@ -294,7 +294,7 @@ impl Launcher {
                 me.config.discord = d;
                 me.save();
             }
-            let r = me.feature_row(ui, w, "Performance readout", "Logs frame times (VICTORY_LOG gains victory_gpu::host=info) so each run ends with fps, worst frame and time to world.", true, ch(&|x| x.perf_log.to_string()), 70.);
+            let r = me.feature_row(ui, w, "Performance readout", "Logs frame times (SCARLETT_LOG gains scarlett_gpu::host=info) so each run ends with fps, worst frame and time to world.", true, ch(&|x| x.perf_log.to_string()), 70.);
             sw(ui, r, "ft-perf", &mut t.perf_log);
 
             if t != me.config.tuning {

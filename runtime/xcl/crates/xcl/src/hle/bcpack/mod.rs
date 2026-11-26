@@ -3,10 +3,10 @@
 //! Decodes BC1, BC3, BC4, BC5, BC6H and BC7 from the format's constant tables (`tables.rs`);
 //! BC2 has no lane layout.
 //! Port of VIctory's `victory-formats/src/bcpack.rs`; tables generated from its
-//! `bcpack-tables.bin` by `scripts/gen_bcpack_victory_tables.py`.
+//! `bcpack-tables.bin` by `scripts/gen_bcpack_scarlett_tables.py`.
 
 mod tables;
-mod victory;
+mod scarlett;
 
 /// Why a stream does not unpack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +61,7 @@ pub fn decode(mode: u8, src: &[u8], out_len: usize) -> Result<Vec<u8>, Error> {
         return Err(Error::OutputSize);
     }
     let mut out = vec![0u8; out_len];
-    victory::decode(mode, src, &mut out, victory::Tables::builtin())
+    scarlett::decode(mode, src, &mut out, scarlett::Tables::builtin())
         .map_err(|e| Error::Decode(e.0))?;
     Ok(out)
 }

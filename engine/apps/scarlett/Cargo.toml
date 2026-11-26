@@ -1,0 +1,38 @@
+[package]
+name = "scarlett"
+description = "Command-line front end: inspect, census, convert, run."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "scarlett"
+path = "src/main.rs"
+
+[dependencies]
+scarlett-core.workspace = true
+scarlett-pe.workspace = true
+scarlett-loader.workspace = true
+scarlett-hle.workspace = true
+scarlett-shader = { workspace = true, features = ["host"] }
+scarlett-game.workspace = true
+anyhow.workspace = true
+blake3.workspace = true
+memchr.workspace = true
+clap.workspace = true
+walkdir.workspace = true
+
+[features]
+# Debug-level logs and the debugging switches (frame capture, stack dumps,
+# the host debug layer, scripted keys). Off in a plain release build.
+diagnostics = [
+    "scarlett-core/diagnostics",
+    "scarlett-hle/diagnostics",
+    "scarlett-loader/diagnostics",
+    "scarlett-shader/diagnostics",
+]
+
+[lints]
+workspace = true

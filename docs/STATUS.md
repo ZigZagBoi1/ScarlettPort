@@ -27,14 +27,14 @@ Measured on: Windows 10 22H2, RTX 3060 12 GB, 32 GB RAM. Series S profile (`--co
 - XCL: the final image is black; first-run shader compiles stall the world; two-pass mesh draws (`XCL_TWO_PASS_INDIRECT=1`) can reset the GPU.
 
 ## Notes on measurement
-- The 4 fps figure was taken with `SCARLETT_OWN_UPSCALER=1`, `SCARLETT_NO_WATCHDOG=1`, `SCARLETT_RELAY=2`, `SCARLETT_SYNC_PRECISE=1`, `SCARLETT_READ_SETTLE_PRECISE=1`, `SCARLETT_PRECOMPILED_GRAPHICS=1`, `SCARLETT_READFIX=1`, `SCARLETT_COPY_BACK_ONLY_READBACK=1`, `SCARLETT_NARROW_ROOT=1`, `SCARLETT_NARROW_VIEWS=1`, `SCARLETT_NARROW_BVH=1`, `SCARLETT_PREP_BARRIERS=1`, `SCARLETT_PREP_TABLES=1`, `SCARLETT_PREP_REUSE=1` and `SCARLETT_PIPELINE_WAIT_MS=0` (what `play-victory.ps1` sets), with the experimental msfix and mem2 switches off.
+- The 4 fps figure was taken with `SCARLETT_OWN_UPSCALER=1`, `SCARLETT_NO_WATCHDOG=1`, `SCARLETT_RELAY=2`, `SCARLETT_SYNC_PRECISE=1`, `SCARLETT_READ_SETTLE_PRECISE=1`, `SCARLETT_PRECOMPILED_GRAPHICS=1`, `SCARLETT_READFIX=1`, `SCARLETT_COPY_BACK_ONLY_READBACK=1`, `SCARLETT_NARROW_ROOT=1`, `SCARLETT_NARROW_VIEWS=1`, `SCARLETT_NARROW_BVH=1`, `SCARLETT_PREP_BARRIERS=1`, `SCARLETT_PREP_TABLES=1`, `SCARLETT_PREP_REUSE=1` and `SCARLETT_PIPELINE_WAIT_MS=0` (what `play-scarlett.ps1` sets), with the experimental msfix and mem2 switches off.
 - Other numbers (shader coverage, per-feature timings) are in `engine/README.md` and `engine/VICKY.md`; they were measured by their authors on their own machines, not on the reference machine above.
 
 ## Shader coverage
-- ScarlettPort runtime translator: all **26,084** programs translate. **26,013** pass DXIL validation on their own; the other **71** are oversized mesh shaders (outputs past the host's 32 KiB) that validate only when linked with their pixel shader (`SCARLETT_LINK_PAIRS`, `crates/victory-shader/src/emit/link.rs`). So "100% translated" is true; "100% validate on their own" is not.
+- ScarlettPort runtime translator: all **26,084** programs translate. **26,013** pass DXIL validation on their own; the other **71** are oversized mesh shaders (outputs past the host's 32 KiB) that validate only when linked with their pixel shader (`SCARLETT_LINK_PAIRS`, `crates/scarlett-shader/src/emit/link.rs`). So "100% translated" is true; "100% validate on their own" is not.
 - `scarlett warm` (the launcher's shader build) translates 25,889 distinct shaders from the title's archives into the cache in about 171 s on the reference machine.
 - 25,200 of 25,471 graphics pipelines are prebuilt by `scarlett precompile-graphics` (491 s). Play runs use them (`SCARLETT_PRECOMPILED_GRAPHICS=1`) and the launcher runs that step; the rectangle-list decode fix is in this copy.
-- XCL counts differently: its precompile walks the 26,503 records of the shader pack and goes through its own HLSL and DXC path, so its translated and compiled numbers are not the VIctory ones above. Its last ~4,000 records (from about 83%) are large compute shaders whose driver compiles take 6–190 s each.
+- XCL counts differently: its precompile walks the 26,503 records of the shader pack and goes through its own HLSL and DXC path, so its translated and compiled numbers are not the ScarlettPort ones above. Its last ~4,000 records (from about 83%) are large compute shaders whose driver compiles take 6–190 s each.
 
 ## Known gaps
 - Ray tracing: structure builder and trace programs are partly translated and off by default.

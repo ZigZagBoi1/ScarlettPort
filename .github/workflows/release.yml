@@ -38,7 +38,7 @@ jobs:
       # engine/rust-toolchain.toml pins its toolchain; rustup installs it on first use.
       - name: Build the ScarlettPort runtime
         working-directory: engine
-        run: cargo rustc --release -p victory --bin scarlett --features diagnostics --locked -- -C link-arg=/EXPORT:D3D12SDKVersion,DATA -C link-arg=/EXPORT:D3D12SDKPath,DATA
+        run: cargo rustc --release -p scarlett --bin scarlett --features diagnostics --locked -- -C link-arg=/EXPORT:D3D12SDKVersion,DATA -C link-arg=/EXPORT:D3D12SDKPath,DATA
 
       - name: Fetch the D3D12 Agility SDK (Microsoft, NuGet)
         shell: pwsh
@@ -82,7 +82,7 @@ jobs:
           $exeHash = (Get-FileHash (Join-Path $root 'ScarlettPort.exe') -Algorithm SHA256).Hash.ToLower()
           $vicHash = (Get-FileHash (Join-Path $rt 'ScarlettPort-Runtime.exe') -Algorithm SHA256).Hash.ToLower()
           @"
-          One ZIP: ``ScarlettPort.exe`` (the launcher) and a ``runtime\`` folder beside it holding ``ScarlettPort-Runtime.exe`` (the World engine: the ScarlettPort runtime, started as a fork of VIctory, GPL-3.0) and the Microsoft D3D12 Agility SDK DLLs. Extract the whole ZIP and keep the two side by side. Nothing is unpacked or installed at run time; an update downloads only when you click it (Settings, Options), is checked against SHA256SUMS.txt and is used from the next start. You need your own dump of your own legally obtained copy; no game files are included.
+          One ZIP: ``ScarlettPort.exe`` (the launcher) and a ``runtime\`` folder beside it holding ``ScarlettPort-Runtime.exe`` (the World engine: the ScarlettPort runtime, GPL-3.0; lineage in UPSTREAM.md) and the Microsoft D3D12 Agility SDK DLLs. Extract the whole ZIP and keep the two side by side. Nothing is unpacked or installed at run time; an update downloads only when you click it (Settings, Options), is checked against SHA256SUMS.txt and is used from the next start. You need your own dump of your own legally obtained copy; no game files are included.
 
           Built from ``${{ github.sha }}`` by the [Release workflow](https://github.com/${{ github.repository }}/actions/workflows/release.yml).
 

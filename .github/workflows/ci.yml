@@ -113,12 +113,12 @@ jobs:
         with:
           workspaces: engine
       - name: Build
-        run: cargo rustc --release -p victory --bin scarlett --features diagnostics --locked -- -C link-arg=/EXPORT:D3D12SDKVersion,DATA -C link-arg=/EXPORT:D3D12SDKPath,DATA
-      # Crates that do not open a GPU device. victory-gpu and victory-hle tests need a Shader Model 6.6
+        run: cargo rustc --release -p scarlett --bin scarlett --features diagnostics --locked -- -C link-arg=/EXPORT:D3D12SDKVersion,DATA -C link-arg=/EXPORT:D3D12SDKPath,DATA
+      # Crates that do not open a GPU device. scarlett-gpu and scarlett-hle tests need a Shader Model 6.6
       # device and are not run here. Allowed to fail until the list is confirmed on a hosted runner.
       - name: Unit tests (no GPU)
         continue-on-error: true
-        run: cargo test --release --locked --lib -p victory-core -p victory-formats -p victory-pe -p victory-loader -p victory-shader -p victory-pipeline -- --test-threads=4
+        run: cargo test --release --locked --lib -p scarlett-core -p scarlett-formats -p scarlett-pe -p scarlett-loader -p scarlett-shader -p scarlett-pipeline -- --test-threads=4
 
   launcher:
     needs: changes

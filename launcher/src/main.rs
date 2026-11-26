@@ -127,13 +127,13 @@ pub struct Config {
     /// Play preset: "stable", "experimental" or "custom" (`presets`).
     #[serde(default = "default_preset")]
     pub preset: String,
-    /// "bundled" (the runtime folder beside the launcher) or "local" (a scarlett.exe or victory.exe the user
+    /// "bundled" (the runtime folder beside the launcher) or "local" (a scarlett.exe the user
     /// picked, e.g. their own newest build). Updates never touch a local build.
     #[serde(default = "default_runtime")]
     pub runtime_mode: String,
     #[serde(default)]
     pub local_exe: String,
-    /// The local build's cache folder (VICTORY_CACHE_DIR as is); empty: `<cache>\local`.
+    /// The local build's cache folder (SCARLETT_CACHE_DIR as is); empty: `<cache>\local`.
     #[serde(default)]
     pub local_cache: String,
     /// Shader build hash for the local build (kept apart from the bundled one's).
@@ -232,7 +232,7 @@ pub struct Launcher {
     pub config: Config,
     pub runtime_dir: Option<PathBuf>,
     pub runtime_note: String,
-    /// Set when the ScarlettPort runtime (scarlett.exe or victory.exe) is in the runtime folder.
+    /// Set when the ScarlettPort runtime (scarlett.exe) is in the runtime folder.
     pub world_dir: Option<PathBuf>,
     pub world_hash: Option<String>,
     /// The running (or last) shader build's progress.
@@ -687,10 +687,10 @@ impl Launcher {
             if kind != RunKind::Play {
                 return;
             }
-            let exe = self.victory_path();
+            let exe = self.scarlett_path();
             let mut cmd = Command::new(&exe);
             let args = self.play_args(&game);
-            cmd.current_dir(self.victory_dir()).args(&args);
+            cmd.current_dir(self.scarlett_dir()).args(&args);
             for k in presets::CLEARED {
                 runtime::clear_switch(&mut cmd, k);
             }
@@ -748,8 +748,8 @@ impl Launcher {
         let env = if world { self.play_env(&game) } else { Vec::new() };
         let job = shaderbuild::Job {
             world,
-            exe: if world { self.victory_path() } else { runtime::xcl_exe() },
-            runtime: if world { self.victory_dir() } else { runtime::runtime_dir() },
+            exe: if world { self.scarlett_path() } else { runtime::xcl_exe() },
+            runtime: if world { self.scarlett_dir() } else { runtime::runtime_dir() },
             game,
             cache_dir: self.config.cache_dir.trim().to_string(),
             hash,
@@ -792,25 +792,25 @@ impl Launcher {
     }
 
     /// The World engine executable that runs: the local build, else the bundled runtime.
-    pub fn victory_path(&self) -> PathBuf {
-        if self.local_selected() { PathBuf::from(self.config.local_exe.trim()) } else { runtime::victory_exe() }
+    pub fn scarlett_path(&self) -> PathBuf {
+        if self.local_selected() { PathBuf::from(self.config.local_exe.trim()) } else { runtime::scarlett_exe() }
     }
 
-    pub fn victory_dir(&self) -> PathBuf {
-        self.victory_path().parent().map(PathBuf::from).unwrap_or_else(runtime::runtime_dir)
+    pub fn scarlett_dir(&self) -> PathBuf {
+        self.scarlett_path().parent().map(PathBuf::from).unwrap_or_else(runtime::runtime_dir)
     }
 
-    /// VICTORY_CACHE_DIR before the preset's own: the local build's cache folder, else `<cache>\victory`.
-    pub fn victory_cache_base(&self) -> PathBuf {
+    /// SCARLETT_CACHE_DIR before the preset's own: the local build's cache folder, else `<cache>\scarlett`.
+    pub fn scarlett_cache_base(&self) -> PathBuf {
         if self.local_selected() {
             if self.config.local_cache.trim().is_empty() { std::path::Path::new(self.config.cache_dir.trim()).join("local") } else { PathBuf::from(self.config.local_cache.trim()) }
         } else {
-            engine::victory_cache(&self.config.cache_dir)
+            engine::scarlett_cache(&self.config.cache_dir)
         }
     }
 
-    pub fn victory_cache(&self) -> PathBuf {
-        presets::cache_for(&self.config.preset, &self.victory_cache_base())
+    pub fn scarlett_cache(&self) -> PathBuf {
+        presets::cache_for(&self.config.preset, &self.scarlett_cache_base())
     }
 
     pub fn effective_world_hash(&self) -> Option<&str> {
@@ -840,31 +840,31 @@ impl Launcher {
     }
 
     /// The World engine environment: the preset's, then Settings, Features, then the launcher's
-    /// `victory.toml` (VICTORY_CONFIG), written here.
+    /// `scarlett.toml` (SCARLETT_CONFIG), written here.
     pub fn play_env(&self, game: &std::path::Path) -> Vec<(&'static str, String)> {
-        let cache = self.victory_cache();
+        let cache = self.scarlett_cache();
         let mut env = match self.config.preset.as_str() {
             presets::EXPERIMENTAL => presets::experimental_env(game, &cache),
             presets::LOOK => presets::look_env(game, &cache),
             presets::CUSTOM => {
                 let mut e = engine::world_env(&self.config, game, &self.config.cache_dir);
-                presets::set(&mut e, "VICTORY_CACHE_DIR", cache.display().to_string());
+                presets::set(&mut e, "SCARLETT_CACHE_DIR", cache.display().to_string());
                 e
             }
             _ => presets::stable_env(game, &cache),
         };
         let t = &self.config.tuning;
-        let fsr = tuning::fsr_available(&self.victory_dir());
+        let fsr = tuning::fsr_available(&self.scarlett_dir());
         for (k, v) in t.env(fsr) {
             presets::set(&mut env, k, v);
         }
         if t.perf_log {
-            let level = env.iter().find(|(k, _)| *k == "VICTORY_LOG").map(|(_, v)| v.clone()).unwrap_or_else(|| "info".into());
-            presets::set(&mut env, "VICTORY_LOG", format!("{level},victory_gpu::host=info"));
+            let level = env.iter().find(|(k, _)| *k == "SCARLETT_LOG").map(|(_, v)| v.clone()).unwrap_or_else(|| "info".into());
+            presets::set(&mut env, "SCARLETT_LOG", format!("{level},scarlett_gpu::host=info"));
         }
-        let toml = runtime::data_dir().join("victory.toml");
+        let toml = runtime::data_dir().join("scarlett.toml");
         if tuning::write_toml(&toml, &t.toml_keys(fsr)).is_ok() {
-            presets::set(&mut env, "VICTORY_CONFIG", toml.display().to_string());
+            presets::set(&mut env, "SCARLETT_CONFIG", toml.display().to_string());
         }
         env
     }
@@ -887,7 +887,7 @@ impl Launcher {
         let tx = self.tx.clone();
         let start = PathBuf::from(self.config.local_exe.trim());
         std::thread::spawn(move || {
-            let mut d = rfd::FileDialog::new().set_title("Select a scarlett.exe build").add_filter("scarlett.exe / victory.exe", &["exe"]);
+            let mut d = rfd::FileDialog::new().set_title("Select a scarlett.exe build").add_filter("scarlett.exe", &["exe"]);
             if let Some(dir) = start.parent().filter(|d| d.is_dir()) {
                 d = d.set_directory(dir);
             }
@@ -905,11 +905,11 @@ impl Launcher {
     /// Environment for the runtime's own tools (saves, crashes): the game and the cache.
     fn tool_env(&self) -> Vec<(&'static str, String)> {
         let game = PathBuf::from(&self.config.game_path);
-        let mut env = presets::stable_env(&game, &self.victory_cache());
-        env.retain(|(k, _)| matches!(*k, "VICTORY_GAME_DIR" | "VICTORY_CACHE_DIR"));
-        let toml = runtime::data_dir().join("victory.toml");
+        let mut env = presets::stable_env(&game, &self.scarlett_cache());
+        env.retain(|(k, _)| matches!(*k, "SCARLETT_GAME_DIR" | "SCARLETT_CACHE_DIR"));
+        let toml = runtime::data_dir().join("scarlett.toml");
         if toml.is_file() {
-            env.push(("VICTORY_CONFIG", toml.display().to_string()));
+            env.push(("SCARLETT_CONFIG", toml.display().to_string()));
         }
         env
     }
@@ -931,7 +931,7 @@ impl Launcher {
             return;
         }
         self.saves_busy = true;
-        let (exe, env, tx) = (self.victory_path(), self.tool_env(), self.tx.clone());
+        let (exe, env, tx) = (self.scarlett_path(), self.tool_env(), self.tx.clone());
         std::thread::spawn(move || {
             let r = cli::run(&exe, &["saves".into(), "list".into()], &env).map(|t| cli::parse_saves(&t));
             let _ = tx.send(Message::Saves(r));
@@ -939,21 +939,21 @@ impl Launcher {
     }
 
     pub fn list_backups(&mut self, slot: &str) {
-        let (exe, env, tx, slot) = (self.victory_path(), self.tool_env(), self.tx.clone(), slot.to_string());
+        let (exe, env, tx, slot) = (self.scarlett_path(), self.tool_env(), self.tx.clone(), slot.to_string());
         std::thread::spawn(move || {
             let r = cli::run(&exe, &["saves".into(), "restore".into(), slot.clone()], &env).map(|t| cli::parse_backups(&t));
             let _ = tx.send(Message::Backups(slot, r));
         });
     }
 
-    /// `victory saves <args>` (backup = copy to a new slot, restore = a container's backup).
+    /// `scarlett saves <args>` (backup = copy to a new slot, restore = a container's backup).
     pub fn saves_command(&mut self, args: Vec<String>) {
         if self.saves_busy {
             return;
         }
         self.saves_busy = true;
-        self.saves_msg = format!("Running victory saves {}…", args.join(" "));
-        let (exe, env, tx) = (self.victory_path(), self.tool_env(), self.tx.clone());
+        self.saves_msg = format!("Running scarlett saves {}…", args.join(" "));
+        let (exe, env, tx) = (self.scarlett_path(), self.tool_env(), self.tx.clone());
         std::thread::spawn(move || {
             let mut a = vec!["saves".to_string()];
             a.extend(args);
@@ -966,7 +966,7 @@ impl Launcher {
             return;
         }
         self.crashes_busy = true;
-        let (exe, env, tx) = (self.victory_path(), self.tool_env(), self.tx.clone());
+        let (exe, env, tx) = (self.scarlett_path(), self.tool_env(), self.tx.clone());
         std::thread::spawn(move || {
             let r = match cli::run(&exe, &["crashes".into(), "list".into()], &env) {
                 Ok(t) => Ok(t.lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect()),
@@ -1409,6 +1409,7 @@ fn icon() -> egui::IconData {
 }
 
 fn main() -> eframe::Result {
+    runtime::migrate_legacy_data();
     // A staged update (or a rollback) is swapped in at start; the new launcher then starts instead.
     if let Some(exe) = update::apply_pending() {
         if Command::new(&exe).args(std::env::args().skip(1)).spawn().is_ok() {

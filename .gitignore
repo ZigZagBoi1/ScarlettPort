@@ -24,7 +24,7 @@ D3D12/
 *.log
 logs/
 cache/
-victory.toml
+scarlett.toml
 xcl.toml
 .env
 press.txt
@@ -67,4 +67,4 @@ dumps/
 frames/
 research/
 notes-private/
-victory-data/
+scarlett-data/

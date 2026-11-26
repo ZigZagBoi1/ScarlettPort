@@ -1,5 +1,7 @@
 <p align="center"><a href="https://github.com/ZigZagBoi1/ScarlettPort"><img src="https://img.shields.io/github/stars/ZigZagBoi1/ScarlettPort?style=for-the-badge&logo=github&label=Star%20ScarlettPort&color=ffd700" alt="Star ScarlettPort on GitHub"></a></p>
 <p align="center"><b>⭐ If ScarlettPort helps you, please star the repo, it helps more people find it.</b></p>
+> **New in 0.4.7:** everything is named ScarlettPort now: the runtime is `scarlett.exe`, its switches are `SCARLETT_*`, and its data folder is `%LOCALAPPDATA%\ScarlettPort` (saves, caches and settings from the old folder are moved over on first start). The runtime also gains a GPU frame profiler.
+>
 
 > **New in 0.4.6:** the engine's renderer was rebuilt on a new base for a much more complete picture: lit rooms without ray tracing, ambient and sky light, textures shown complete, correct faces and clothing. On an RTX 3060 this picture currently runs at about 1 fps in the world, slower than 0.4.5's darker picture (about 5 fps); frame rate is the next focus. Run **Prepare shaders** in the launcher before the first play.
 
@@ -56,7 +58,7 @@ ScarlettPort runtime (scarlett.exe, engine/)
    └── DirectStorage + audio        streaming reads, XMA decode
 ```
 
-Every runtime switch is read as `SCARLETT_*` first; the older `VICTORY_*` names keep working. `victory.exe` from builds before 0.4.5 still runs from the launcher and the scripts.
+Every runtime switch is a `SCARLETT_*` environment variable; the executable is `scarlett.exe`, and the runtime keeps its data in `%LOCALAPPDATA%\ScarlettPort`.
 
 ---
 
@@ -142,9 +144,9 @@ Questions: [`docs/FAQ.md`](docs/FAQ.md). Problems: [`docs/TROUBLESHOOTING.md`](d
 
 A restructure, no runtime behaviour change: frame rate is the same as 0.4.4.
 
-- **The runtime is first-class:** its source is `engine/` (it was `runtime/victory/`), the source of truth rather than a patch stack; `engine/UPSTREAM.md` names the fork point and how upstream changes are merged, and the full credits list moved to `CREDITS.md`.
-- **`scarlett.exe`:** the runtime's executable and command name. The launcher and scripts still accept a `victory.exe`.
-- **`SCARLETT_*` switches:** every switch is read as `SCARLETT_*` first, then as `VICTORY_*`; the launcher and scripts set the `SCARLETT_*` names.
+- **The runtime is first-class:** its source is `engine/` the source of truth rather than a patch stack; `engine/UPSTREAM.md` names the fork point and how upstream changes are merged, and the full credits list moved to `CREDITS.md`.
+- **`scarlett.exe`:** the runtime's executable and command name.
+- **`SCARLETT_*` switches:** every switch is a `SCARLETT_*` variable; the launcher and scripts set them.
 - **Launcher 0.4.5:** calls the World engine "ScarlettPort runtime"; presets unchanged.
 
 ## New in v0.4.4
@@ -155,7 +157,7 @@ New options, all **off by default** and **not yet measured on our RTX 3060**. Fr
 - **`SCARLETT_SHADER_FIXES=1` (shader translation):** a more accurate translation of many shader instructions and forms. It changes the shader cache key, so the first run with it rebuilds shaders. Each part can be switched on its own (`SCARLETT_SHADER_*`, see the source).
 - **Audio fix (always on):** XMA audio is decoded until a whole block is ready, so sound no longer cuts out or stops when the title refills a voice.
 - **Memory options:** `SCARLETT_OOM_BACKOFF=1` (back off briefly when the card or PC is out of memory), `SCARLETT_COMMIT_GATE=1` (pause texture uploads when the PC is low on commit memory), `SCARLETT_PREFETCH_CAP=1` (cap texture bytes per frame). Also `SCARLETT_WAVE32_LOWER=1` (NVIDIA wave32 lowering fixes), `SCARLETT_MOVIE_PLANE=1` (movie frames uploaded from each list's own buffer) and `SCARLETT_THIN=1` (draw lists recorded on worker threads).
-- **Launcher 0.4.4:** a new opt-in **Look** preset (Stable plus `SCARLETT_LOOK=1` and `SCARLETT_SHADER_FIXES=1`); `scripts/play-victory.ps1 -Look` does the same. Stable is unchanged.
+- **Launcher 0.4.4:** a new opt-in **Look** preset (Stable plus `SCARLETT_LOOK=1` and `SCARLETT_SHADER_FIXES=1`); `scripts/play-scarlett.ps1 -Look` does the same. Stable is unchanged.
 
 Please send hardware reports if you try the Look preset: what looks better or worse, and your fps.
 
@@ -271,8 +273,8 @@ To run the runtimes without the launcher, two are included ([`docs/RUNTIMES.md`]
 ```powershell
 git clone https://github.com/ZigZagBoi1/ScarlettPort.git
 cd ScarlettPort
-.\scripts\setup-victory.ps1                                   # build + Agility SDK
-.\scripts\play-victory.ps1 -Game "D:\path\to\your\dump"       # Series S profile by default
+.\scripts\setup-scarlett.ps1                                   # build + Agility SDK
+.\scripts\play-scarlett.ps1 -Game "D:\path\to\your\dump"       # Series S profile by default
 ```
 
 **B. XCL: menus and loading screens**
@@ -282,7 +284,7 @@ cd ScarlettPort
 .\scripts\play.ps1  -Game "D:\path\to\your\dump" -AutoMenu
 ```
 
-- `play-victory.ps1` sets the recommended environment (`--console series-s`, `SCARLETT_OWN_UPSCALER=1`, `SCARLETT_NO_WATCHDOG=1`). Its switches include `-AutoInput`, `-FastBoot` (testing only) and `-SaveSlot`.
+- `play-scarlett.ps1` sets the recommended environment (`--console series-s`, `SCARLETT_OWN_UPSCALER=1`, `SCARLETT_NO_WATCHDOG=1`). Its switches include `-AutoInput`, `-FastBoot` (testing only) and `-SaveSlot`.
 - While the game runs, write button names into `press.txt` (e.g. `DOWN DOWN A`) to press them.
 - Logs go to `logs\`. Attach one when you open an issue.
 - Controls: an Xbox controller works best. On the ScarlettPort runtime with no pad connected, the keyboard is a pad: Enter = A, Backspace = B, WASD = left stick, IJKL = right stick.
@@ -306,7 +308,7 @@ Only for what you see: with "Updates" on (Settings → Options) it asks GitHub R
 It can. Unsigned apps that download and replace executables can get reputation warnings (SmartScreen or antivirus) until a release has built up reputation. Our updater only acts when you click it, checks every file against the release's SHA-256 list, keeps the replaced version in `previous` for a rollback, and never uses `%TEMP%`. It updates only the launcher and its bundled `runtime` folder; a local build you picked in Settings → Runtime is never touched. If your antivirus flags a release, please report it as a false positive: [Microsoft's submission page](https://www.microsoft.com/en-us/wdsi/filesubmission).
 
 **Can I run my own runtime build?**
-Yes: Settings → Runtime → Local build, then browse to its `scarlett.exe` or, for builds before 0.4.5, `victory.exe` (keep its `D3D12` folder beside it) and pick a cache folder. The Stable preset sets the verified C1 environment, so no play script is needed.
+Yes: Settings → Runtime → Local build, then browse to its `scarlett.exe` (keep its `D3D12` folder beside it) and pick a cache folder. The Stable preset sets the verified C1 environment, so no play script is needed.
 
 **How can I contribute?**
 Read [`CONTRIBUTING.md`](CONTRIBUTING.md), then pick a task below or open an issue with one of the [issue templates](https://github.com/ZigZagBoi1/ScarlettPort/issues/new/choose) (bug report, hardware report, shader failure). Testers with different GPUs and hardware reports help most right now: GPU, driver, CPU, RAM, how long the shader build took and how far the game got.
@@ -322,20 +324,20 @@ Every task is sized for **one contributor**. Pick one, comment on its issue to c
 - [ ] **#1 Light in shadow.** With ray tracing enabled (off by default), the opening cell has bounce light on an RX 7900 XTX. Other interiors and GPUs still need testing. See `engine/docs/fork-ray-tracing.md`.
 - [ ] **#2 Missing walls and roofs.** Some cards lose the first room's walls and roof with certain switches; find the cause (see `engine/VICKY.md`).
 - [ ] **#3 Faster wave64 on NVIDIA.** 64-lane programs run as two 32-lane halves. Profile them and cut the overhead.
-- [ ] **#9 `SCARLETT_SHADER_OPT` in game.** The safe mask removes 51% of instructions offline; its in-game test is pending. One of the other clean-up passes loses walls in game, and an offline differential found nothing. Run the safe mask in game, then find which pass loses walls and why. `engine/crates/victory-shader/src/emit/mod.rs` (`shader_opt`), `emit/bitcode.rs`.
-- [x] **#10 Hair renders too bright.** Done in 0.4.3: hair and lighting render correctly in the opening cell. Reports from other scenes are welcome. `engine/crates/victory-gpu/src/pipeline/make.rs`.
-- [ ] **#11 Ray-tracing BVH builder.** `SCARLETT_BVH_BUILDER` makes stray writes; find and fix them (upstream VIctory #2402 and #916 are related). `engine/crates/victory-gpu/src/pipeline.rs`, `engine/crates/victory-shader/src/bvh.rs`.
-- [ ] **#12 Textures never uploaded.** 0.4.3 makes the upload queue fair (`SCARLETT_FAIR_DUE=2`, default): about 110 textures are waiting at the end of a run, against 21,000 or more before. Check what is still left waiting and why. `engine/crates/victory-gpu/src/texture.rs`, `descriptor/host.rs`.
+- [ ] **#9 `SCARLETT_SHADER_OPT` in game.** The safe mask removes 51% of instructions offline; its in-game test is pending. One of the other clean-up passes loses walls in game, and an offline differential found nothing. Run the safe mask in game, then find which pass loses walls and why. `engine/crates/scarlett-shader/src/emit/mod.rs` (`shader_opt`), `emit/bitcode.rs`.
+- [x] **#10 Hair renders too bright.** Done in 0.4.3: hair and lighting render correctly in the opening cell. Reports from other scenes are welcome. `engine/crates/scarlett-gpu/src/pipeline/make.rs`.
+- [ ] **#11 Ray-tracing BVH builder.** `SCARLETT_BVH_BUILDER` makes stray writes; find and fix them (upstream issues #2402 and #916 are related, see `CREDITS.md`). `engine/crates/scarlett-gpu/src/pipeline.rs`, `engine/crates/scarlett-shader/src/bvh.rs`.
+- [ ] **#12 Textures never uploaded.** 0.4.3 makes the upload queue fair (`SCARLETT_FAIR_DUE=2`, default): about 110 textures are waiting at the end of a run, against 21,000 or more before. Check what is still left waiting and why. `engine/crates/scarlett-gpu/src/texture.rs`, `descriptor/host.rs`.
 
 ### Performance
 
-- [ ] **#4 Frame time.** 5.4 fps while walking and turning in the world (median frame 184 ms, 95th percentile 197 ms, 99th percentile 207 ms; RTX 3060 12 GB, Ryzen 5 5600X; 3.9-4.5 fps before); 30 fps is not reached. The thread that gates each present spends about 187 ms per frame: about 55 ms preparing, 31 ms in refresh copies, 76 ms waiting on the card after title writes next to shader-written memory, 19 ms waiting for title reads. An infinitely fast card would still leave about 99 ms, so the waits and copies are the work to do. `SCARLETT_GPU_PROFILE` measures about 93-111 ms of GPU time per frame, spread over about 1,100 pipelines. See `engine/crates/victory-gpu/src/host.rs`, `draw.rs`.
+- [ ] **#4 Frame time.** 5.4 fps while walking and turning in the world (median frame 184 ms, 95th percentile 197 ms, 99th percentile 207 ms; RTX 3060 12 GB, Ryzen 5 5600X; 3.9-4.5 fps before); 30 fps is not reached. The thread that gates each present spends about 187 ms per frame: about 55 ms preparing, 31 ms in refresh copies, 76 ms waiting on the card after title writes next to shader-written memory, 19 ms waiting for title reads. An infinitely fast card would still leave about 99 ms, so the waits and copies are the work to do. `SCARLETT_GPU_PROFILE` measures about 93-111 ms of GPU time per frame, spread over about 1,100 pipelines. See `engine/crates/scarlett-gpu/src/host.rs`, `draw.rs`.
 - [ ] **#5 Intro cutscene speed.** The intro is very slow unless skipped; find out why.
-- [ ] **#13 Zero-copy title memory.** `SCARLETT_ZERO_COPY` maps title memory for the GPU without copies; it needs placing to work at scale. `engine/crates/victory-gpu/src/zerocopy.rs`, `engine/crates/victory-hle/src/modules/xmem.rs`.
-- [ ] **#14 Load time.** The world is reached in about 212 s from an internal SSD. A load cache (`SCARLETT_LOAD_CACHE`) and a faster decoder (`SCARLETT_FAST_INFLATE`) are in the runtime, off by default: measure them. `engine/crates/victory-hle/src/modules/dstorage/loadcache.rs`.
-- [ ] **#15 World-entry copy stall.** Entering the world stalls on memory copies; find what is copied and cut it. `engine/crates/victory-gpu/src/memcopy.rs`, `host.rs`.
-- [x] **#16 PC responsiveness while running.** Done: `SCARLETT_FRIENDLY=1` keeps the rest of the PC usable (thread priorities, worker counts); the Stable preset sets it. `engine/crates/victory-core/src/friendly.rs`.
-- [x] **#6 Shader cache warm-up.** Done: `scarlett precompile-graphics` and the shader prewarm (`engine/apps/victory/src/translate.rs`, `engine/crates/victory-gpu/src/pipeline/precompiled.rs`).
+- [ ] **#13 Zero-copy title memory.** `SCARLETT_ZERO_COPY` maps title memory for the GPU without copies; it needs placing to work at scale. `engine/crates/scarlett-gpu/src/zerocopy.rs`, `engine/crates/scarlett-hle/src/modules/xmem.rs`.
+- [ ] **#14 Load time.** The world is reached in about 212 s from an internal SSD. A load cache (`SCARLETT_LOAD_CACHE`) and a faster decoder (`SCARLETT_FAST_INFLATE`) are in the runtime, off by default: measure them. `engine/crates/scarlett-hle/src/modules/dstorage/loadcache.rs`.
+- [ ] **#15 World-entry copy stall.** Entering the world stalls on memory copies; find what is copied and cut it. `engine/crates/scarlett-gpu/src/memcopy.rs`, `host.rs`.
+- [x] **#16 PC responsiveness while running.** Done: `SCARLETT_FRIENDLY=1` keeps the rest of the PC usable (thread priorities, worker counts); the Stable preset sets it. `engine/crates/scarlett-core/src/friendly.rs`.
+- [x] **#6 Shader cache warm-up.** Done: `scarlett precompile-graphics` and the shader prewarm (`engine/apps/scarlett/src/translate.rs`, `engine/crates/scarlett-gpu/src/pipeline/precompiled.rs`).
 
 ### Tooling & docs
 
@@ -356,7 +358,7 @@ ScarlettPort/
 ├── launcher/         native launcher (Rust, egui); runs the engines from a runtime\ folder beside it
 ├── runtime/
 │   └── xcl/          Classic engine: XCL (ivall/xcl) with our changes
-├── scripts/          setup.ps1 / play.ps1 (XCL), setup-victory.ps1 / play-victory.ps1 (ScarlettPort runtime)
+├── scripts/          setup.ps1 / play.ps1 (XCL), setup-scarlett.ps1 / play-scarlett.ps1 (ScarlettPort runtime)
 ├── patches/          our changes to XCL as a plain diff (xcl-stack.patch)
 ├── docs/             STATUS, RUNTIMES, BUILDING, ROADMAP, FAQ, TROUBLESHOOTING
 ├── assets/           screenshots
@@ -372,13 +374,13 @@ ScarlettPort/
 - It contains **no game files, code, assets or keys**, and no console SDK code.
 - It does **not download game files**. The scripts download only Microsoft's public D3D12 Agility SDK from NuGet.
 - You need your **own legally obtained copy** of a title and your own dump of it. This project does not provide, link to or help obtain game files.
-- Licences and credits are kept: `engine/` (GPL-3.0-or-later) started as a fork of VIctory by Marvisak and contributors, via fxceless/victory-fork, with community work merged in and credited in [`CREDITS.md`](CREDITS.md); `runtime/xcl` is XCL by ivall and contributors (GPL-2.0-only). Each keeps its own `LICENSE`. See [`LICENSE.md`](LICENSE.md).
+- Licences and credits are kept: `engine/` (GPL-3.0-or-later) is a fork, with its lineage and the community work merged in credited in [`CREDITS.md`](CREDITS.md); `runtime/xcl` is XCL by ivall and contributors (GPL-2.0-only). Each keeps its own `LICENSE`. See [`LICENSE.md`](LICENSE.md).
 - Game and company names are trademarks of their owners.
 
 <div align="center">
 
 **If this is useful, star it ⭐ and share it.**
 
-<sub>Started as a fork of [VIctory](https://github.com/Marvisak/VIctory) (GPL-3.0), via [fxceless/victory-fork](https://github.com/fxceless/victory-fork). Fork point: [`engine/UPSTREAM.md`](engine/UPSTREAM.md). Credits: [`CREDITS.md`](CREDITS.md).</sub>
+<sub>Lineage and fork point: [`engine/UPSTREAM.md`](engine/UPSTREAM.md). Credits: [`CREDITS.md`](CREDITS.md).</sub>
 
 </div>
