@@ -2259,6 +2259,7 @@ fn halves_go_through_a_table_as_they_are_and_name_their_views() {
         outputs: Vec::new(),
         prims: Vec::new(),
         mesh_stride: 0,
+        dropped: Vec::new(),
     })
     .expect("lower");
     assert_eq!(lowered.half_views, [(1, 0), (1, 8)]);

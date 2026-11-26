@@ -1664,8 +1664,8 @@ void main() {
         let mut initial_src = vec![0u8; total_bytes];
         for i in 0..RECORDS as usize {
             let words: [u32; 6] = [
-                u32::MAX,                    // IndexCount -> clamps to 1 << 24
-                u32::MAX,                    // InstanceCount -> clamps to 4 (cost = 1 << 26)
+                1 << 22,                     // IndexCount, under MOST_DRAW (1 << 23)
+                u32::MAX,                    // InstanceCount -> clamps to 16 (cost = 1 << 26)
                 1000 + i as u32,             // StartIndexLocation
                 (-200i32 + i as i32) as u32, // BaseVertexLocation
                 5000 + i as u32,             // StartInstanceLocation
@@ -1734,7 +1734,7 @@ void main() {
         let mut zeroed = 0usize;
         for i in 0..RECORDS as usize {
             let rec = &out_words[i * 6..(i + 1) * 6];
-            if rec[0] == (1 << 24) && rec[1] == 4 {
+            if rec[0] == (1 << 22) && rec[1] == 16 {
                 kept += 1;
             } else {
                 assert_eq!((rec[0], rec[1]), (0, 0), "excess draw must be zeroed");

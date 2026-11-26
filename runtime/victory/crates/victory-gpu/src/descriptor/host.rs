@@ -5187,14 +5187,14 @@ void BY_FLOATS_OR_NOT(uint3 id : SV_DispatchThreadID) {
 
     /// Views of one texture that show more and fewer of its mips are all
     /// its own, and the next texture may begin where the mips that are
-    /// there end.
+    /// there end. Under the rule until run 188 (`VICTORY_STALE_TEXTURES=overlap`).
     #[test]
     fn a_texture_of_which_the_smaller_mips_are_there_ends_behind_them() {
         // As the title has them: 512x512 BC7 of which 64x64 is
         // there, and a 1024x512 BC1 texture 8 KiB on.
         let texture = [3, 0, 0, 0, 512, 0, 512, 0x8_0001, 99, 1, 0, 0x105, 0, 0];
         let next = [3, 0, 0, 0, 1024, 0, 512, 0x8_0001, 71, 1, 0, 0x105, 0, 0];
-        let mut spans = Spans::default();
+        let mut spans = Spans { rule: Rule::Overlap, ..Default::default() };
         let at = 0xb_5c04_0000u64;
         let end = |spans: &mut Spans, desc: &[u32; 14], at: u64, first| at + spans.bytes(desc, first).unwrap();
         let a = end(&mut spans, &texture, at, 3);

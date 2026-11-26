@@ -209,6 +209,7 @@ fn lds_shared_in_a_lane_branch_gives_the_consoles_result_on_warp() {
             root_srvs: r.root_srvs,
             root_uavs: r.root_uavs,
             root_indexed_views: Vec::new(),
+            half_views: r.half_views,
         };
         let (root, pso) = match host.compute_pipeline(&shader) {
             Ok(x) => x,
