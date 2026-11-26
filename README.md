@@ -80,7 +80,7 @@ Measured on an RTX 3060 (Series S profile, the title's own upscaler):
 
 - **Speed:** 5.4 fps while walking and turning in the world (median frame 184 ms, 95th percentile 197 ms, 99th percentile 207 ms; RTX 3060 12 GB, Ryzen 5 5600X; 3.9-4.5 fps before). 30 fps is not reached. Where the frame goes, measured on the thread that gates each present: about 187 ms per frame, of which about 55 ms is preparing draws, about 31 ms is refresh copies, about 76 ms is waiting on the card after the title writes next to memory that shaders wrote, and about 19 ms is waiting for title reads. An infinitely fast card would still leave about 99 ms per frame; free copy-back would leave about 180 ms; a quarter of the resolution saves only about 13 ms of GPU time. So the card is not the limit: the waits and the processor work around it are. Tested with no gain: the shader optimizer mask, the pipelining switch, a lock split, thin LTO and removing the settle. The GPU profiler (`VICTORY_GPU_PROFILE`) measures about 93-111 ms of GPU time per frame, spread over about 1,100 pipelines, so no single pass is the one to fix. The intro cutscene is very slow unless it is skipped.
 - **Pipeline compile freezes:** on a first run, moving into new areas freezes while pipelines compile. The shader prewarm and the pipeline cache shorten this on later runs.
-- **Shadowed areas are too dark.** Hair and lighting render correctly in the opening cell. Ray tracing is off by default; with it enabled, the title's probes and distant-shadow pass hit geometry in the opening cell. [Ray-tracing test notes](runtime/victory/docs/fork-ray-tracing.md)
+- **Shadowed areas are too dark.** Hair and lighting render correctly in the opening cell. Ray tracing is off by default. With it enabled on an RX 7900 XTX (not on this RTX 3060), the title's probes and distant-shadow pass hit geometry in the opening cell. [Ray-tracing test notes](runtime/victory/docs/fork-ray-tracing.md)
 - **Not verified playable:** nobody has played a session end to end.
 
 Details: [`docs/STATUS.md`](docs/STATUS.md). Plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).
@@ -248,7 +248,7 @@ Every task is sized for **one person + one AI coding agent**. Pick one, comment 
 
 ### Rendering
 
-- [ ] **#1 Light in shadow.** The opening cell has bounce light with ray tracing enabled. Other interiors still need testing. See `runtime/victory/docs/fork-ray-tracing.md`.
+- [ ] **#1 Light in shadow.** With ray tracing enabled (off by default), the opening cell has bounce light on an RX 7900 XTX. Other interiors and GPUs still need testing. See `runtime/victory/docs/fork-ray-tracing.md`.
 - [ ] **#2 Missing walls and roofs.** Some cards lose the first room's walls and roof with certain switches; find the cause (see `runtime/victory/VICKY.md`).
 - [ ] **#3 Faster wave64 on NVIDIA.** 64-lane programs run as two 32-lane halves. Profile them and cut the overhead.
 - [ ] **#9 `VICTORY_SHADER_OPT` in game.** The safe mask removes 51% of instructions offline; its in-game test is pending. One of the other clean-up passes loses walls in game, and an offline differential found nothing. Run the safe mask in game, then find which pass loses walls and why. `runtime/victory/crates/victory-shader/src/emit/mod.rs` (`shader_opt`), `emit/bitcode.rs`.

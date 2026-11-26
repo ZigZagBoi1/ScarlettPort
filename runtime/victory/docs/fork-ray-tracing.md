@@ -37,8 +37,9 @@ shaders and emulates the one instruction.
 
 ## What this fork adds
 
-1. **All 52 builder programs translate.** The opening scene created 53 builder
-   pipelines. They pass buffer addresses in a spilled parameter table
+1. **The builder programs translate.** On the RX 7900 XTX (64-lane waves) all
+   52 did, and the opening scene created 53 builder pipelines. They pass
+   buffer addresses in a spilled parameter table
    rather than in descriptors. Added: the spilled user-data table, root
    unordered-access views (translator and host binding), byte and 16-bit buffer
    accesses, and several control-flow shapes.
@@ -62,10 +63,12 @@ shaders and emulates the one instruction.
    its GPU buffer into the address directory. Later rays read the same
    buffer even when the title has another view of that page. The title
    receives compacted sizes and counters on the CPU.
-6. **Recorded passes keep their acceleration-structure address.** Each
-   descriptor-table snapshot stores the title's address alongside the host
-   descriptor. The screen probes and shadow passes use it to reach their
-   scene root. Before this change, they read the header at byte 48.
+6. **Recorded passes keep their acceleration-structure address.** With ray
+   tracing on, each descriptor-table snapshot stores the title's address
+   alongside the host descriptor. The screen probes and shadow passes use it
+   to reach their scene root. Before this change, they read the header at
+   byte 48. On GPUs that cap view heaps (NVIDIA), these words go to a bank of
+   their own; that path was not run in game.
 
 ## Opening-cell comparison
 
@@ -77,7 +80,7 @@ the runtime could skip these draws while their pipelines compiled.
 
 With those six draws prioritized, mean brightness on the wall left of the
 window rose from 11 to 50 on a scale of 0 to 255. The papers beside the
-bunk rose from 15 to 47. The same patches in a [reference image](https://www.gtabase.com/images/gta-6/missions/gta-vi-prologue.jpg)
+bunk rose from 15 to 47. The same patches in a published reference image
 measured 103 and 65. Measurements use 640 by 360 images and luma weights of
 0.2126 red, 0.7152 green and 0.0722 blue. The camera faced the window in
 each image. The character's pose differed.
@@ -99,9 +102,9 @@ On another cold start, the final release build measured 50 on the wall
 and 45 on the papers (medians over 16 frames). Brightness varies between
 starts, which is why the traversal comparison used one run.
 
-A second reference measured 60 on the wall and 36 on the papers after cropping
-the black borders. Framing and exposure differ between the two references.
-[Reference image](https://gta6data.com/gta-6-map-reference/)
+A second published reference measured 60 on the wall and 36 on the papers
+after cropping the black borders. Framing and exposure differ between the
+two references.
 
 At the blue table under the fluorescent lamps, a fixed-camera capture
 showed a shadow on the floor behind the table base. With the two local
@@ -113,6 +116,11 @@ head-shaped shadow on the wall opposite the cell window.
 ## Known gaps
 
 - The window wall is darker than the brighter reference.
+- Not retested on a GPU with 32-lane waves. There, a few builder pipelines
+  were refused by the host (they ask for 64-lane waves) or did not translate,
+  which kept the builder off. The measurements here are from a 64-lane
+  RX 7900 XTX.
+- Five shadow-mask trace programs do not translate yet.
 - In some runs the back of the inmate shirt is black. A pixel trace at
   (480, 592) in the 1280 by 720 base-color buffer showed
   `PS_DeferredPedTexturedNC_b1a27fc2_Wrapped` writing RGBA (0, 0, 0, 5).

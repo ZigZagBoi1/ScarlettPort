@@ -16,7 +16,7 @@ Measured on: Windows 10 22H2, RTX 3060 12 GB, 32 GB RAM. Series S profile (`--co
 - World data streams in through DirectStorage; the open world loads.
 - VIctory-based runtime: the world is drawn with the title's own lighting. Autosave and reload of a checkpoint are reported working by the base (`runtime/victory/README.md`).
 - XCL: world-start GPU crash fixed (the title survives 7+ minutes in the world), pipeline journal and offline build, launcher.
-- On the graphics-compatibility branch, the opening cell has bounced light and local lamp shadows with ray tracing enabled. [Ray-tracing test notes](../runtime/victory/docs/fork-ray-tracing.md)
+- With ray tracing enabled (`-RayTracing` or the launcher option; off by default), the opening cell has bounced light and local lamp shadows on an RX 7900 XTX. [Ray-tracing test notes](../runtime/victory/docs/fork-ray-tracing.md)
 
 ## What does not
 - The back of the inmate shirt sometimes renders black before the lighting pass.
