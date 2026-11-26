@@ -1,6 +1,6 @@
 # Roadmap: 30 fps on a mid-range NVIDIA GPU
 
-Current state is in [STATUS.md](STATUS.md): the lit world at about 4 fps while walking and turning on an RTX 3060 (Series S profile), with steady pacing (95th-percentile frame about 270 ms), hair too bright, shadowed areas too dark, the intro cutscene very slow unless skipped, not yet verified playable. The target is 30 fps in the open world on a card such as an RTX 3060 with a correct image. Items are ordered roughly by what blocks the next one; none has a date.
+Current state is in [STATUS.md](STATUS.md): the lit world at 5.4 fps while walking and turning on an RTX 3060 (Series S profile), with steady pacing (95th-percentile frame 197 ms), hair and lighting correct in the opening cell, shadowed areas too dark, the intro cutscene very slow unless skipped, not yet verified playable. The target is 30 fps in the open world on a card such as an RTX 3060 with a correct image. Items are ordered roughly by what blocks the next one; none has a date.
 
 ## 1. Light in shadow
 
@@ -10,7 +10,9 @@ The back of the inmate shirt can still render black. A capture traced that color
 
 ## 2. Frame time
 
-About 4 fps means roughly 250 ms per frame. The GPU profiler (`VICTORY_GPU_PROFILE`) measures about 93-111 ms of GPU time per frame, spread over about 1,100 pipelines, so the gain has to come from many passes at once: the shader optimizer's safe mask removes 51% of instructions offline, and its in-game test is pending. Done in v0.4.0: the yard stutter (lazy remap plus the copy fix) and memory copies cut from 286 to 84 MB per frame. Remaining candidates: title-memory copies, submission waits (the opt-in relay), shader efficiency, and the 64-lane programs that run as two 32-lane halves on NVIDIA.
+5.4 fps means a median frame of 184 ms; 30 fps is not reached. Where the frame goes, measured on the thread that gates each present: about 187 ms per frame, of which about 55 ms is preparing draws, about 31 ms is refresh copies, about 76 ms is waiting on the card after the title writes next to memory that shaders wrote, and about 19 ms is waiting for title reads. An infinitely fast card would still leave about 99 ms per frame; free copy-back would leave about 180 ms; a quarter of the resolution saves only about 13 ms of GPU time. So the card is not the limit: the waits and the processor work around it are. Tested with no gain: the shader optimizer mask, the pipelining switch, a lock split, thin LTO and removing the settle. The work that follows from this is on the waits and copies around the card, not on the card's own time.
+
+The GPU profiler (`VICTORY_GPU_PROFILE`) measures about 93-111 ms of GPU time per frame, spread over about 1,100 pipelines, so the gain has to come from many passes at once: the shader optimizer's safe mask removes 51% of instructions offline, and its in-game test is pending. Done in v0.4.0: the yard stutter (lazy remap plus the copy fix) and memory copies cut from 286 to 84 MB per frame. Remaining candidates: title-memory copies, submission waits (the opt-in relay), shader efficiency, and the 64-lane programs that run as two 32-lane halves on NVIDIA.
 
 ## 3. Intro cutscene
 
@@ -33,6 +35,16 @@ Run the title the way the smaller console does (its memory budget, resolution an
 Play a session end to end, with saves, and record what breaks.
 
 ## Changelog
+
+### v0.4.3
+
+Runtime synced to fx-cand4 (8d32f87); launcher 0.4.3 (version only). Measured on an RTX 3060 12 GB with a Ryzen 5 5600X (Series S profile), walking and turning in the world: 5.4 fps, median frame 184 ms, 95th percentile 197 ms, 99th percentile 207 ms (3.9-4.5 fps before). 30 fps is not reached.
+
+- **Faster:** the texture upload queue is fair (`VICTORY_FAIR_DUE=2`, default; `VICTORY_TEX_SPAN_PCT`, 25 by default) and now drains: about 110 textures waiting at the end of a run, against 21,000 or more before.
+- **Fixed:** hair and lighting render correctly in the opening cell.
+- **New:** a "texture queue" log line every five seconds.
+- **Tested with no gain:** the shader optimizer mask, the pipelining switch, a lock split, thin LTO, removing the settle.
+- **Known issues:** ray tracing is off, shadowed areas are too dark, and the speed is far from 30 fps.
 
 ### v0.4.2
 

@@ -11785,6 +11785,32 @@ impl Meter {
                     crate::descriptor::host::STALE[3].load(Ordering::Relaxed),
                     crate::descriptor::host::STALE[4].load(Ordering::Relaxed)
                 );
+                // The queue's fairness and pace, over the frames since this
+                // line was last written (five seconds).
+                {
+                    static FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    let now = crate::frame::current();
+                    let frames = now.saturating_sub(FRAME.swap(now, Ordering::Relaxed)).max(1) as f64;
+                    let [fresh, fresh_waited, short, short_waited, part_frames] =
+                        [5, 6, 7, 8, 9].map(|i| crate::draw::HEAP_TEXTURES_QUEUE[i].load(Ordering::Relaxed));
+                    let [bytes, uploads, looked, micros, passes, by_time, by_bytes, by_room] =
+                        [0, 1, 2, 3, 4, 5, 6, 7].map(|i| crate::draw::HEAP_TEXTURE_PASS[i].swap(0, Ordering::Relaxed));
+                    tracing::info!(
+                        "texture queue: {due} textures due ({fresh} never looked at, the oldest waiting {fresh_waited} frames; \
+                         {short} showing less than the title holds, the oldest waiting {short_waited} frames), \
+                         {partly} uploaded in part (the longest for {part_frames} frames); per frame over {frames:.0} frames: \
+                         {:.0} bytes uploaded ({:.2} MB) in {:.1} uploads, {:.0} slots looked at, {:.1} ms in {:.2} passes; \
+                         {by_time} of {passes} passes stopped at their time, {by_bytes} at the frame's bytes, {by_room} at a \
+                         full card (VICTORY_FAIR_DUE={}, VICTORY_TEX_SPAN_PCT, VICTORY_RELOOK_MS)",
+                        bytes as f64 / frames,
+                        bytes as f64 / frames / 1e6,
+                        uploads as f64 / frames,
+                        looked as f64 / frames,
+                        micros as f64 / 1e3 / frames,
+                        passes as f64 / frames,
+                        crate::descriptor::host::fair_due()
+                    );
+                }
                 let [views, shown, waiting, tables, gone, own, free, start, other, shows, back] =
                     [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(|i: usize| crate::descriptor::host::SWEPT[i].load(Ordering::Relaxed));
                 tracing::info!(

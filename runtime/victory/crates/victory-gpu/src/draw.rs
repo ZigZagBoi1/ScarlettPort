@@ -730,7 +730,34 @@ pub(crate) static HEAP_TEXTURES_TABLED: AtomicU64 = AtomicU64::new(0);
 /// The queue of textures picked by index at the last pass
 /// (`TextureQueue::census`): slots in it, due, waiting for their memory,
 /// uploaded in part, and the frames the oldest due one has waited.
-pub(crate) static HEAP_TEXTURES_QUEUE: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+/// Then (`TextureQueue::census`): due slots never looked at and the frames
+/// the longest of them has waited; due slots whose host copy shows less
+/// than the title holds and the frames the longest has waited; the frames
+/// since the first upload in part of the slot longest in that state.
+pub(crate) static HEAP_TEXTURES_QUEUE: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
+/// The pass over textures picked by index since the queue's last line
+/// (every five seconds): bytes uploaded, uploads, slots looked at,
+/// microseconds, passes, and the passes that stopped with due slots left
+/// at their time, at the frame's bytes, and at the count of slots refused
+/// on a full card.
+pub(crate) static HEAP_TEXTURE_PASS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+
+/// `VICTORY_TEX_SPAN_PCT` (live; 25): while slots that have their memory
+/// are due (never looked at, or showing less than the title holds), a pass
+/// may take this share of the time since the pass before it, where that is
+/// more than its 250 ms, up to 1.5 s. The 250 ms are a share of a 4 fps
+/// frame; of a loading frame of two to four seconds they are a tenth, and
+/// the longer span of the world's first minute (`catching_up`) is spent
+/// once per run, so every later load drained at a tenth of its time. A
+/// frame under a second is as before. `0`: 250 ms always.
+static TEX_SPAN_PCT: victory_core::live::Switch = victory_core::live::Switch::new("TEX_SPAN_PCT", 25);
+
+/// Frames at most between two looks at a slot uploaded in part
+/// (`VICTORY_FAIR_DUE=2`): there are few of them, a look is a query, and
+/// a shader reads what they show. (They waited up to the frames of four
+/// seconds, as slots without memory do, for a mapping the runtime did not
+/// tell of.)
+const PART_LOOK_FRAMES: u64 = 8;
 /// Since the start: looks at a slot uploaded in part that found no more of
 /// its memory mapped; uploads of textures not all mapped; and of those,
 /// the ones whose first page was not there (asked by the first page alone,
@@ -2356,16 +2383,33 @@ impl State {
         // The rest waits for the next frames, as it does past the bytes.
         const SPAN: std::time::Duration = std::time::Duration::from_millis(250);
         const SPAN_CATCHING_UP: std::time::Duration = std::time::Duration::from_millis(1500);
-        let (per_frame, span) = if census[0] > LONG && catching_up(std::time::Duration::ZERO) {
+        let catching = census[0] > LONG && catching_up(std::time::Duration::ZERO);
+        let (per_frame, span) = if catching {
             (budget_per_frame.max(PER_FRAME_CATCHING_UP), SPAN_CATCHING_UP)
+        } else if census[5] + census[7] > 0 {
+            // A share of a long frame (`TEX_SPAN_PCT`).
+            let share = std::time::Duration::from_millis(took.saturating_mul(TEX_SPAN_PCT.get().min(100)) / 100);
+            (budget_per_frame, SPAN.max(share).min(SPAN_CATCHING_UP))
         } else {
             (budget_per_frame, SPAN)
         };
+        let fair = crate::descriptor::host::fair_due() >= 2;
         let began = std::time::Instant::now();
+        let handed = due.len();
+        let mut looked = 0usize;
+        // Why the pass stopped with slots left: 1 its time, 2 the frame's
+        // bytes, 3 slots refused on a full card.
+        let mut stopped = 0usize;
         for (index, write) in due {
-            if SPENT.load(Ordering::Relaxed) >= per_frame || began.elapsed() > span {
+            if SPENT.load(Ordering::Relaxed) >= per_frame {
+                stopped = 2;
                 break;
             }
+            if began.elapsed() > span {
+                stopped = 1;
+                break;
+            }
+            looked += 1;
             // A placed texture whose memory is not mapped (not streamed in
             // yet, or streamed out again: the heap keeps tens of thousands
             // of such views) gets no host texture; looked at again soon (a
@@ -2420,12 +2464,14 @@ impl State {
                     HEAP_TEXTURES_AWAY.fetch_add(1, Ordering::Relaxed);
                     // Streamed out: what the slot showed is let go.
                     host.texture_slot_gone(index);
+                    host.texture_slot_away(index);
                     host.texture_slot_later(index, write, frame, most);
                     continue;
                 }
                 if mapped < len {
                     if mapped <= host.texture_slot_mapped(index) {
                         HEAP_TEXTURES_PARTLY[0].fetch_add(1, Ordering::Relaxed);
+                        let most = if fair { most.min(PART_LOOK_FRAMES) } else { most };
                         host.texture_slot_later(index, write, frame, most);
                         continue;
                     }
@@ -2470,9 +2516,11 @@ impl State {
                         // goes on, within a count that bounds one pass.
                         host.texture_slot_held(index, write, frame + most);
                         if refused > 1024 {
+                            stopped = 3;
                             break;
                         }
                     } else if refused > 256 {
+                        stopped = 3;
                         break;
                     }
                     continue;
@@ -2527,9 +2575,14 @@ impl State {
             // then on as a slot with nothing new (a placed texture: until
             // more of it is mapped; a texture object at an address the
             // title mapped: again in 120 frames, as before).
+            // (`VICTORY_FAIR_DUE=2`: a texture object, of whose memory the
+            // runtime's mappings tell nothing here, again after the frames
+            // of about four seconds if those are fewer than 120: at a
+            // loading frame every two seconds, 120 frames were four
+            // minutes with its last mips missing.)
             let again = match partly {
                 Some(mapped) => Some((frame + 1, mapped)),
-                None => (!whole).then_some((frame + 120, 0)),
+                None => (!whole).then_some((frame + if fair { most.min(120) } else { 120 }, 0)),
             };
             if again.is_some() {
                 HEAP_TEXTURES_PARTLY[1].fetch_add(1, Ordering::Relaxed);
@@ -2562,6 +2615,10 @@ impl State {
             }
             HEAP_TEXTURE_BYTES.fetch_add(bytes, Ordering::Relaxed);
             HEAP_TEXTURES.fetch_add(1, Ordering::Relaxed);
+            HEAP_TEXTURE_PASS[0].fetch_add(bytes, Ordering::Relaxed);
+            HEAP_TEXTURE_PASS[1].fetch_add(1, Ordering::Relaxed);
+            // What a shader reads at the slot from now on is this upload.
+            host.texture_slot_uploaded(index);
             match memory {
                 // Whole and uploaded: looked at again (see above).
                 Some((at, len)) => {
@@ -2571,7 +2628,19 @@ impl State {
                 None => host.texture_slot_done(index, write, again),
             }
         }
-        catching_up(began.elapsed().saturating_sub(SPAN));
+        let spent = began.elapsed();
+        HEAP_TEXTURE_PASS[2].fetch_add(looked as u64, Ordering::Relaxed);
+        HEAP_TEXTURE_PASS[3].fetch_add(spent.as_micros() as u64, Ordering::Relaxed);
+        HEAP_TEXTURE_PASS[4].fetch_add(1, Ordering::Relaxed);
+        if stopped != 0 && looked < handed {
+            HEAP_TEXTURE_PASS[4 + stopped].fetch_add(1, Ordering::Relaxed);
+        }
+        // The time past the span of an ordinary pass counts against the
+        // world's first minute, as before; the share of a long frame does
+        // not.
+        if catching || span == SPAN {
+            catching_up(spent.saturating_sub(SPAN));
+        }
     }
 
     /// For the frame listing, after a dropped dispatch's line: its group

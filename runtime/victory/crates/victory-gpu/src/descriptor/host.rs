@@ -769,14 +769,30 @@ struct Waiting {
     /// the fingerprint it had at the upload, how many looks found it
     /// unchanged, and the frame of the upload. A fingerprint of 0: none.
     checked: (u64, u64, u64, u8, u64),
+    /// A host copy made for the slot is uploaded and shows less than the
+    /// title holds: uploaded in part, or uploaded and its memory mapped or
+    /// written since ([`TextureQueue::changed`]). Shaders read it as it
+    /// is, so it is served ahead of slots that show nothing yet.
+    shown: bool,
+    /// The frame from which it has waited for its turn: its write, or the
+    /// frame its memory arrived or changed.
+    since: u64,
+    /// The frame of its first upload in part; 0: none.
+    part: u64,
 }
 
-/// Whether due texture slots are served in turns, a slot looked at before
-/// and one never looked at ([`TextureQueue::due`]; on unless
-/// `VICTORY_FAIR_DUE=0`; live).
-fn fair_due() -> bool {
-    static ON: victory_core::live::Switch = victory_core::live::Switch::new("FAIR_DUE", 1);
-    ON.on()
+/// How due texture slots are ordered ([`TextureQueue::due_as`];
+/// `VICTORY_FAIR_DUE`, live):
+/// - `0`: every slot looked at before ahead of every fresh one;
+/// - `1`: the two kinds in turns, a slot looked at before first (the fork's
+///   pull request #1246);
+/// - `2` (unless said): as `1`, and ahead of both, two places of four,
+///   the slots whose host copy is uploaded and shows less than the title
+///   holds, the longest waiting first; the slots looked at before go by
+///   how long they have been due, not by their write.
+pub(crate) fn fair_due() -> u64 {
+    static MODE: victory_core::live::Switch = victory_core::live::Switch::new("FAIR_DUE", 2);
+    MODE.get()
 }
 
 /// The queue of title slots whose texture view waits to be brought up to
@@ -790,6 +806,9 @@ pub(crate) struct TextureQueue {
     /// they need ([`TextureQueue::hold`]), each with the write it was
     /// held as.
     held: std::collections::BTreeMap<u32, u64>,
+    /// Slots the pass uploaded a host copy for (in part or whole) since
+    /// their view was written: what a shader reads there is that copy.
+    uploaded: std::collections::HashSet<u32>,
 }
 
 impl TextureQueue {
@@ -803,11 +822,32 @@ impl TextureQueue {
         }
         self.writes += 1;
         let write = self.writes;
-        self.slots.insert(index, Waiting { due, written: frame, write, looks: 0, mapped: 0, checked: (0, 0, 0, 0, 0) });
+        if !seen {
+            // Another view: what was uploaded for the old one is not it.
+            self.uploaded.remove(&index);
+        }
+        let since = frame.max(due);
+        let entry = Waiting { due, written: frame, write, looks: 0, mapped: 0, checked: (0, 0, 0, 0, 0), shown: false, since, part: 0 };
+        self.slots.insert(index, entry);
     }
 
     fn remove(&mut self, index: u32) {
         self.slots.remove(&index);
+        self.uploaded.remove(&index);
+    }
+
+    /// The pass uploaded a host copy for slot `index` (in part or whole).
+    fn uploaded(&mut self, index: u32) {
+        self.uploaded.insert(index);
+    }
+
+    /// Slot `index`'s memory is not mapped and its host slot was let go:
+    /// nothing of it is shown any more.
+    fn away(&mut self, index: u32) {
+        self.uploaded.remove(&index);
+        if let Some(w) = self.slots.get_mut(&index) {
+            (w.shown, w.part, w.mapped) = (false, 0, 0);
+        }
     }
 
     /// Up to `max` slots due at `frame`, each with its write number, in
@@ -827,15 +867,47 @@ impl TextureQueue {
     ///   at waited 300 to 1,500 frames: faces whose textures are picked by
     ///   index read an empty slot (black) or an older view (red, noise).
     fn due(&self, frame: u64, max: usize) -> Vec<(u32, u64)> {
+        self.due_as(frame, max, fair_due())
+    }
+
+    /// [`TextureQueue::due`] in the order of `mode` ([`fair_due`]). With
+    /// `2`, three kinds, served in turns of four places (a kind with none
+    /// left gives its places to the others):
+    /// - two places: slots whose host copy is uploaded and shows less than
+    ///   the title holds (uploaded in part, or its memory mapped or written
+    ///   since the upload), the longest waiting first. A shader reads such
+    ///   a copy as it is (7900XTX issue #75: 64 of 3,074 material slots
+    ///   held a partly uploaded texture, the worst 7% of its surface), and
+    ///   as "one written now" it stood among thousands of fresh slots;
+    /// - one place: slots looked at before with nothing uploaded (their
+    ///   memory not mapped, or a whole upload looked at again), the longest
+    ///   due first: by the newest write, the same ones were looked at in
+    ///   every pass its time cut and the others never;
+    /// - one place: slots never looked at, the newest write first and the
+    ///   oldest next, as before.
+    fn due_as(&self, frame: u64, max: usize, mode: u64) -> Vec<(u32, u64)> {
+        let mut shown: Vec<(u64, u32, u64)> = Vec::new();
         let mut again: Vec<(u64, u32, u64)> = Vec::new();
         let mut fresh: Vec<(u64, u32, u64)> = Vec::new();
         for (&index, w) in self.slots.iter().filter(|(_, w)| w.due <= frame) {
-            let class = if w.looks > 0 || w.mapped > 0 { &mut again } else { &mut fresh };
-            class.push((w.written, index, w.write));
+            if mode >= 2 && (w.shown || w.mapped > 0) {
+                shown.push((w.since, index, w.write));
+            } else if w.looks > 0 || w.mapped > 0 {
+                again.push((if mode >= 2 { w.due } else { w.written }, index, w.write));
+            } else {
+                fresh.push((w.written, index, w.write));
+            }
         }
         // By the number of the write, counted over the run.
         let newest_first = |a: &(u64, u32, u64), b: &(u64, u32, u64)| b.2.cmp(&a.2);
-        again.sort_unstable_by(newest_first);
+        // By the frame (waited from, or due from), then the older write.
+        let longest_first = |a: &(u64, u32, u64), b: &(u64, u32, u64)| (a.0, a.2).cmp(&(b.0, b.2));
+        shown.sort_unstable_by(longest_first);
+        if mode >= 2 {
+            again.sort_unstable_by(longest_first);
+        } else {
+            again.sort_unstable_by(newest_first);
+        }
         fresh.sort_unstable_by(newest_first);
         let mut fresh_order: Vec<(u32, u64)> = Vec::with_capacity(fresh.len().min(max));
         let (mut new, mut old) = (0, fresh.len());
@@ -848,21 +920,21 @@ impl TextureQueue {
             }
         }
         let mut again_order = again.iter().map(|&(_, index, write)| (index, write));
-        if !fair_due() {
+        if mode == 0 {
             let mut order: Vec<(u32, u64)> = again_order.collect();
             order.extend(fresh_order);
             order.truncate(max);
             return order;
         }
+        let mut shown_order = shown.iter().map(|&(_, index, write)| (index, write));
         let mut fresh_order = fresh_order.into_iter();
-        let mut order = Vec::with_capacity(max.min(fresh.len() + again.len()));
+        let mut order = Vec::with_capacity(max.min(shown.len() + fresh.len() + again.len()));
         while order.len() < max {
-            let (a, b) = (again_order.next(), fresh_order.next());
-            if a.is_none() && b.is_none() {
+            let turn = [shown_order.next(), shown_order.next(), again_order.next(), fresh_order.next()];
+            if turn.iter().all(Option::is_none) {
                 break;
             }
-            order.extend(a);
-            order.extend(b);
+            order.extend(turn.into_iter().flatten());
         }
         order.truncate(max);
         order
@@ -922,9 +994,12 @@ impl TextureQueue {
 
     /// Slot `index` was uploaded with `mapped` bytes of its memory there,
     /// not all of it: looked at again from frame `due`.
-    fn partly(&mut self, index: u32, write: u64, due: u64, mapped: u64) {
+    fn partly(&mut self, index: u32, write: u64, due: u64, mapped: u64, frame: u64) {
         if let Some(w) = self.same(index, write) {
             (w.due, w.looks, w.mapped) = (due, 0, mapped.max(1));
+            if w.part == 0 {
+                w.part = frame.max(1);
+            }
         }
     }
 
@@ -936,6 +1011,7 @@ impl TextureQueue {
     fn recheck(&mut self, index: u32, write: u64, due: u64, at: (u64, u64), print: u64, looks: u8, uploaded: u64) {
         if let Some(w) = self.same(index, write) {
             (w.due, w.looks, w.mapped) = (due, 1, 0);
+            (w.shown, w.part) = (false, 0);
             w.checked = (at.0, at.1, print, looks, uploaded);
         }
     }
@@ -953,8 +1029,21 @@ impl TextureQueue {
     fn changed(&mut self, index: u32, frame: u64, due: u64) {
         self.writes += 1;
         let write = self.writes;
-        let due = self.slots.get(&index).map_or(due, |w| w.due.min(due));
-        self.slots.insert(index, Waiting { due, written: frame, write, looks: 0, mapped: 0, checked: (0, 0, 0, 0, 0) });
+        let was = self.slots.get(&index).copied();
+        let due = was.map_or(due, |w| w.due.min(due));
+        // Uploaded before (out of the queue as up to date, or in it after
+        // an upload): its host copy is read as it is until this is served.
+        let shown = self.uploaded.contains(&index) || was.is_some_and(|w| w.shown || w.mapped > 0 || w.checked.2 != 0);
+        // Waiting since: as it was for a slot that stood ready (shown
+        // short, or never looked at); from now for one whose memory was
+        // not there, or that was up to date.
+        let since = match was {
+            Some(w) if w.shown || w.mapped > 0 || w.looks == 0 => w.since.min(frame),
+            _ => frame,
+        };
+        let part = was.map_or(0, |w| w.part);
+        let entry = Waiting { due, written: frame, write, looks: 0, mapped: 0, checked: (0, 0, 0, 0, 0), shown, since, part };
+        self.slots.insert(index, entry);
     }
 
     /// Bytes of slot `index`'s memory that were mapped at its last upload
@@ -966,17 +1055,33 @@ impl TextureQueue {
     /// For the frame line: slots in the queue; of them due at `frame`;
     /// waiting for their memory (looked at, never uploaded); uploaded in
     /// part; and the frames the oldest due one has waited since its write.
-    fn census(&self, frame: u64) -> [u64; 5] {
-        let mut c = [self.slots.len() as u64, 0, 0, 0, 0];
+    /// Then, for the queue's own line: due slots never looked at, and the
+    /// frames the longest of them has waited for its turn; due slots whose
+    /// host copy shows less than the title holds, and the frames the
+    /// longest of them has waited; and the frames since the first upload
+    /// in part of the slot longest in that state.
+    fn census(&self, frame: u64) -> [u64; 10] {
+        let mut c = [0; 10];
+        c[0] = self.slots.len() as u64;
         for w in self.slots.values() {
             if w.mapped > 0 {
                 c[3] += 1;
             } else if w.looks > 0 {
                 c[2] += 1;
             }
+            if w.part > 0 {
+                c[9] = c[9].max(frame.saturating_sub(w.part));
+            }
             if w.due <= frame {
                 c[1] += 1;
                 c[4] = c[4].max(frame.saturating_sub(w.written));
+                if w.shown || w.mapped > 0 {
+                    c[7] += 1;
+                    c[8] = c[8].max(frame.saturating_sub(w.since));
+                } else if w.looks == 0 {
+                    c[5] += 1;
+                    c[6] = c[6].max(frame.saturating_sub(w.since));
+                }
             }
         }
         c
@@ -2007,7 +2112,7 @@ impl HostHeap {
     /// with its write number, in the order to serve them
     /// ([`TextureQueue::due`]), and the queue's counts
     /// ([`TextureQueue::census`]).
-    pub(crate) fn texture_slots_due(&self, frame: u64, max: usize) -> (Vec<(u32, u64)>, [u64; 5]) {
+    pub(crate) fn texture_slots_due(&self, frame: u64, max: usize) -> (Vec<(u32, u64)>, [u64; 10]) {
         let textures = self.textures.lock().unwrap_or_else(|e| e.into_inner());
         (if max == 0 { Vec::new() } else { textures.due(frame, max) }, textures.census(frame))
     }
@@ -2033,7 +2138,7 @@ impl HostHeap {
     pub(crate) fn texture_slot_done(&self, index: u32, write: u64, again: Option<(u64, u64)>) {
         let mut textures = self.textures.lock().unwrap_or_else(|e| e.into_inner());
         match again {
-            Some((frame, mapped)) => textures.partly(index, write, frame, mapped),
+            Some((frame, mapped)) => textures.partly(index, write, frame, mapped, crate::frame::current()),
             None => textures.done(index, write),
         }
     }
@@ -2065,6 +2170,16 @@ impl HostHeap {
     pub(crate) fn texture_slot_later(&self, index: u32, write: u64, frame: u64, most: u64) {
         let mut textures = self.textures.lock().unwrap_or_else(|e| e.into_inner());
         textures.later(index, write, frame, most);
+    }
+
+    /// See [`TextureQueue::uploaded`].
+    pub(crate) fn texture_slot_uploaded(&self, index: u32) {
+        self.textures.lock().unwrap_or_else(|e| e.into_inner()).uploaded(index);
+    }
+
+    /// See [`TextureQueue::away`].
+    pub(crate) fn texture_slot_away(&self, index: u32) {
+        self.textures.lock().unwrap_or_else(|e| e.into_inner()).away(index);
     }
 
     /// See [`TextureQueue::hold`].
@@ -5171,7 +5286,7 @@ void BY_FLOATS_OR_NOT(uint3 id : SV_DispatchThreadID) {
         // newest, oldest, newest, oldest, and so on
         assert_eq!(order, [5, 10, 17, 11, 16, 12, 15, 13, 14]);
         assert_eq!(q.due(9, 2).len(), 2);
-        assert_eq!(q.census(9), [9, 9, 0, 0, 8]);
+        assert_eq!(q.census(9)[..5], [9, 9, 0, 0, 8]);
         // Slot 17's memory is not mapped: again next frame, then in 2, 4, 4.
         let write = |q: &TextureQueue, index: u32| q.due(u64::MAX, 100).iter().find(|d| d.0 == index).unwrap().1;
         let w17 = write(&q, 17);
@@ -5188,7 +5303,7 @@ void BY_FLOATS_OR_NOT(uint3 id : SV_DispatchThreadID) {
         assert!(!q.due(u64::MAX, 100).iter().any(|d| d.0 == 17));
         // Uploaded with part of its memory there: kept, with what was there.
         let w16 = write(&q, 16);
-        q.partly(16, w16, 12, 4096);
+        q.partly(16, w16, 12, 4096, 11);
         assert_eq!(q.mapped(16), 4096);
         assert_eq!(q.due(12, 100)[0].0, 16);
         // The title writes slot 16 again while the pass works on it: what
@@ -5200,7 +5315,7 @@ void BY_FLOATS_OR_NOT(uint3 id : SV_DispatchThreadID) {
         assert_eq!(q.due(13, 100)[0].0, 16);
         // A draw that makes the host slot (`seen`) keeps what the queue knows,
         let w15 = write(&q, 15);
-        q.partly(15, w15, 20, 8192);
+        q.partly(15, w15, 20, 8192, 14);
         q.written(15, 14, 0, true);
         assert_eq!(q.mapped(15), 8192);
         // and queues a slot the queue did not hold.
@@ -5235,6 +5350,80 @@ void BY_FLOATS_OR_NOT(uint3 id : SV_DispatchThreadID) {
         assert_eq!(order.len(), 6);
         assert!(order[0] >= 100, "a slot looked at before comes first: {order:?}");
         assert_eq!(order.iter().filter(|&&i| i < 100).count(), 3, "every fresh slot is reached: {order:?}");
+    }
+
+    /// A slot whose host copy is uploaded and whose memory changed since
+    /// is served ahead of slots never looked at and of slots waiting for
+    /// their memory, the longest waiting first; the others still get their
+    /// places of every four.
+    #[test]
+    fn the_texture_queue_serves_shown_slots_first() {
+        let mut q = TextureQueue::default();
+        let write = |q: &TextureQueue, index: u32| q.due_as(u64::MAX, 1000, 2).iter().find(|d| d.0 == index).unwrap().1;
+        // Slots 100..110 looked at before, their memory not there.
+        for i in 100..110u32 {
+            q.written(i, 1, 0, false);
+            let w = write(&q, i);
+            q.later(i, w, 1, 1);
+        }
+        // Slots 1..9 never looked at.
+        for i in 1..9u32 {
+            q.written(i, 2, 0, false);
+        }
+        // Slot 50 uploaded in part in frame 3; slot 51 uploaded whole and
+        // out of the queue, its memory written in frame 5; slot 52 uploaded
+        // in part in frame 3, more of its memory mapped in frame 4.
+        for i in 50..53u32 {
+            q.written(i, 2, 0, false);
+        }
+        let w = write(&q, 50);
+        q.uploaded(50);
+        q.partly(50, w, 4, 4096, 3);
+        let w = write(&q, 51);
+        q.uploaded(51);
+        q.done(51, w);
+        let w = write(&q, 52);
+        q.uploaded(52);
+        q.partly(52, w, 4, 4096, 3);
+        q.changed(52, 4, 5);
+        q.changed(51, 5, 6);
+        assert!(q.slots[&51].shown && q.slots[&52].shown);
+        let order: Vec<u32> = q.due_as(10, 8, 2).into_iter().map(|d| d.0).collect();
+        assert_eq!(order[..2], [50, 52], "the longest waiting first: {order:?}");
+        assert!(order[2] >= 100 && order[3] < 50, "then one looked at before and a fresh one: {order:?}");
+        assert_eq!(order[4], 51, "{order:?}");
+        // Census: 3 shown and due, the longest for 8 frames (since frame 2);
+        // 8 never looked at; in part since frame 3.
+        let c = q.census(10);
+        assert_eq!((c[5], c[7], c[8], c[9]), (8, 3, 8, 7), "{c:?}");
+        // A new view written into the slot: nothing of it is shown.
+        q.written(51, 11, 0, false);
+        q.changed(51, 12, 13);
+        assert!(!q.slots[&51].shown);
+        // Streamed out: the same.
+        q.away(52);
+        q.changed(52, 12, 13);
+        assert!(!q.slots[&52].shown);
+    }
+
+    /// Slots looked at before are handed out by how long they have been
+    /// due: a pass that takes only some of them reaches the others next.
+    #[test]
+    fn the_texture_queue_looks_again_at_the_longest_due_first() {
+        let mut q = TextureQueue::default();
+        for i in 0..6u32 {
+            q.written(i, 1, 0, false);
+        }
+        // Looked at in frames 1..7, each due again a frame later: slot 0
+        // has been due the longest, though it is the oldest write.
+        for i in 0..6u32 {
+            let w = q.due_as(u64::MAX, 100, 2).iter().find(|d| d.0 == i).unwrap().1;
+            q.later(i, w, 1 + u64::from(i), 1);
+        }
+        let order: Vec<u32> = q.due_as(20, 3, 2).into_iter().map(|d| d.0).collect();
+        assert_eq!(order, [0, 1, 2]);
+        let order: Vec<u32> = q.due_as(20, 3, 1).into_iter().map(|d| d.0).collect();
+        assert_eq!(order, [5, 4, 3], "by the newest write with the mode before");
     }
 
     /// Slots held back for lack of room on the card are not handed out

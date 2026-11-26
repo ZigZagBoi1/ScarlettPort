@@ -50,6 +50,7 @@ pub const LIVE: &[&str] = &[
     "TARGET_VARIANTS",
     "FAIR_DUE",
     "RELOOK_MS",
+    "TEX_SPAN_PCT",
 ];
 
 /// Switches known and NOT settable live (see the table in live-ab.md).

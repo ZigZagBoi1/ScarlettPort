@@ -26,8 +26,9 @@ Also credited: XCL by ivall and contributors (https://github.com/ivall/xcl, GPL-
 
 ## This snapshot
 
-- Source: branch `fx-cand4` at `b3882b9` of our fork's working repository, with the pull requests merged in this repository since the previous snapshot kept on top. Every new switch is off by default in the runtime; `scripts/play-victory.ps1` and the launcher turn on the verified ones (see `docs/RUNTIMES.md`).
-- Merged since the previous snapshot (`fx-cand4` at `efcc7b9`, which this repository took in 11be94c):
+- Source: branch `fx-cand4` at `8d32f87` of our fork's working repository, with the pull requests merged in this repository since the previous snapshot kept on top. Every new switch is off by default in the runtime; `scripts/play-victory.ps1` and the launcher turn on the verified ones (see `docs/RUNTIMES.md`).
+- Since `b3882b9` (one commit, by Ziggy): the texture upload queue is fair (`VICTORY_FAIR_DUE=2` by default, `VICTORY_TEX_SPAN_PCT`), with a "texture queue" log line every five seconds.
+- Merged in `efcc7b9..b3882b9` (`fx-cand4` at `efcc7b9`, which this repository took in 11be94c):
   - screen passes with workers of their own, on by default (`VICTORY_SCREEN_WORKERS=0`: off): the lighting passes fix
   - room kept for card copies capped (`VICTORY_CARD_ROOM_KEPT_MB`, 512 by default): the texture reserve fix
   - `VICTORY_FRIENDLY` (background pools and priorities that leave processor time to the desktop)

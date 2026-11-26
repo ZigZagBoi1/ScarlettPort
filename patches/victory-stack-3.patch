@@ -3,7 +3,7 @@
 # The diff of the ScarlettPort VIctory-based runtime (runtime/victory) against its base:
 #   git diff 4e17478 fx-cand4
 # where 4e17478 is the tip of fxceless/victory-fork `main` that this work started from
-# (GPL-3.0-or-later, https://github.com/fxceless/victory-fork) and `fx-cand4` @ b3882b9 is
+# (GPL-3.0-or-later, https://github.com/fxceless/victory-fork) and `fx-cand4` @ 8d32f87 is
 # that base plus merged community work (see runtime/victory/SCARLETTPORT.md) and our changes,
 # with the pull requests merged in this repository since on top.
 # Split in 3 parts (the repository keeps files under 2 MB). Apply all to a checkout of 4e17478 with:

@@ -7,7 +7,7 @@ No emulator, no streaming. The title's own x64 code runs on your CPU, and its RD
 
 ### Where it stands
 
-Developed and tested so far against one open-world title. It boots, gets through the menus, saves and legal screens, reaches the world and starts gameplay: about 5 fps in the cell scene and about 4 fps while moving on an RTX 3060 (Series S profile), with stable frame pacing. The yard stutter is fixed; the lighting is wrong (ray tracing is off) and first runs freeze on pipeline compiles while moving, so it is **not yet verified playable**.
+Developed and tested so far against one open-world title. It boots, gets through the menus, saves and legal screens, reaches the world and starts gameplay: about 5.4 fps while walking and turning on an RTX 3060 (Series S profile), with stable frame pacing. That is not 30 fps. The yard stutter is fixed and hair and lighting render correctly in the opening cell; ray tracing is off, shadowed areas are too dark and first runs freeze on pipeline compiles while moving, so it is **not yet verified playable**.
 
 ![progress](https://img.shields.io/badge/progress-65%25-ff2d95?style=for-the-badge)
 
@@ -15,7 +15,7 @@ Developed and tested so far against one open-world title. It boots, gets through
 █████████████░░░░░░░  65%
 ```
 
-`boots` ✅ → `intro & menus` ✅ → `world loads` ✅ → `lit world` ✅ → `gameplay starts` ✅ (~4-5 fps) → `shadowed areas` 🔨 → `playable speed` ⏳
+`boots` ✅ → `intro & menus` ✅ → `world loads` ✅ → `lit world` ✅ → `gameplay starts` ✅ (~5 fps) → `shadowed areas` 🔨 → `playable speed` ⏳
 
 <a href="https://www.paypal.me/SalwanStudios"><img src="https://img.shields.io/badge/DONATE-PayPal-blue?style=for-the-badge&logo=paypal&logoColor=white" alt="Donate via PayPal" height="45"/></a>
 <a href="https://ko-fi.com/ziggymar"><img src="https://img.shields.io/badge/BUY%20A%20COFFEE-Ko--fi-ff5f5f?style=for-the-badge&logo=kofi&logoColor=white" alt="Support on Ko-fi" height="45"/></a>
@@ -78,9 +78,9 @@ All captured on an RTX 3060 under Windows 10.
 
 Measured on an RTX 3060 (Series S profile, the title's own upscaler):
 
-- **Speed:** about 4 fps while walking and turning in the world, with steady pacing (95th-percentile frame about 270 ms). That is far from 30 fps. The GPU profiler (`VICTORY_GPU_PROFILE`) measures about 93-111 ms of GPU time per frame, spread over about 1,100 pipelines, so no single pass is the one to fix. The intro cutscene is very slow unless it is skipped.
+- **Speed:** 5.4 fps while walking and turning in the world (median frame 184 ms, 95th percentile 197 ms, 99th percentile 207 ms; RTX 3060 12 GB, Ryzen 5 5600X; 3.9-4.5 fps before). 30 fps is not reached. Where the frame goes, measured on the thread that gates each present: about 187 ms per frame, of which about 55 ms is preparing draws, about 31 ms is refresh copies, about 76 ms is waiting on the card after the title writes next to memory that shaders wrote, and about 19 ms is waiting for title reads. An infinitely fast card would still leave about 99 ms per frame; free copy-back would leave about 180 ms; a quarter of the resolution saves only about 13 ms of GPU time. So the card is not the limit: the waits and the processor work around it are. Tested with no gain: the shader optimizer mask, the pipelining switch, a lock split, thin LTO and removing the settle. The GPU profiler (`VICTORY_GPU_PROFILE`) measures about 93-111 ms of GPU time per frame, spread over about 1,100 pipelines, so no single pass is the one to fix. The intro cutscene is very slow unless it is skipped.
 - **Pipeline compile freezes:** on a first run, moving into new areas freezes while pipelines compile. The shader prewarm and the pipeline cache shorten this on later runs.
-- **Shadowed areas are too dark, and hair renders incorrectly.** With ray tracing enabled, the title's probes and distant-shadow pass now hit geometry in the opening cell. [Ray-tracing test notes](runtime/victory/docs/fork-ray-tracing.md)
+- **Shadowed areas are too dark.** Hair and lighting render correctly in the opening cell. Ray tracing is off by default; with it enabled, the title's probes and distant-shadow pass hit geometry in the opening cell. [Ray-tracing test notes](runtime/victory/docs/fork-ray-tracing.md)
 - **Not verified playable:** nobody has played a session end to end.
 
 Details: [`docs/STATUS.md`](docs/STATUS.md). Plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).
@@ -88,7 +88,18 @@ Questions: [`docs/FAQ.md`](docs/FAQ.md). Problems: [`docs/TROUBLESHOOTING.md`](d
 
 ---
 
-## 🆕 New in v0.4.2
+## 🆕 New in v0.4.3
+
+Measured in the world on an RTX 3060 12 GB with a Ryzen 5 5600X (Series S profile), walking and turning: 5.4 fps, median frame 184 ms, 95th percentile 197 ms, 99th percentile 207 ms (3.9-4.5 fps before). 30 fps is not reached.
+
+- **Texture upload queue made fair** (`VICTORY_FAIR_DUE=2`, the default): textures that show less than the title holds go first, then the ones that have waited longest. The queue now drains: about 110 textures are waiting at the end of a run, against 21,000 or more before.
+- **`VICTORY_TEX_SPAN_PCT`** (25 by default, `0` turns it off): on a long frame the texture pass may take that share of the frame.
+- **A "texture queue" log line** every five seconds: textures due, uploaded in part, and the work done per frame.
+- **Hair and lighting** render correctly in the opening cell.
+- **Where the frame goes:** measured on the thread that gates each present: about 187 ms per frame, of which about 55 ms is preparing draws, about 31 ms is refresh copies, about 76 ms is waiting on the card after the title writes next to memory that shaders wrote, and about 19 ms is waiting for title reads. An infinitely fast card would still leave about 99 ms per frame; free copy-back would leave about 180 ms; a quarter of the resolution saves only about 13 ms of GPU time. So the card is not the limit: the waits and the processor work around it are. Tested with no gain: the shader optimizer mask, the pipelining switch, a lock split, thin LTO and removing the settle.
+- **Launcher 0.4.3:** version only, no feature changes.
+
+## New in v0.4.2
 
 Measured on an RTX 3060 (Series S profile): about 4 fps while walking and turning in the world, with steady pacing (95th-percentile frame about 270 ms).
 
@@ -115,7 +126,7 @@ Measured on an RTX 3060 (Series S profile): about 5 fps in the cell scene, about
 
 ## 🧪 Still in progress
 
-"In testing" means built and unit-tested, waiting for A/B game runs on our RTX 3060; "planned" means not built yet. None of these items has a measured fps gain yet.
+"In testing" means built and unit-tested, waiting for A/B game runs on our RTX 3060; "planned" means not built yet. Measured so far: the texture queue work in 0.4.3 (5.4 fps, 3.9-4.5 before); the other items have no measured fps gain yet.
 
 | Work | Status | What it does |
 |---|:---:|---|
@@ -125,7 +136,8 @@ Measured on an RTX 3060 (Series S profile): about 5 fps in the cell scene, about
 | CPU recording cuts | 🧪 in testing | less per-draw preparing and recording cost on the CPU, with a per-part timing line to measure it |
 | Zero-copy title memory | 🔨 in progress | `VICTORY_ZERO_COPY`: the GPU reads title memory without copies; needs placing to work at scale |
 | Shader optimizer | 🧪 in testing | the safe mask of `VICTORY_SHADER_OPT` removes 51% of instructions offline; the in-game test is pending |
-| Hair too bright | 🔨 in progress | the screen lighting passes are fixed (workers on by default); hair now renders too bright, and the hit-shading passes need `VICTORY_RT_RESOLVE` |
+| Hair too bright | ✅ done | hair and lighting render correctly in the opening cell (0.4.3) |
+| Texture upload queue | ✅ done | fair order (`VICTORY_FAIR_DUE=2`, default): about 110 textures waiting at the end of a run, against 21,000 or more before |
 | Ray-tracing BVH builder | 🔨 in progress | `VICTORY_BVH_BUILDER` still makes stray writes |
 | Load time | 🔨 in progress | the world is reached in about 212 s from an internal SSD (300 s or more before); a load cache (`VICTORY_LOAD_CACHE`) and a faster decoder (`VICTORY_FAST_INFLATE`) are in the runtime, off by default, not measured yet |
 | World-entry copy stall | 📋 planned | cut the copies that stall entering the world |
@@ -149,7 +161,7 @@ Measured on an RTX 3060 (Series S profile): about 5 fps in the cell scene, about
 | Intro, setup and menus | ✅ | 30 fps, audio plays |
 | Saves and legal screens | ✅ | the title saves a checkpoint and loads it again |
 | Open world loads | ✅ | world data streams in through DirectStorage |
-| Lit world renders | ✅ | about 5 fps in the cell scene, about 4 fps moving, on an RTX 3060 (Series S profile); lighting and hair wrong while ray tracing is off |
+| Lit world renders | ✅ | about 5.4 fps while walking and turning on an RTX 3060 (Series S profile); hair and lighting correct in the opening cell; shadowed areas too dark while ray tracing is off |
 | Gameplay starts | ✅ | the prologue runs; not played end to end |
 | Pipelines prebuilt | ✅ | 25,200 of 25,471 graphics pipelines made ahead of time, and used in play |
 | Shaders translate (VIctory-based translator) | ✅ | all 26,084 translate; 26,013 pass DXIL validation on their own, the other 71 (oversized mesh shaders) validate only when linked with their pixel shader. XCL's counts differ ([`docs/STATUS.md`](docs/STATUS.md)) |
@@ -240,13 +252,13 @@ Every task is sized for **one person + one AI coding agent**. Pick one, comment 
 - [ ] **#2 Missing walls and roofs.** Some cards lose the first room's walls and roof with certain switches; find the cause (see `runtime/victory/VICKY.md`).
 - [ ] **#3 Faster wave64 on NVIDIA.** 64-lane programs run as two 32-lane halves. Profile them and cut the overhead.
 - [ ] **#9 `VICTORY_SHADER_OPT` in game.** The safe mask removes 51% of instructions offline; its in-game test is pending. One of the other clean-up passes loses walls in game, and an offline differential found nothing. Run the safe mask in game, then find which pass loses walls and why. `runtime/victory/crates/victory-shader/src/emit/mod.rs` (`shader_opt`), `emit/bitcode.rs`.
-- [ ] **#10 Hair renders too bright.** The screen lighting passes are fixed (`VICTORY_SCREEN_WORKERS`, on by default). Hair is now too bright; it needs the hit-shading passes, which only run with `VICTORY_RT_RESOLVE`. `runtime/victory/crates/victory-gpu/src/pipeline/make.rs`.
+- [x] **#10 Hair renders too bright.** Done in 0.4.3: hair and lighting render correctly in the opening cell. Reports from other scenes are welcome. `runtime/victory/crates/victory-gpu/src/pipeline/make.rs`.
 - [ ] **#11 Ray-tracing BVH builder.** `VICTORY_BVH_BUILDER` makes stray writes; find and fix them (upstream VIctory #2402 and #916 are related). `runtime/victory/crates/victory-gpu/src/pipeline.rs`, `runtime/victory/crates/victory-shader/src/bvh.rs`.
-- [ ] **#12 Textures never uploaded.** 14,830 textures are never uploaded; find out why they are skipped. `runtime/victory/crates/victory-gpu/src/texture.rs`, `descriptor/host.rs`.
+- [ ] **#12 Textures never uploaded.** 0.4.3 makes the upload queue fair (`VICTORY_FAIR_DUE=2`, default): about 110 textures are waiting at the end of a run, against 21,000 or more before. Check what is still left waiting and why. `runtime/victory/crates/victory-gpu/src/texture.rs`, `descriptor/host.rs`.
 
 ### Performance
 
-- [ ] **#4 Frame time.** About 4 fps while walking and turning in the world (95th-percentile frame about 270 ms). `VICTORY_GPU_PROFILE` measures about 93-111 ms of GPU time per frame, spread over about 1,100 pipelines. See `runtime/victory/crates/victory-gpu/src/host.rs`, `draw.rs`.
+- [ ] **#4 Frame time.** 5.4 fps while walking and turning in the world (median frame 184 ms, 95th percentile 197 ms, 99th percentile 207 ms; RTX 3060 12 GB, Ryzen 5 5600X; 3.9-4.5 fps before); 30 fps is not reached. The thread that gates each present spends about 187 ms per frame: about 55 ms preparing, 31 ms in refresh copies, 76 ms waiting on the card after title writes next to shader-written memory, 19 ms waiting for title reads. An infinitely fast card would still leave about 99 ms, so the waits and copies are the work to do. `VICTORY_GPU_PROFILE` measures about 93-111 ms of GPU time per frame, spread over about 1,100 pipelines. See `runtime/victory/crates/victory-gpu/src/host.rs`, `draw.rs`.
 - [ ] **#5 Intro cutscene speed.** The intro is very slow unless skipped; find out why.
 - [ ] **#13 Zero-copy title memory.** `VICTORY_ZERO_COPY` maps title memory for the GPU without copies; it needs placing to work at scale. `runtime/victory/crates/victory-gpu/src/zerocopy.rs`, `runtime/victory/crates/victory-hle/src/modules/xmem.rs`.
 - [ ] **#14 Load time.** The world is reached in about 212 s from an internal SSD. A load cache (`VICTORY_LOAD_CACHE`) and a faster decoder (`VICTORY_FAST_INFLATE`) are in the runtime, off by default: measure them. `runtime/victory/crates/victory-hle/src/modules/dstorage/loadcache.rs`.

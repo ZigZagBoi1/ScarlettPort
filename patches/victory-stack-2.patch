@@ -3,7 +3,7 @@
 # The diff of the ScarlettPort VIctory-based runtime (runtime/victory) against its base:
 #   git diff 4e17478 fx-cand4
 # where 4e17478 is the tip of fxceless/victory-fork `main` that this work started from
-# (GPL-3.0-or-later, https://github.com/fxceless/victory-fork) and `fx-cand4` @ b3882b9 is
+# (GPL-3.0-or-later, https://github.com/fxceless/victory-fork) and `fx-cand4` @ 8d32f87 is
 # that base plus merged community work (see runtime/victory/SCARLETTPORT.md) and our changes,
 # with the pull requests merged in this repository since on top.
 # Split in 3 parts (the repository keeps files under 2 MB). Apply all to a checkout of 4e17478 with:
@@ -14,7 +14,7 @@
 # SCARLETTPORT.md, or README.md (take the README from runtime/victory).
 #
 diff --git a/crates/victory-gpu/src/host.rs b/crates/victory-gpu/src/host.rs
-index cb57a59..5915d62 100644
+index cb57a59..cd45f1f 100644
 --- a/crates/victory-gpu/src/host.rs
 +++ b/crates/victory-gpu/src/host.rs
 @@ -14,7 +14,7 @@ use windows::Win32::Graphics::Direct3D12::*;
@@ -6048,7 +6048,7 @@ index cb57a59..5915d62 100644
 +    pub(crate) fn record_barriers(&self, barriers: &[D3D12_RESOURCE_BARRIER]) {
 +        if barriers.is_empty() {
 +            return;
-         }
++        }
 +        if prep_barriers() && self.has_held_barriers.load(Ordering::Acquire) {
 +            let words: Vec<[u64; 4]> = barriers.iter().map(barrier_words).collect();
 +            self.hold_barriers(&words);
@@ -6142,7 +6142,7 @@ index cb57a59..5915d62 100644
 +            let barriers = unsafe { std::slice::from_raw_parts(out.as_ptr().cast::<D3D12_RESOURCE_BARRIER>(), out.len()) };
 +            // SAFETY: an open list and live resources.
 +            unsafe { self.list.ResourceBarrier(barriers) };
-+        }
+         }
 +        PREP_STATS[P::BarrierNs as usize].fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
      }
  
@@ -6628,9 +6628,8 @@ index cb57a59..5915d62 100644
 +            if let Some(card) = card {
 +                self.zero_card_budget(card);
 +            }
-         }
-         // SAFETY: a live buffer.
--        Some(unsafe { buffer.GetGPUVirtualAddress() })
++        }
++        // SAFETY: a live buffer.
 +        Some(unsafe { card.unwrap_or(buffer).GetGPUVirtualAddress() })
 +    }
 +
@@ -6639,7 +6638,7 @@ index cb57a59..5915d62 100644
 +    fn make_card_budget(&self) -> Option<ID3D12Resource> {
 +        if !card_budget() {
 +            return None;
-+        }
+         }
 +        self.list.cast::<ID3D12GraphicsCommandList2>().ok()?;
 +        let buffer = host()?.uav_buffer(256)?;
 +        name(&buffer, || "indirect budget".to_owned());
@@ -6653,7 +6652,8 @@ index cb57a59..5915d62 100644
 +        let Ok(list2) = self.list.cast::<ID3D12GraphicsCommandList2>() else {
 +            return;
 +        };
-+        // SAFETY: a live buffer.
+         // SAFETY: a live buffer.
+-        Some(unsafe { buffer.GetGPUVirtualAddress() })
 +        let at = unsafe { card.GetGPUVirtualAddress() };
 +        let zeros = [0u64, 4, 8, 20, 24, 28].map(|offset| D3D12_WRITEBUFFERIMMEDIATE_PARAMETER {
 +            Dest: at + offset,
@@ -8366,10 +8366,36 @@ index cb57a59..5915d62 100644
              {
                  let [queued, due, away, partly, oldest] =
                      [0, 1, 2, 3, 4].map(|i| crate::draw::HEAP_TEXTURES_QUEUE[i].load(Ordering::Relaxed));
-@@ -5763,6 +11785,28 @@ impl Meter {
+@@ -5763,6 +11785,54 @@ impl Meter {
                      crate::descriptor::host::STALE[3].load(Ordering::Relaxed),
                      crate::descriptor::host::STALE[4].load(Ordering::Relaxed)
                  );
++                // The queue's fairness and pace, over the frames since this
++                // line was last written (five seconds).
++                {
++                    static FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++                    let now = crate::frame::current();
++                    let frames = now.saturating_sub(FRAME.swap(now, Ordering::Relaxed)).max(1) as f64;
++                    let [fresh, fresh_waited, short, short_waited, part_frames] =
++                        [5, 6, 7, 8, 9].map(|i| crate::draw::HEAP_TEXTURES_QUEUE[i].load(Ordering::Relaxed));
++                    let [bytes, uploads, looked, micros, passes, by_time, by_bytes, by_room] =
++                        [0, 1, 2, 3, 4, 5, 6, 7].map(|i| crate::draw::HEAP_TEXTURE_PASS[i].swap(0, Ordering::Relaxed));
++                    tracing::info!(
++                        "texture queue: {due} textures due ({fresh} never looked at, the oldest waiting {fresh_waited} frames; \
++                         {short} showing less than the title holds, the oldest waiting {short_waited} frames), \
++                         {partly} uploaded in part (the longest for {part_frames} frames); per frame over {frames:.0} frames: \
++                         {:.0} bytes uploaded ({:.2} MB) in {:.1} uploads, {:.0} slots looked at, {:.1} ms in {:.2} passes; \
++                         {by_time} of {passes} passes stopped at their time, {by_bytes} at the frame's bytes, {by_room} at a \
++                         full card (VICTORY_FAIR_DUE={}, VICTORY_TEX_SPAN_PCT, VICTORY_RELOOK_MS)",
++                        bytes as f64 / frames,
++                        bytes as f64 / frames / 1e6,
++                        uploads as f64 / frames,
++                        looked as f64 / frames,
++                        micros as f64 / 1e3 / frames,
++                        passes as f64 / frames,
++                        crate::descriptor::host::fair_due()
++                    );
++                }
 +                let [views, shown, waiting, tables, gone, own, free, start, other, shows, back] =
 +                    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(|i: usize| crate::descriptor::host::SWEPT[i].load(Ordering::Relaxed));
 +                tracing::info!(
@@ -8395,7 +8421,7 @@ index cb57a59..5915d62 100644
              }
              #[cfg(feature = "diagnostics")]
              tracing::info!(
-@@ -5793,7 +11837,7 @@ impl Meter {
+@@ -5793,7 +11863,7 @@ impl Meter {
                  "{fps:.1} fps, {ms:.1} ms/frame ({cpu:.1} preparing: copies {copy_ms:.1} ms \
                   {copy_mb:.1} MB, textures {texture_ms:.1} ms {texture_mb:.1} MB; {gpu:.1} on the \
                   GPU; {back_ms:.1} copying back {back_mb:.1} MB), {draws:.0} draws/frame, \
@@ -8404,7 +8430,7 @@ index cb57a59..5915d62 100644
                   {indirect:.0} indirect; heap buffers {picked:.1} passes {picked_ms:.1} ms;                  texture slots written so far: {placed} placed, {objects} of objects; \
                   textures picked by index: {picked_textures} uploaded so far ({picked_mb} MB), \
                   {picked_waiting} waiting, {picked_away} passed over unmapped; depth textures with                  unordered access: {du0} made, bound as depth {du1}x, cleared as depth {du2}x,                  unordered views refused {du3}x; buffer views left null as the host would refuse them: {refused}",
-@@ -5817,6 +11861,7 @@ impl Meter {
+@@ -5817,6 +11887,7 @@ impl Meter {
                  placed = crate::descriptor::host::PLACED_TEXTURE_SLOTS.load(Ordering::Relaxed),
                  objects = crate::descriptor::host::OBJECT_TEXTURE_SLOTS.load(Ordering::Relaxed)
              );
@@ -8412,7 +8438,7 @@ index cb57a59..5915d62 100644
              #[cfg(feature = "diagnostics")]
              {
                  crate::copystat::log(std::mem::take(&mut self.copy_stats_frames) as f64);
-@@ -5869,7 +11914,26 @@ impl Host {
+@@ -5869,7 +11940,26 @@ impl Host {
      /// Shows `texture`, which is in `state` (a host state) and stays in it,
      /// as frame `frame` (saved if captures are on). `None` if nothing was
      /// shown; else, in diagnostics builds, whether the frame was black.
@@ -8440,7 +8466,7 @@ index cb57a59..5915d62 100644
          // SAFETY: a live resource.
          let desc = unsafe { texture.GetDesc() };
          let Some(format) = swap_format(desc.Format) else {
-@@ -5894,10 +11958,20 @@ impl Host {
+@@ -5894,10 +11984,20 @@ impl Host {
              // SAFETY: no back buffer is held; every submission was waited for.
              let resized = unsafe {
                  p.swap_chain
@@ -8463,7 +8489,7 @@ index cb57a59..5915d62 100644
                  Err(e) => {
                      tracing::warn!(error = %e, width, height, "swap chain not resized");
                      return None;
-@@ -5905,6 +11979,7 @@ impl Host {
+@@ -5905,6 +12005,7 @@ impl Host {
              }
          }
          let state = D3D12_RESOURCE_STATES(state as i32);
@@ -8471,7 +8497,7 @@ index cb57a59..5915d62 100644
          // SAFETY: our swap chain, list and a live source texture.
          unsafe {
              let index = p.swap_chain.GetCurrentBackBufferIndex();
-@@ -5952,27 +12027,202 @@ impl Host {
+@@ -5952,27 +12053,202 @@ impl Host {
              let probe = if slot.is_some() { None } else { crate::capture::probe(&self.device, list, texture) };
              #[cfg(not(feature = "diagnostics"))]
              let _ = frame;
@@ -8682,7 +8708,7 @@ index cb57a59..5915d62 100644
              p.meter.frame(p.hwnd);
              #[cfg(feature = "diagnostics")]
              return Some(probe.is_some_and(|b| crate::capture::black(&b)));
-@@ -5991,9 +12241,11 @@ impl Host {
+@@ -5991,9 +12267,11 @@ impl Host {
              Some(hwnd) => hwnd,
              None => window(width, height)?,
          };
@@ -8694,7 +8720,7 @@ index cb57a59..5915d62 100644
              let desc = DXGI_SWAP_CHAIN_DESC1 {
                  Width: width,
                  Height: height,
-@@ -6005,14 +12257,22 @@ impl Host {
+@@ -6005,14 +12283,22 @@ impl Host {
                  BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
                  BufferCount: BUFFERS,
                  SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
@@ -8720,7 +8746,7 @@ index cb57a59..5915d62 100644
              Ok(Presenter {
                  swap_chain,
                  width,
-@@ -6022,11 +12282,80 @@ impl Host {
+@@ -6022,11 +12308,80 @@ impl Host {
                  ahead: Vec::new(),
                  hwnd,
                  meter: Meter::new(),
@@ -8801,7 +8827,7 @@ index cb57a59..5915d62 100644
  /// A visible top-level window of this process: the one the title made, if
  /// it made one.
  fn title_window() -> Option<HWND> {
-@@ -6036,6 +12365,7 @@ fn title_window() -> Option<HWND> {
+@@ -6036,6 +12391,7 @@ fn title_window() -> Option<HWND> {
          unsafe {
              GetWindowThreadProcessId(hwnd, Some(&mut process));
              if process == windows::Win32::System::Threading::GetCurrentProcessId()
@@ -8809,7 +8835,7 @@ index cb57a59..5915d62 100644
                  && IsWindowVisible(hwnd).as_bool()
              {
                  *(found.0 as *mut Option<HWND>) = Some(hwnd);
-@@ -6079,6 +12409,12 @@ impl Host {
+@@ -6079,6 +12435,12 @@ impl Host {
      /// bytes: the budget and the use of the card's own memory, then of the
      /// PC's memory shared with the card (where the system moves what does
      /// not fit on the card).
@@ -8822,7 +8848,7 @@ index cb57a59..5915d62 100644
      pub(crate) fn video_memory(&self) -> Option<[u64; 4]> {
          let adapter = self.adapter.as_ref()?;
          let mut own = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
-@@ -6092,20 +12428,133 @@ impl Host {
+@@ -6092,20 +12454,133 @@ impl Host {
                  .QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &mut shared)
                  .ok()?;
          }
@@ -8967,7 +8993,7 @@ index cb57a59..5915d62 100644
              ..Default::default()
          };
          let desc = D3D12_RESOURCE_DESC {
-@@ -6143,7 +12592,7 @@ impl Host {
+@@ -6143,7 +12618,7 @@ impl Host {
          match made {
              Ok(()) => Some((buffer?, data.cast())),
              Err(e) => {
@@ -8976,7 +9002,7 @@ index cb57a59..5915d62 100644
                  None
              }
          }
-@@ -6152,6 +12601,7 @@ impl Host {
+@@ -6152,6 +12627,7 @@ impl Host {
      /// A device-local buffer shaders may write (unordered access) and indirect
      /// execution may read, starting in the common state.
      pub(crate) fn uav_buffer(&self, size: u64) -> Option<ID3D12Resource> {
@@ -8984,7 +9010,7 @@ index cb57a59..5915d62 100644
          MADE[4].fetch_add(1, Ordering::Relaxed);
          MADE[5].fetch_add(size, Ordering::Relaxed);
          let heap = D3D12_HEAP_PROPERTIES {
-@@ -6283,6 +12733,43 @@ pub(crate) fn transition(
+@@ -6283,6 +12759,43 @@ pub(crate) fn transition(
      }
  }
  
@@ -9028,7 +9054,7 @@ index cb57a59..5915d62 100644
  /// A window of the given client size, owned by its own message thread.
  fn window(width: u32, height: u32) -> windows::core::Result<HWND> {
      let (sender, receiver) = std::sync::mpsc::channel();
-@@ -6410,6 +12897,43 @@ mod spare {
+@@ -6410,6 +12923,43 @@ mod spare {
  #[cfg(test)]
  mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at the top of this file
      use super::Batch;
@@ -9072,7 +9098,7 @@ index cb57a59..5915d62 100644
      use std::sync::Arc;
  
      #[test]
-@@ -6441,6 +12965,122 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at
+@@ -6441,6 +12991,122 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at
          assert!(next.texture_due(&a));
      }
  
@@ -9195,7 +9221,7 @@ index cb57a59..5915d62 100644
      /// The hashing a submission does for textures in physical-page memory,
      /// with every list checking the textures it samples (before) and with
      /// each checked once (after). Run with
-@@ -6479,4 +13119,791 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at
+@@ -6479,4 +13145,791 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at
              before.as_secs_f64() / after.as_secs_f64()
          );
      }

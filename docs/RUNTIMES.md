@@ -47,6 +47,8 @@ Every `VICTORY_*` variable can also be given as `SCARLETT_*`. The full list is i
 | `VICTORY_PRECOMPILED_GRAPHICS=1` | make graphics pipelines from the title's precompiled cache, prebuilt with `victory precompile-graphics` (25,200 of 25,471 made). Set by `play-victory.ps1`, which runs the precompile once; `setup-victory.ps1 -Game <dump>` can do it too |
 | `VICTORY_PIPELINE_WAIT_MS=0` | do not hold a draw back for a pipeline build. Set by `play-victory.ps1` |
 | `VICTORY_SHADER_OPT=on` | opt-in shader clean-up passes (off by default; they can drop walls and roofs on some cards) |
+| `VICTORY_FAIR_DUE=0\|1\|2` | order of the texture upload queue. `2` (default): textures showing less than the title holds first, then the longest due; `1`: plain turns; `0`: the older order |
+| `VICTORY_TEX_SPAN_PCT=<n>` | share of a long frame the texture pass may take (25 by default; `0`: off) |
 | `VICTORY_SHADER_LOOP_LIMIT=<n>` | cap on translated shader loop iterations (can smear hair; unset by default) |
 
 ### Verified speed settings (set by `play-victory.ps1` and the launcher; each is off in the runtime itself)
@@ -122,4 +124,4 @@ Offline path: the runtime journals every pipeline the title creates; `xcl pipeli
 | Patch | Base |
 |---|---|
 | `xcl-stack.patch` | upstream XCL `main` |
-| `victory-stack-*.patch` | fxceless/victory-fork `main` at `4e17478`; the diff of `fx-cand4` (`b3882b9`, plus the pull requests merged here since) against it, as `git diff 4e17478 fx-cand4`, split in parts under 2 MB |
+| `victory-stack-*.patch` | fxceless/victory-fork `main` at `4e17478`; the diff of `fx-cand4` (`8d32f87`, plus the pull requests merged here since) against it, as `git diff 4e17478 fx-cand4`, split in parts under 2 MB |
