@@ -11491,8 +11491,9 @@ impl Host {
                         sampled = true;
                     }
                 }
-            } else if p.sampler.is_some() {
-                p.sampler = None;
+            } else if let Some(sampler) = p.sampler.take() {
+                // A present sent ahead ([`late_free_present`]) may still copy into it.
+                retire(sampler);
             }
             // The splash picture over the frame, at its opacity, after the sample above (which
             // judges the title's own content).
@@ -11552,8 +11553,12 @@ impl Host {
                         D3D12_RESOURCE_STATE_PRESENT,
                     )]);
                 }
-            } else if p.splash.is_some() && !crate::splash::active() {
-                p.splash = None;
+            } else if !crate::splash::active()
+                && let Some(splash) = p.splash.take()
+            {
+                // A present sent ahead ([`late_free_present`]) may still draw it: freed at
+                // once, the draw read freed memory (a GPU page fault, device removed).
+                retire(splash);
             }
             // The settings overlay, over everything (F1 opens it; closed, it costs a key query).
             let menu = crate::overlay::record(
