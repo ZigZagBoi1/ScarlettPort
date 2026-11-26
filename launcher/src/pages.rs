@@ -218,6 +218,10 @@ impl Launcher {
             let mut t = t0.clone();
             let sw = |ui: &mut Ui, r: Rect, id: &str, v: &mut bool| switch(ui, Rect::from_center_size(pos2(r.max.x - 40., r.center().y), vec2(40., 24.)), id, v);
 
+            let r = me.feature_row(ui, w, "Performance overlay", "fps, frame time and the longest frame on the picture (VICTORY_PANEL). F3 shows and hides it in game.", true, ch(&|x| x.overlay.to_string()), 70.);
+            sw(ui, r, "ft-panel", &mut t.overlay);
+            let r = me.feature_row(ui, w, "Ray tracing", "The game's own ray-traced indirect light (VICTORY_BVH_BUILDER): lit interiors, about a third slower.", true, ch(&|x| x.ray_tracing.to_string()), 70.);
+            sw(ui, r, "ft-rt", &mut t.ray_tracing);
             let r = me.feature_row(ui, w, "Full textures", "Series X textures on the Series S profile (VICTORY_TEXTURES=full): about +2.3 GB RAM and VRAM. fx-picture builds.", true, ch(&|x| x.full_textures.to_string()), 70.);
             sw(ui, r, "ft-tex", &mut t.full_textures);
             let r = me.feature_row(ui, w, "HDR", "HDR10/scRGB output when Windows HDR is on (VICTORY_HDR, [display] hdr). Turn HDR on in the game too.", true, ch(&|x| x.hdr.to_string()), 70.);

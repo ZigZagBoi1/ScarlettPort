@@ -26,6 +26,12 @@ pub struct Tuning {
     /// Adds `victory_gpu::host=info` to the log level so the run log has frame times
     /// (the performance readout). Off keeps the log at play.ps1's `warn`.
     pub perf_log: bool,
+    /// 0.4.6 engine: the title's own ray-traced indirect light (VICTORY_BVH_BUILDER=1). Lit
+    /// interiors, about a third slower.
+    pub ray_tracing: bool,
+    /// 0.4.6 engine: fps, frame time and the longest frame on the picture (VICTORY_PANEL=1; F3
+    /// shows and hides it in game).
+    pub overlay: bool,
 }
 
 impl Default for Tuning {
@@ -43,6 +49,8 @@ impl Default for Tuning {
             sharpness: 0.2,
             framegen: false,
             perf_log: false,
+            ray_tracing: false,
+            overlay: false,
         }
     }
 }
@@ -115,6 +123,12 @@ impl Tuning {
                 v.push(("VICTORY_UPSCALE_SHARPNESS", num(self.sharpness)));
                 v.push(("VICTORY_FRAMEGEN", if self.framegen { "1" } else { "0" }.to_string()));
             }
+        }
+        if self.ray_tracing {
+            v.push(("VICTORY_BVH_BUILDER", "1".to_string()));
+        }
+        if self.overlay {
+            v.push(("VICTORY_PANEL", "1".to_string()));
         }
         v
     }
@@ -251,6 +265,19 @@ mod tests {
         assert!(t.env(false).iter().all(|(k, _)| !k.starts_with("VICTORY_UPSCAL") && *k != "VICTORY_FRAMEGEN"));
         let off = Tuning { rumble: false, ..Tuning::default() };
         assert_eq!(off.env(false), vec![("VICTORY_RUMBLE", "0".to_string())]);
+    }
+
+    #[test]
+    fn new_engine_switches() {
+        let t = Tuning { ray_tracing: true, overlay: true, ..Tuning::default() };
+        let e = t.env(false);
+        let get = |k: &str| e.iter().find(|(n, _)| *n == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("VICTORY_BVH_BUILDER"), Some("1"));
+        assert_eq!(get("VICTORY_PANEL"), Some("1"));
+        assert_eq!(e.len(), 2);
+        // Settings saved before these existed load with them off.
+        let old: Tuning = serde_json::from_str(r#"{"hdr": true}"#).unwrap();
+        assert!(old.hdr && !old.ray_tracing && !old.overlay);
     }
 
     #[test]
