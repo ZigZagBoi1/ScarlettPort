@@ -1207,7 +1207,12 @@ pub(crate) fn module() -> HleModule {
     }
 }
 
-/// Host input: XInput pads, the keyboard while our process has focus.
+/// PlayStation pads read as HID devices (`SCARLETT_PAD_PS`).
+#[cfg(windows)]
+mod playstation;
+
+/// Host input: XInput pads, a PlayStation pad as pad 0 when XInput has
+/// none there, the keyboard while our process has focus.
 #[cfg(windows)]
 mod host {
     use std::time::{Duration, Instant};
@@ -1274,14 +1279,17 @@ mod host {
 
     impl Source for Host {
         fn pad(&mut self, slot: usize) -> Option<PadState> {
+            // With no XInput pad in the first slot, a PlayStation pad
+            // stands in for it (`super::playstation`).
+            let instead = |slot: usize| if slot == 0 { super::playstation::pad() } else { None };
             if self.empty_until[slot].is_some_and(|until| Instant::now() < until) {
-                return None;
+                return instead(slot);
             }
             let mut state = XINPUT_STATE::default();
             // SAFETY: room for the state.
             if unsafe { XInputGetState(slot as u32, &mut state) } != 0 {
                 self.empty_until[slot] = Some(Instant::now() + EMPTY_SLOT_RECHECK);
-                return None;
+                return instead(slot);
             }
             self.empty_until[slot] = None;
             #[allow(unused_mut)]

@@ -28,7 +28,7 @@ NVIDIA (RTX 3060) is the card we test on. AMD RX 6000 and newer meet the require
 ## Can I use a controller?
 
 - **Xbox controllers** work best: the runtime reads pads through XInput.
-- **PlayStation controllers** (DualShock 4, DualSense) are not read directly. Map them to an Xbox pad with Steam Input or a similar XInput mapper.
+- **PlayStation controllers** (DualSense, DualSense Edge, DualShock 4) are read directly over USB or Bluetooth and act as the first pad while no Xbox pad is connected (`SCARLETT_PAD_PS=0` turns this off). Rumble, the light bar, the touch pad and motion are not used; for those, map the pad with Steam Input or a similar XInput mapper.
 - **Keyboard and mouse:** click the window to capture. With no pad connected the keyboard acts as one: Enter = A, Backspace = B, WASD = left stick, IJKL = right stick.
 
 ## Why does my antivirus flag it?

@@ -55,7 +55,7 @@ If you changed environment switches (see [RUNTIMES.md](RUNTIMES.md)) and the pic
 ## Controller not working
 
 - Xbox pads: connect before starting the game; they are read through XInput.
-- PlayStation pads: map them to an Xbox pad with Steam Input or another XInput mapper. They are not read directly.
+- PlayStation pads (DualSense, DualSense Edge, DualShock 4) are read directly and the log says `PlayStation pad connected`. If it does not appear, close Steam Input or DS4Windows, which can hold the pad, and reconnect it; `SCARLETT_PAD_PS=0` turns direct reading off if a mapper should handle the pad instead.
 - No pad: the keyboard acts as one (Enter = A, Backspace = B, WASD and IJKL = sticks). Click the window first so it has focus.
 
 ## GPU problems
