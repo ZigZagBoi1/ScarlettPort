@@ -21532,18 +21532,19 @@ index 7047331..2fef8ca 100644
 +    }
 +}
 diff --git a/crates/victory-gpu/src/pipeline/make.rs b/crates/victory-gpu/src/pipeline/make.rs
-index 9862446..9d13634 100644
+index 9862446..e3cedd0 100644
 --- a/crates/victory-gpu/src/pipeline/make.rs
 +++ b/crates/victory-gpu/src/pipeline/make.rs
-@@ -13,19 +13,32 @@
+@@ -13,19 +13,34 @@
  //! whose pipeline is not ready is dropped, as an untranslated one is.
  //!
  //! The default budget is half a second per title frame. A pass the title
 -//! runs only once and whose pipeline takes longer is lost.
 +//! runs only once and whose pipeline takes longer is lost, unless it is
 +//! known to run once ([`ScreenPass::Once`]: the lighting tables, the
-+//! decoration bakes of clothing and their block compression), which is
-+//! waited for up to 12 s whatever the budget.
++//! decoration bakes of characters' heads and their block compression),
++//! which is waited for up to 12 s whatever the budget while screen workers
++//! are on ([`screen_workers`]).
  
  use std::collections::VecDeque;
 -use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -21561,7 +21562,8 @@ index 9862446..9d13634 100644
 +    Other,
 +    /// A pass the title records once and keeps the output of: dropped, the
 +    /// output stays empty for the rest of the run. Waited for even when play
-+    /// skips other pending pipelines (`VICTORY_PIPELINE_WAIT_MS=0`).
++    /// skips other pending pipelines (`VICTORY_PIPELINE_WAIT_MS=0`), unless
++    /// screen workers are off ([`screen_workers`]).
 +    Once,
 +}
  
@@ -21572,7 +21574,7 @@ index 9862446..9d13634 100644
      pub(crate) graphics: Option<Box<GraphicsState>>,
      queue_state: AtomicU8,
      made: OnceLock<Option<HostPipeline>>,
-@@ -33,6 +46,66 @@ pub(crate) struct Pending {
+@@ -33,6 +48,92 @@ pub(crate) struct Pending {
      /// whether a draw or dispatch has requested it yet.
      key: String,
      used: AtomicBool,
@@ -21636,10 +21638,36 @@ index 9862446..9d13634 100644
 +    let on = |name| std::env::var_os(name).is_some_and(|v| v == "1");
 +    let made = *MADE.get_or_init(|| on("VICTORY_RT_RESOLVE") || super::builder_requested());
 +    !made && named(shaders, b"CS_RaytracingResolve")
++}
++
++/// What kind of pass a pipeline of `shaders` and the state `graphics`
++/// makes. With screen workers off (`workers`, [`screen_workers`]) none is
++/// a screen pass or a pass run once: all are queued and waited for alike,
++/// as before either existed.
++fn screen_pass(shaders: &[Arc<Shader>], graphics: Option<&GraphicsState>, workers: bool) -> ScreenPass {
++    if !workers {
++        return ScreenPass::None;
++    }
++    // The six draws that build the environment BRDF, area-light and scattering tables
++    // share this vertex program. The title records them once when it enters the world.
++    const LIGHT_TABLE_VERTEX: &str = "ce57291b5a1750ca";
++    let light_table = shaders.iter().any(|s| s.stage == "vertex" && s.hash == LIGHT_TABLE_VERTEX);
++    // A character's head textures are baked once when the title makes the character,
++    // during the load screen while hundreds of pipelines are queued. With these passes
++    // dropped, the heads of the cell's characters drew as nothing for the whole run (the
++    // eyes and teeth floated). In ten earlier runs the first decoration bake and the
++    // first BC3 compression were dropped in every one.
++    if light_table || shaders.iter().any(|s| s.bakes()) {
++        ScreenPass::Once
++    } else if graphics.is_some_and(|g| g.screen_pass()) {
++        ScreenPass::Other
++    } else {
++        ScreenPass::None
++    }
  }
  
  // SAFETY: D3D12 objects are free-threaded; the graphics state (whose input
-@@ -42,6 +115,11 @@ unsafe impl Send for Pending {}
+@@ -42,6 +143,11 @@ unsafe impl Send for Pending {}
  unsafe impl Sync for Pending {}
  
  impl Pending {
@@ -21651,27 +21679,12 @@ index 9862446..9d13634 100644
      pub(crate) fn new(shaders: Vec<Arc<Shader>>, graphics: Option<Box<GraphicsState>>) -> Pending {
          let mut key = blake3::Hasher::new();
          for s in &shaders {
-@@ -49,17 +127,46 @@ impl Pending {
+@@ -49,17 +155,31 @@ impl Pending {
              key.update(s.hash.as_bytes());
          }
          key.update(graphics.as_ref().map(|g| g.describe()).unwrap_or_default().as_bytes());
 +        let left_out = left_out(&shaders);
-+        // The six draws that build the environment BRDF, area-light and scattering tables
-+        // share this vertex program. The title records them once when it enters the world.
-+        const LIGHT_TABLE_VERTEX: &str = "ce57291b5a1750ca";
-+        let light_table = shaders.iter().any(|s| s.stage == "vertex" && s.hash == LIGHT_TABLE_VERTEX);
-+        // A character's head textures are baked once when the title makes the character,
-+        // during the load screen while hundreds of pipelines are queued. With these passes
-+        // dropped, the heads of the cell's characters drew as nothing for the whole run (the
-+        // eyes and teeth floated). In ten earlier runs the first decoration bake and the
-+        // first BC3 compression were dropped in every one.
-+        let screen = if light_table || shaders.iter().any(|s| s.bakes()) {
-+            ScreenPass::Once
-+        } else if screen_workers() && graphics.as_ref().is_some_and(|g| g.screen_pass()) {
-+            ScreenPass::Other
-+        } else {
-+            ScreenPass::None
-+        };
++        let screen = screen_pass(&shaders, graphics.as_deref(), screen_workers());
          Pending {
 +            screen,
 +            formats: graphics.as_ref().map_or([0; 9], |g| g.formats()),
@@ -21698,7 +21711,7 @@ index 9862446..9d13634 100644
          self.made
              .get_or_init(|| HostPipeline::new(&self.shaders, self.graphics.as_deref()));
          let (lock, done) = &DONE;
-@@ -74,7 +181,10 @@ impl Pending {
+@@ -74,7 +194,10 @@ impl Pending {
  pub(crate) fn missing(p: &Pending) -> Option<String> {
      match p.made.get() {
          Some(Some(_)) => None,
@@ -21710,7 +21723,7 @@ index 9862446..9d13634 100644
          Some(None) => {
              let failed: Vec<String> = p
                  .shaders
-@@ -96,15 +206,48 @@ static DONE: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
+@@ -96,15 +219,48 @@ static DONE: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
  
  /// Waiting allowed per title frame, over all threads.
  fn wait_budget() -> Duration {
@@ -21766,7 +21779,7 @@ index 9862446..9d13634 100644
  }
  
  /// Pipelines queued and not made yet.
-@@ -118,6 +261,9 @@ pub(crate) fn waiting() -> u64 {
+@@ -118,6 +274,9 @@ pub(crate) fn waiting() -> u64 {
  /// The host pipeline if it is made (or is made within the frame's budget);
  /// queues it on first use.
  pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
@@ -21776,7 +21789,7 @@ index 9862446..9d13634 100644
      // A still-pending pipeline was requested by the title too. Prewarm it
      // on the next launch, even if this run never got to use it.
      if !p.used.load(Ordering::Relaxed) && !p.used.swap(true, Ordering::Relaxed) {
-@@ -125,22 +271,144 @@ pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
+@@ -125,22 +284,144 @@ pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
      }
      if p.made.get().is_none() {
          start(p, REQUESTED);
@@ -21923,7 +21936,7 @@ index 9862446..9d13634 100644
          super::library::EARLY.fetch_add(1, Ordering::Relaxed);
          start(p, EARLY);
      }
-@@ -159,18 +427,34 @@ fn shared_budget() -> bool {
+@@ -159,18 +440,34 @@ fn shared_budget() -> bool {
      *ON.get_or_init(|| std::env::var_os("VICTORY_PIPELINE_WAIT_SHARED").is_none_or(|v| v != "0"))
  }
  
@@ -21962,7 +21975,7 @@ index 9862446..9d13634 100644
          if spent.0 != frame {
              *spent = (frame, Duration::ZERO);
          }
-@@ -186,17 +470,21 @@ fn wait(p: &Pending, frame: u64) {
+@@ -186,17 +483,21 @@ fn wait(p: &Pending, frame: u64) {
      let started = Instant::now();
      let (lock, done) = &DONE;
      let mut held = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -21986,7 +21999,7 @@ index 9862446..9d13634 100644
          // A frame that began meanwhile has its own budget.
          if spent.0 == frame {
              if shared {
-@@ -206,6 +494,7 @@ fn wait(p: &Pending, frame: u64) {
+@@ -206,6 +507,7 @@ fn wait(p: &Pending, frame: u64) {
              }
          }
      }
@@ -21994,7 +22007,7 @@ index 9862446..9d13634 100644
      #[cfg(feature = "diagnostics")]
      crate::copystat::add(
          crate::copystat::C::PipelineWaitUs,
-@@ -221,6 +510,9 @@ const MAKING: u8 = 3;
+@@ -221,6 +523,9 @@ const MAKING: u8 = 3;
  struct Queue {
      early: VecDeque<Arc<Pending>>,
      requested: VecDeque<Arc<Pending>>,
@@ -22004,7 +22017,7 @@ index 9862446..9d13634 100644
  }
  
  impl Queue {
-@@ -228,6 +520,7 @@ impl Queue {
+@@ -228,6 +533,7 @@ impl Queue {
          Self {
              early: VecDeque::new(),
              requested: VecDeque::new(),
@@ -22012,7 +22025,7 @@ index 9862446..9d13634 100644
          }
      }
  
-@@ -239,7 +532,9 @@ impl Queue {
+@@ -239,7 +545,9 @@ impl Queue {
              return None;
          }
          p.queue_state.store(priority, Ordering::Relaxed);
@@ -22023,7 +22036,7 @@ index 9862446..9d13634 100644
              self.requested.push_back(p.clone());
          } else {
              self.early.push_back(p.clone());
-@@ -247,17 +542,83 @@ impl Queue {
+@@ -247,17 +555,83 @@ impl Queue {
          Some(prev == NOT_QUEUED)
      }
  
@@ -22114,7 +22127,7 @@ index 9862446..9d13634 100644
  static QUEUE: Mutex<Queue> = Mutex::new(Queue::new());
  static AVAILABLE: Condvar = Condvar::new();
  
-@@ -282,22 +643,96 @@ fn start(p: &Arc<Pending>, priority: u8) {
+@@ -282,22 +656,97 @@ fn start(p: &Arc<Pending>, priority: u8) {
      }
  }
  
@@ -22150,9 +22163,10 @@ index 9862446..9d13634 100644
      }
  }
  
-+/// Whether passes over the screen (no vertex input, no depth or stencil)
-+/// have workers and a wait budget of their own (on by default;
-+/// `VICTORY_SCREEN_WORKERS=0`: off, as before). Belobug 18e57db: the title fills its lighting tables
++/// Whether passes over the screen (no vertex input, no depth or stencil),
++/// and passes the title runs once ([`ScreenPass::Once`]), have workers and
++/// a wait budget of their own (on by default; `VICTORY_SCREEN_WORKERS=0`:
++/// off, as before: they are queued and waited for as any other). Belobug 18e57db: the title fills its lighting tables
 +/// (PS_IntegrateEnvBRDF*, PS_AreaLightIlluminance) with draws it makes
 +/// once, at the world's first frame; behind a world's worth of pipelines
 +/// they waited minutes and were dropped, and that run had no diffuse light
@@ -22214,7 +22228,7 @@ index 9862446..9d13634 100644
          for i in 0..workers {
              let spawned = std::thread::Builder::new()
                  .name(format!("victory-pipelines-{i}"))
-@@ -309,7 +744,11 @@ fn workers() -> bool {
+@@ -309,7 +758,11 @@ fn workers() -> bool {
                          let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
                      }
                      loop {
@@ -22227,7 +22241,7 @@ index 9862446..9d13634 100644
                          if WAITING.fetch_sub(1, Ordering::Relaxed) == 1 {
                              drained();
                          } else {
-@@ -349,6 +788,34 @@ fn drained() {
+@@ -349,6 +802,59 @@ fn drained() {
  mod tests {
      use super::*;
  
@@ -22251,7 +22265,7 @@ index 9862446..9d13634 100644
 +    /// for. A program that only reads a baked texture is not.
 +    #[test]
 +    fn decoration_bakes_and_their_compression_run_once() {
-+        let pass = |stage, container: &[u8]| Pending::new(vec![super::super::shader(stage, container)], None).screen;
++        let pass = |stage, container: &[u8]| screen_pass(&[super::super::shader(stage, container)], None, true);
 +        assert!(pass("compute", b"DXBC texturecompression:CS_CompressBC3Mip0 code") == ScreenPass::Once);
 +        assert!(pass("pixel", b"DXBC PS_BakeDecorations_1010 code") == ScreenPass::Once);
 +        assert!(pass("pixel", b"DXBC PS_DecorationBlend_0000 code") == ScreenPass::Once);
@@ -22259,10 +22273,35 @@ index 9862446..9d13634 100644
 +        assert!(pass("compute", b"DXBC CS_ScreenProbes_Temporal code") == ScreenPass::None);
 +    }
 +
++    /// `VICTORY_SCREEN_WORKERS=0` restores the queue and waits from before:
++    /// neither the lighting tables nor the bakes keep a budget of their own.
++    #[test]
++    fn screen_workers_off_leaves_no_pass_its_own_wait() {
++        let bake = [super::super::shader("compute", b"DXBC texturecompression:CS_CompressBC1Mip0 code")];
++        assert!(screen_pass(&bake, None, true) == ScreenPass::Once);
++        assert!(screen_pass(&bake, None, false) == ScreenPass::None);
++        // The lighting tables' vertex program, by its hash.
++        let table = [Arc::new(Shader {
++            stage: "vertex",
++            hash: "ce57291b5a1750ca".to_owned(),
++            container: b"DXBC lighting table vertex".to_vec(),
++            translated: OnceLock::new(),
++            walks: OnceLock::new(),
++            thread_limited: false,
++            limited_twin: OnceLock::new(),
++            group: OnceLock::new(),
++            bakes: OnceLock::new(),
++        })];
++        assert!(screen_pass(&table, None, true) == ScreenPass::Once);
++        assert!(screen_pass(&table, None, false) == ScreenPass::None);
++        let loading = Duration::from_secs(60);
++        assert_eq!(frame_wait_budget(Duration::ZERO, loading, false, screen_pass(&table, None, false)), Duration::ZERO);
++    }
++
      /// A first use queues the pipeline and, within the budget, gets the
      /// worker's answer (here: no host pipeline for no shaders).
      #[test]
-@@ -363,6 +830,30 @@ mod tests {
+@@ -363,6 +869,30 @@ mod tests {
          assert!(matches!(p.made.get(), Some(None)));
      }
  
@@ -22293,7 +22332,7 @@ index 9862446..9d13634 100644
      #[test]
      fn pending_pipeline_is_recorded_for_the_next_launch() {
          let mut p = Pending::new(Vec::new(), None);
-@@ -390,10 +881,76 @@ mod tests {
+@@ -390,10 +920,76 @@ mod tests {
          assert_eq!(queue.push(&promoted, REQUESTED), Some(false));
          assert_eq!(queue.push(&promoted, REQUESTED), None);
  

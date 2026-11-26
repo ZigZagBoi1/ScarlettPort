@@ -15,8 +15,9 @@
 //! The default budget is half a second per title frame. A pass the title
 //! runs only once and whose pipeline takes longer is lost, unless it is
 //! known to run once ([`ScreenPass::Once`]: the lighting tables, the
-//! decoration bakes of clothing and their block compression), which is
-//! waited for up to 12 s whatever the budget.
+//! decoration bakes of characters' heads and their block compression),
+//! which is waited for up to 12 s whatever the budget while screen workers
+//! are on ([`screen_workers`]).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
@@ -32,7 +33,8 @@ enum ScreenPass {
     Other,
     /// A pass the title records once and keeps the output of: dropped, the
     /// output stays empty for the rest of the run. Waited for even when play
-    /// skips other pending pipelines (`VICTORY_PIPELINE_WAIT_MS=0`).
+    /// skips other pending pipelines (`VICTORY_PIPELINE_WAIT_MS=0`), unless
+    /// screen workers are off ([`screen_workers`]).
     Once,
 }
 
@@ -108,6 +110,32 @@ fn without_structures(shaders: &[Arc<Shader>]) -> bool {
     !made && named(shaders, b"CS_RaytracingResolve")
 }
 
+/// What kind of pass a pipeline of `shaders` and the state `graphics`
+/// makes. With screen workers off (`workers`, [`screen_workers`]) none is
+/// a screen pass or a pass run once: all are queued and waited for alike,
+/// as before either existed.
+fn screen_pass(shaders: &[Arc<Shader>], graphics: Option<&GraphicsState>, workers: bool) -> ScreenPass {
+    if !workers {
+        return ScreenPass::None;
+    }
+    // The six draws that build the environment BRDF, area-light and scattering tables
+    // share this vertex program. The title records them once when it enters the world.
+    const LIGHT_TABLE_VERTEX: &str = "ce57291b5a1750ca";
+    let light_table = shaders.iter().any(|s| s.stage == "vertex" && s.hash == LIGHT_TABLE_VERTEX);
+    // A character's head textures are baked once when the title makes the character,
+    // during the load screen while hundreds of pipelines are queued. With these passes
+    // dropped, the heads of the cell's characters drew as nothing for the whole run (the
+    // eyes and teeth floated). In ten earlier runs the first decoration bake and the
+    // first BC3 compression were dropped in every one.
+    if light_table || shaders.iter().any(|s| s.bakes()) {
+        ScreenPass::Once
+    } else if graphics.is_some_and(|g| g.screen_pass()) {
+        ScreenPass::Other
+    } else {
+        ScreenPass::None
+    }
+}
+
 // SAFETY: D3D12 objects are free-threaded; the graphics state (whose input
 // elements point into its own names) is only read after creation.
 unsafe impl Send for Pending {}
@@ -128,22 +156,7 @@ impl Pending {
         }
         key.update(graphics.as_ref().map(|g| g.describe()).unwrap_or_default().as_bytes());
         let left_out = left_out(&shaders);
-        // The six draws that build the environment BRDF, area-light and scattering tables
-        // share this vertex program. The title records them once when it enters the world.
-        const LIGHT_TABLE_VERTEX: &str = "ce57291b5a1750ca";
-        let light_table = shaders.iter().any(|s| s.stage == "vertex" && s.hash == LIGHT_TABLE_VERTEX);
-        // A character's head textures are baked once when the title makes the character,
-        // during the load screen while hundreds of pipelines are queued. With these passes
-        // dropped, the heads of the cell's characters drew as nothing for the whole run (the
-        // eyes and teeth floated). In ten earlier runs the first decoration bake and the
-        // first BC3 compression were dropped in every one.
-        let screen = if light_table || shaders.iter().any(|s| s.bakes()) {
-            ScreenPass::Once
-        } else if screen_workers() && graphics.as_ref().is_some_and(|g| g.screen_pass()) {
-            ScreenPass::Other
-        } else {
-            ScreenPass::None
-        };
+        let screen = screen_pass(&shaders, graphics.as_deref(), screen_workers());
         Pending {
             screen,
             formats: graphics.as_ref().map_or([0; 9], |g| g.formats()),
@@ -673,9 +686,10 @@ fn next_screen() -> Arc<Pending> {
     }
 }
 
-/// Whether passes over the screen (no vertex input, no depth or stencil)
-/// have workers and a wait budget of their own (on by default;
-/// `VICTORY_SCREEN_WORKERS=0`: off, as before). Belobug 18e57db: the title fills its lighting tables
+/// Whether passes over the screen (no vertex input, no depth or stencil),
+/// and passes the title runs once ([`ScreenPass::Once`]), have workers and
+/// a wait budget of their own (on by default; `VICTORY_SCREEN_WORKERS=0`:
+/// off, as before: they are queued and waited for as any other). Belobug 18e57db: the title fills its lighting tables
 /// (PS_IntegrateEnvBRDF*, PS_AreaLightIlluminance) with draws it makes
 /// once, at the world's first frame; behind a world's worth of pipelines
 /// they waited minutes and were dropped, and that run had no diffuse light
@@ -808,12 +822,37 @@ mod tests {
     /// for. A program that only reads a baked texture is not.
     #[test]
     fn decoration_bakes_and_their_compression_run_once() {
-        let pass = |stage, container: &[u8]| Pending::new(vec![super::super::shader(stage, container)], None).screen;
+        let pass = |stage, container: &[u8]| screen_pass(&[super::super::shader(stage, container)], None, true);
         assert!(pass("compute", b"DXBC texturecompression:CS_CompressBC3Mip0 code") == ScreenPass::Once);
         assert!(pass("pixel", b"DXBC PS_BakeDecorations_1010 code") == ScreenPass::Once);
         assert!(pass("pixel", b"DXBC PS_DecorationBlend_0000 code") == ScreenPass::Once);
         assert!(pass("pixel", b"DXBC PS_DeferredPedTexturedNC code") == ScreenPass::None);
         assert!(pass("compute", b"DXBC CS_ScreenProbes_Temporal code") == ScreenPass::None);
+    }
+
+    /// `VICTORY_SCREEN_WORKERS=0` restores the queue and waits from before:
+    /// neither the lighting tables nor the bakes keep a budget of their own.
+    #[test]
+    fn screen_workers_off_leaves_no_pass_its_own_wait() {
+        let bake = [super::super::shader("compute", b"DXBC texturecompression:CS_CompressBC1Mip0 code")];
+        assert!(screen_pass(&bake, None, true) == ScreenPass::Once);
+        assert!(screen_pass(&bake, None, false) == ScreenPass::None);
+        // The lighting tables' vertex program, by its hash.
+        let table = [Arc::new(Shader {
+            stage: "vertex",
+            hash: "ce57291b5a1750ca".to_owned(),
+            container: b"DXBC lighting table vertex".to_vec(),
+            translated: OnceLock::new(),
+            walks: OnceLock::new(),
+            thread_limited: false,
+            limited_twin: OnceLock::new(),
+            group: OnceLock::new(),
+            bakes: OnceLock::new(),
+        })];
+        assert!(screen_pass(&table, None, true) == ScreenPass::Once);
+        assert!(screen_pass(&table, None, false) == ScreenPass::None);
+        let loading = Duration::from_secs(60);
+        assert_eq!(frame_wait_budget(Duration::ZERO, loading, false, screen_pass(&table, None, false)), Duration::ZERO);
     }
 
     /// A first use queues the pipeline and, within the budget, gets the
