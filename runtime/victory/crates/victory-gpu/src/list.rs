@@ -1929,7 +1929,25 @@ impl UploadBlock {
                 VirtualAlloc2(GetCurrentProcess(), std::ptr::null(), len,
                     MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE, &mut param, 1)
             } as usize;
-            (start != 0).then_some(Self { start, len, used: 0 })
+            if start == 0 {
+                // The title's upload allocation then fails (an empty vector
+                // could not, before the range was asked for). Logged at the
+                // 1st, 2nd, 4th, ... failure.
+                static FAILED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let failures = FAILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if failures.is_power_of_two() {
+                    // SAFETY: plain call, right after the one that failed.
+                    let error = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+                    tracing::warn!(
+                        bytes = len,
+                        error,
+                        failures,
+                        "an upload block could not be reserved in the raw-address range: the title's upload allocation fails"
+                    );
+                }
+                return None;
+            }
+            Some(Self { start, len, used: 0 })
         }
         #[cfg(not(windows))]
         {

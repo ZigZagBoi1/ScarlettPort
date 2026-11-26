@@ -128,7 +128,7 @@ fn with_host_settings(base: [u8; 32], facts: &HostFacts) -> [u8; 32] {
     bytes.extend_from_slice(&facts.view_limit.to_le_bytes());
     // (victory-amd) the host's widest wave, which picks how wave64 programs are made.
     bytes.extend_from_slice(&facts.max_wave.to_le_bytes());
-    super::append_view_heap_layout(&mut bytes, facts.view_map);
+    super::append_view_heap_layout(&mut bytes, facts.view_map, facts.table_snapshots);
     // (`VICTORY_F3_VIEW_FIX=1` changes the translation of typed buffer accesses; named only
     // when on, so the key of a run without it is the one of fx-final)
     if facts.f3_view_fix {
@@ -144,6 +144,8 @@ struct HostFacts {
     view_limit: u32,
     max_wave: u32,
     view_map: Option<(u32, u32)>,
+    /// Copied tables read their own descriptor words (with ray tracing).
+    table_snapshots: bool,
     f3_view_fix: bool,
 }
 
@@ -154,13 +156,14 @@ impl HostFacts {
             view_limit: victory_shader::emit::view_heap_limit(),
             max_wave: victory_shader::emit::host_max_wave(),
             view_map: victory_shader::emit::view_heap_map(),
+            table_snapshots: victory_shader::emit::table_snapshots(),
             f3_view_fix: victory_shader::emit::words::f3_view_fix(),
         }
     }
 
     /// As a key made before the view heap probe saw them (see [`build`]).
     fn unprobed(self) -> HostFacts {
-        HostFacts { view_limit: 0, view_map: None, ..self }
+        HostFacts { view_limit: 0, view_map: None, table_snapshots: false, ..self }
     }
 }
 
@@ -657,6 +660,7 @@ mod tests {
             view_limit: 999_999,
             max_wave: 32,
             view_map: Some((1 << 17, 1_000_000 - (1 << 18) - 2)),
+            table_snapshots: false,
             f3_view_fix: false,
         };
         let unprobed = probed.unprobed();

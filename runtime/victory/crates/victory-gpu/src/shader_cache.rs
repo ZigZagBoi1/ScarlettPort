@@ -48,13 +48,14 @@ mod legacy;
 
 static CACHE: OnceLock<Cache> = OnceLock::new();
 
-fn append_view_heap_layout(key: &mut Vec<u8>, map: Option<(u32, u32)>) {
+fn append_view_heap_layout(key: &mut Vec<u8>, map: Option<(u32, u32)>, snapshots: bool) {
     let [window, slot] = map.map_or([u32::MAX; 2], |(window, slot)| [window, slot]);
     key.extend_from_slice(&window.to_le_bytes());
     key.extend_from_slice(&slot.to_le_bytes());
-    if map.is_some() {
-        // On capped heaps, translated table loads address a separate bank of
-        // descriptor words. The previous translation indexed the title bank.
+    if map.is_some() && snapshots {
+        // With ray tracing on capped heaps, translated table loads address a
+        // separate bank of descriptor words. Otherwise they index the title
+        // bank, and the key stays as it was.
         key.extend_from_slice(b"descriptor snapshot words v1");
     }
 }
@@ -237,7 +238,7 @@ fn build() -> &'static [u8; 32] {
         let mut host = vec![u8::from(victory_shader::resource::rt_miss())];
         host.extend_from_slice(&victory_shader::emit::view_heap_limit().to_le_bytes());
         host.extend_from_slice(&victory_shader::emit::host_max_wave().to_le_bytes());
-        append_view_heap_layout(&mut host, victory_shader::emit::view_heap_map());
+        append_view_heap_layout(&mut host, victory_shader::emit::view_heap_map(), victory_shader::emit::table_snapshots());
         // (The host marks constant buffer slots (`SLOT_CONSTANTS`): a translation from before the
         // mark would take it for a stride.)
         host.extend_from_slice(b"slot constants");
@@ -857,16 +858,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_capped_heaps_need_new_keys_for_snapshot_words() {
-        let mut plain = Vec::new();
-        append_view_heap_layout(&mut plain, None);
-        assert_eq!(plain, [0xff; 8]);
-
-        let mut capped = Vec::new();
-        append_view_heap_layout(&mut capped, Some((4096, 8192)));
+    fn only_capped_heaps_with_ray_tracing_need_new_keys_for_snapshot_words() {
+        for snapshots in [false, true] {
+            let mut plain = Vec::new();
+            append_view_heap_layout(&mut plain, None, snapshots);
+            assert_eq!(plain, [0xff; 8]);
+        }
         let previous = [4096u32.to_le_bytes(), 8192u32.to_le_bytes()].concat();
-        assert!(capped.starts_with(&previous));
-        assert_ne!(capped, previous);
+        let mut capped = Vec::new();
+        append_view_heap_layout(&mut capped, Some((4096, 8192)), false);
+        assert_eq!(capped, previous);
+        let mut traced = Vec::new();
+        append_view_heap_layout(&mut traced, Some((4096, 8192)), true);
+        assert!(traced.starts_with(&previous));
+        assert_ne!(traced, previous);
     }
 
     fn shader() -> HostShader {

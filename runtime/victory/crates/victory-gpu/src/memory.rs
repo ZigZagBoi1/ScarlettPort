@@ -758,4 +758,43 @@ mod tests {
             "MEMORY.heaps retained dropped HostHeap key {key:#x}"
         );
     }
+
+    /// A list's builder upload holds the host heap past the title's release
+    /// of its heap and prepares with it at submission: the directory stays
+    /// until the upload lets the heap go, and then goes with it.
+    #[test]
+    fn a_heap_held_by_a_builder_upload_keeps_its_directory_until_it_is_let_go() {
+        let Some(host) = crate::host::host() else {
+            return;
+        };
+        let iid = guid(
+            0x8efb471d,
+            0x616c,
+            0x4f49,
+            [0x90, 0xf7, 0x12, 0x7b, 0xb7, 0x63, 0xfa, 0x51],
+        );
+        let desc = HeapDesc {
+            kind: 0,
+            count: 64,
+            flags: 1,
+            nodes: 1,
+        };
+        let mut h: This = std::ptr::null();
+        assert_eq!(create_heap(std::ptr::null(), &desc, &iid, &mut h), S_OK);
+        let list = host.new_list().unwrap();
+        assert!(heap(h).host().is_some());
+        let held = heap(h).hold_host().expect("host view heap");
+        let key = std::ptr::from_ref::<HostHeap>(&held) as usize;
+        let has = |key| MEMORY.lock().unwrap().as_ref().unwrap().heaps.contains_key(&key);
+        assert!(ready(&list, &held, &[], &[], false, true).is_some());
+        // SAFETY: `h` is a live COM object from `create_heap` (vtable slot 2: Release).
+        let release: extern "system" fn(This) -> u32 =
+            unsafe { std::mem::transmute(*(*(h as *const *const *const ())).add(2)) };
+        assert_eq!(release(h), 0);
+        // The upload prepares at submission, after the title let its heap go.
+        assert!(ready(&list, &held, &[], &[], false, true).is_some());
+        assert!(has(key), "the held heap keeps its directory");
+        drop(held);
+        assert!(!has(key), "the directory went with the last holder of the heap");
+    }
 }

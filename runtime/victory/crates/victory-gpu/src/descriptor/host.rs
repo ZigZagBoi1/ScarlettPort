@@ -19,6 +19,16 @@ use super::{VIEW_TAG, View, view_at};
 use crate::host::host;
 use victory_shader::emit::words::{ImageType, Shape, SNAPSHOT_SLOTS, WORDS, console_words, table_slot};
 
+/// The raw-address directory kept for this heap (`crate::memory`) goes with
+/// it. Evicted when the title's heap was dropped, it came back for a heap a
+/// list's builder upload still held, and a later heap made at the same
+/// address took that directory over.
+impl Drop for HostHeap {
+    fn drop(&mut self) {
+        crate::memory::forget_heap(self);
+    }
+}
+
 pub(crate) struct HostHeap {
     pub(crate) heap: ID3D12DescriptorHeap,
     cpu: usize,
@@ -319,6 +329,18 @@ fn heap_map() -> Option<(u32, u32)> {
     victory_shader::emit::view_heap_map()
 }
 
+/// Whether copied tables keep descriptor words of their own
+/// (`victory_shader::emit::table_snapshots`, set with ray tracing by
+/// [`probe_view_limit`]). Without it, the dynamic slots write no words and
+/// a capped heap has no bank for them, as before.
+fn table_snapshots() -> bool {
+    #[cfg(test)]
+    if let Some(on) = TEST_SNAPSHOTS.get() {
+        return on;
+    }
+    victory_shader::emit::table_snapshots()
+}
+
 /// VIcky (diagnostics): the heap map's pool (title slots mapped, pool
 /// slots free and waiting, refusals), each time the title slots it holds
 /// pass another 64Ki.
@@ -342,6 +364,8 @@ thread_local! {
     /// makes, as [`probe_view_limit`] sets one on a capped host, without
     /// reaching other tests' heaps.
     pub(crate) static TEST_MAP: std::cell::Cell<Option<(u32, u32)>> = const { std::cell::Cell::new(None) };
+    /// Tests: [`table_snapshots`] for the heaps this thread makes and fills.
+    pub(crate) static TEST_SNAPSHOTS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 /// Title memory by the placed texture views that describe it: per span of
@@ -1386,9 +1410,13 @@ mod words_tests {
         assert_eq!(console_words(&view_shape(Some(&view)))[..2], words[4..6]);
 
         TEST_MAP.set(Some((16, 24)));
+        TEST_SNAPSHOTS.set(Some(true));
         let heap = HostHeap::new(false, 64);
         TEST_MAP.set(None);
-        let Some(heap) = heap else { return };
+        let Some(heap) = heap else {
+            TEST_SNAPSHOTS.set(None);
+            return;
+        };
         let slot = heap.dynamic(1).expect("one fresh view");
         let (_, _, data) = heap.words.as_ref().expect("descriptor words");
         let original = (slot * WORDS) as usize;
@@ -1401,8 +1429,39 @@ mod words_tests {
         assert_eq!(read(), words[4..6]);
         heap.make_null(slot);
         assert_eq!(read(), [0, 0]);
+        TEST_SNAPSHOTS.set(None);
         // SAFETY: the title slot and both of its dwords are in the mapping.
         assert_eq!(unsafe { std::slice::from_raw_parts((*data as *const u32).add(original), 2) }, &words[4..6]);
+    }
+
+    /// Without ray tracing, a capped heap keeps no bank of table words and
+    /// a dynamic slot made from a view writes none, as before the bank.
+    #[test]
+    fn without_ray_tracing_dynamic_slots_write_no_words() {
+        let address = 0x9_5b42_0800u64;
+        let mut words = [0u32; 10];
+        words[1] = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE.0 as u32;
+        words[4] = address as u32;
+        words[5] = (address >> 32) as u32;
+        let view = View::Shader(0, Some(words));
+        TEST_SNAPSHOTS.set(Some(false));
+        // A capped heap (a map) and an uncapped one.
+        for map in [Some((16, 24)), None] {
+            TEST_MAP.set(map);
+            let heap = HostHeap::new(false, 64);
+            TEST_MAP.set(None);
+            let Some(heap) = heap else { break };
+            assert_eq!(heap.words_map_slot, None);
+            let slot = heap.dynamic(1).expect("one fresh view");
+            let (_, _, data) = heap.words.as_ref().expect("descriptor words");
+            heap.make_at(slot, &view);
+            if slot < victory_shader::emit::SLOT_STRIDES_COUNT {
+                let at = (slot * WORDS) as usize;
+                // SAFETY: two dwords of a slot allocated by this test. No list uses it.
+                assert_eq!(unsafe { std::slice::from_raw_parts((*data as *const u32).add(at), 2) }, &[0, 0]);
+            }
+        }
+        TEST_SNAPSHOTS.set(None);
     }
 
     /// A `D3D12_RESOURCE_DESC` as dwords: a 2D texture of `w` x `h`,
@@ -1544,6 +1603,9 @@ const TITLE_VIEWS: u32 = 1_245_184;
 pub(crate) fn probe_view_limit() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
+        // Ray tracing reads acceleration-structure addresses through copied
+        // tables; the bank of their words is kept only then.
+        victory_shader::emit::set_table_snapshots(crate::pipeline::builder_requested());
         let Some(host) = host() else { return };
         // SAFETY: plain heap creation; the heap is released at once.
         let made: windows::core::Result<ID3D12DescriptorHeap> = unsafe {
@@ -1756,7 +1818,7 @@ impl HostHeap {
             Some(l) => (l.pool, l.dynamic_first(), title_count),
             None => (0, count, count),
         };
-        let words_map_slot = heap_map().map(|(_, slot)| slot);
+        let words_map_slot = heap_map().filter(|_| table_snapshots()).map(|(_, slot)| slot);
         let words = (!sampler)
             .then(|| {
                 let rows = victory_shader::emit::SLOT_STRIDES_COUNT
@@ -2870,7 +2932,9 @@ impl HostHeap {
     /// Makes slot `index` (a dynamic one) from `view`; a null view if the
     /// host cannot.
     pub(crate) fn make_at(&self, index: u32, view: &View) {
-        self.write_words(index, Some(view), true);
+        if table_snapshots() {
+            self.write_words(index, Some(view), true);
+        }
         let kept = make(view, self.cpu(index));
         if kept.is_none() {
             null_for(view, self.cpu(index));
@@ -2880,7 +2944,7 @@ impl HostHeap {
 
     /// Makes slot `index` read nothing: a null view, or a plain sampler.
     pub(crate) fn make_null(&self, index: u32) {
-        if index >= self.dynamic_first {
+        if index >= self.dynamic_first && table_snapshots() {
             self.write_words(index, None, true);
         }
         if self.sampler {
@@ -3012,7 +3076,9 @@ impl HostHeap {
     /// Makes slot `index` (a dynamic one) a constant buffer view of host
     /// memory (the list's own, which it holds).
     pub(crate) fn constant_at(&self, index: u32, address: u64, gpu: u64, size: u32) {
-        self.write_words(index, Some(&View::Constant(address, size)), true);
+        if table_snapshots() {
+            self.write_words(index, Some(&View::Constant(address, size)), true);
+        }
         self.keep(index, None);
         let Some(host) = host() else { return };
         let desc = D3D12_CONSTANT_BUFFER_VIEW_DESC {

@@ -7962,9 +7962,11 @@ impl<'a> Lower<'a> {
         let c = self.cur;
         let five = self.s.m.i32(5);
         let slot = self.s.m.bin(c, Bin::LShr, addr, five);
-        // Bindless operands retain the title index. A copied root table on a
-        // capped GPU uses a separate row even if its physical slot overlaps it.
-        let (slot, rows) = match (root, super::shader::view_heap_map()) {
+        // Bindless operands retain the title index. With ray tracing
+        // (`table_snapshots`), a copied root table on a capped GPU uses a
+        // separate row even if its physical slot overlaps it.
+        let snapshots = super::shader::view_heap_map().filter(|_| super::shader::table_snapshots());
+        let (slot, rows) = match (root, snapshots) {
             (Some(RootType::Table), Some((_, map))) => {
                 let limit = self.s.m.i32(map);
                 let fresh = self.s.m.cmp(c, pred::IUGT, slot, limit);

@@ -12746,7 +12746,7 @@ index db53f11..b3c1993 100644
 +    })
 +}
 diff --git a/crates/victory-gpu/src/list.rs b/crates/victory-gpu/src/list.rs
-index 8ce9856..d0e4430 100644
+index 8ce9856..cb16dfa 100644
 --- a/crates/victory-gpu/src/list.rs
 +++ b/crates/victory-gpu/src/list.rs
 @@ -114,7 +114,7 @@ struct List {
@@ -12894,8 +12894,7 @@ index 8ce9856..d0e4430 100644
 -/// do not share them, `VICTORY_SCRATCH_POOL=0`).
 +/// do not share them, `VICTORY_SCRATCH_POOL=0`), scaled from CPU cores and
 +/// total system RAM.
- #[cfg(windows)]
--const IDLE_MOST: (usize, u64) = (128, 256 << 20);
++#[cfg(windows)]
 +fn idle_most(total_ram_bytes: Option<u64>, cores: usize) -> (usize, u64) {
 +    const GIB: u64 = 1 << 30;
 +    let lists = cores.saturating_mul(16).clamp(64, 256);
@@ -12909,7 +12908,8 @@ index 8ce9856..d0e4430 100644
 +    (lists, bytes)
 +}
 +
-+#[cfg(windows)]
+ #[cfg(windows)]
+-const IDLE_MOST: (usize, u64) = (128, 256 << 20);
 +fn idle_limits() -> (usize, u64) {
 +    static LIMITS: std::sync::OnceLock<(usize, u64)> = std::sync::OnceLock::new();
 +    *LIMITS.get_or_init(|| {
@@ -13563,7 +13563,7 @@ index 8ce9856..d0e4430 100644
      #[cfg(not(windows))]
      let _ = this;
  }
-@@ -1404,6 +1897,69 @@ extern "system" fn reset_x(this: This, allocator: This, pipeline: This, _flags:
+@@ -1404,6 +1897,87 @@ extern "system" fn reset_x(this: This, allocator: This, pipeline: This, _flags:
      reset(this, allocator, pipeline)
  }
  
@@ -13599,7 +13599,25 @@ index 8ce9856..d0e4430 100644
 +                VirtualAlloc2(GetCurrentProcess(), std::ptr::null(), len,
 +                    MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE, &mut param, 1)
 +            } as usize;
-+            (start != 0).then_some(Self { start, len, used: 0 })
++            if start == 0 {
++                // The title's upload allocation then fails (an empty vector
++                // could not, before the range was asked for). Logged at the
++                // 1st, 2nd, 4th, ... failure.
++                static FAILED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++                let failures = FAILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
++                if failures.is_power_of_two() {
++                    // SAFETY: plain call, right after the one that failed.
++                    let error = unsafe { windows_sys::Win32::Foundation::GetLastError() };
++                    tracing::warn!(
++                        bytes = len,
++                        error,
++                        failures,
++                        "an upload block could not be reserved in the raw-address range: the title's upload allocation fails"
++                    );
++                }
++                return None;
++            }
++            Some(Self { start, len, used: 0 })
 +        }
 +        #[cfg(not(windows))]
 +        {
@@ -13633,7 +13651,7 @@ index 8ce9856..d0e4430 100644
  /// Newer lists' 0x4a0 `(size, alignment) -> pointer`: memory the list
  /// owns until it is reset, which the CPU writes and the GPU reads at the
  /// same address; null on failure. The title's BVH builder puts
-@@ -1411,20 +1967,24 @@ extern "system" fn reset_x(this: This, allocator: This, pipeline: This, _flags:
+@@ -1411,20 +1985,24 @@ extern "system" fn reset_x(this: This, allocator: This, pipeline: This, _flags:
  /// `E_NOTIMPL` as a pointer).
  extern "system" fn allocate_upload(this: This, size: u64, alignment: u64) -> *mut u8 {
      let align = usize::try_from(alignment).unwrap_or(0).max(16);
@@ -13665,7 +13683,7 @@ index 8ce9856..d0e4430 100644
      at
  }
  
-@@ -1434,21 +1994,18 @@ extern "system" fn allocate_upload(this: This, size: u64, alignment: u64) -> *mu
+@@ -1434,21 +2012,18 @@ extern "system" fn allocate_upload(this: This, size: u64, alignment: u64) -> *mu
  extern "system" fn ignored_state(_: This) {}
  
  /// Depth bounds `(min, max)`.
@@ -13693,7 +13711,7 @@ index 8ce9856..d0e4430 100644
      use crate::draw::{IndexView, VertexView};
      use windows::Win32::Foundation::RECT;
      use windows::Win32::Graphics::Direct3D12::D3D12_VIEWPORT;
-@@ -1463,7 +2020,7 @@ mod state {
+@@ -1463,7 +2038,7 @@ mod state {
      }
  
      pub(super) extern "system" fn topology(this: This, topology: u32) {
@@ -13702,7 +13720,7 @@ index 8ce9856..d0e4430 100644
      }
      pub(super) extern "system" fn viewports(
          this: This,
-@@ -1472,31 +2029,31 @@ mod state {
+@@ -1472,31 +2047,31 @@ mod state {
      ) {
          // (Through the draw state, which keeps them for the host list
          // that continues this one after a cut: `State::replay`.)
@@ -13742,7 +13760,7 @@ index 8ce9856..d0e4430 100644
      }
      pub(super) extern "system" fn graphics_constant(
          this: This,
-@@ -1504,7 +2061,7 @@ mod state {
+@@ -1504,7 +2079,7 @@ mod state {
          value: u32,
          offset: u32,
      ) {
@@ -13751,7 +13769,7 @@ index 8ce9856..d0e4430 100644
      }
      pub(super) extern "system" fn compute_constants(
          this: This,
-@@ -1513,7 +2070,7 @@ mod state {
+@@ -1513,7 +2088,7 @@ mod state {
          values: *const u32,
          offset: u32,
      ) {
@@ -13760,7 +13778,7 @@ index 8ce9856..d0e4430 100644
              s.set_constants(true, slot, items(values, count), offset)
          });
      }
-@@ -1524,20 +2081,20 @@ mod state {
+@@ -1524,20 +2099,20 @@ mod state {
          values: *const u32,
          offset: u32,
      ) {
@@ -13785,7 +13803,7 @@ index 8ce9856..d0e4430 100644
      }
      pub(super) extern "system" fn vertex_buffers(
          this: This,
-@@ -1545,7 +2102,7 @@ mod state {
+@@ -1545,7 +2120,7 @@ mod state {
          count: u32,
          views: *const VertexView,
      ) {
@@ -13794,7 +13812,7 @@ index 8ce9856..d0e4430 100644
              if views.is_null() {
                  s.clear_vertex_buffers(start, count);
              } else {
-@@ -1571,7 +2128,7 @@ mod state {
+@@ -1571,7 +2146,7 @@ mod state {
          };
          // SAFETY: the title passes a handle or null.
          let depth = unsafe { depth.as_ref() }.copied().unwrap_or(0);
@@ -13803,7 +13821,7 @@ index 8ce9856..d0e4430 100644
      }
      pub(super) extern "system" fn draw(
          this: This,
-@@ -1587,7 +2144,12 @@ mod state {
+@@ -1587,7 +2162,12 @@ mod state {
      }
      pub(super) extern "system" fn dispatch(this: This, x: u32, y: u32, z: u32) {
          super::count_dispatch();
@@ -13817,7 +13835,7 @@ index 8ce9856..d0e4430 100644
      }
      /// `DispatchMesh(x, y, z)` (the PC method of List6); the title's mesh
      /// programs take `x` groups only.
-@@ -1703,7 +2265,10 @@ extern "system" fn execute_indirect(
+@@ -1703,7 +2283,10 @@ extern "system" fn execute_indirect(
          const DISPATCH: u32 = 2;
          const DISPATCH_SINGLE: u32 = 105;
          let kind = if *kind == DISPATCH_SINGLE { DISPATCH } else { *kind };
@@ -13829,7 +13847,7 @@ index 8ce9856..d0e4430 100644
              ran = s.execute_indirect(list, (kind, stride, max), address, counter);
          });
      } else {
-@@ -1905,7 +2470,7 @@ fn wait_for(this: This, address: u64, comparison: u32, reference: u64, wide: boo
+@@ -1905,7 +2488,7 @@ fn wait_for(this: This, address: u64, comparison: u32, reference: u64, wide: boo
          );
      }
      #[cfg(all(windows, feature = "diagnostics"))]
@@ -13838,7 +13856,7 @@ index 8ce9856..d0e4430 100644
          crate::capture::op(std::ptr::from_ref(host) as usize, || {
              format!(
                  "WAIT VALUE at {address:#x} comparison {comparison} reference {reference:#x} wide {wide} met {}",
-@@ -1936,7 +2501,7 @@ extern "system" fn wait_value64(this: This, address: u64, comparison: u32, refer
+@@ -1936,7 +2519,7 @@ extern "system" fn wait_value64(this: This, address: u64, comparison: u32, refer
  /// title texture (clears, copies) moves its host copy to the state it needs
  /// first, so only their ordering matters: one barrier on every shader
  /// write (the title's buffer barriers order compute passes).
@@ -13847,7 +13865,7 @@ index 8ce9856..d0e4430 100644
      // Diagnostics: counted, and left out under `VICTORY_BARRIER_TEST=groups`.
      #[cfg(all(windows, feature = "diagnostics"))]
      if count > 0 {
-@@ -1947,16 +2512,131 @@ extern "system" fn barrier_groups(this: This, count: u32, _groups: *const u8) {
+@@ -1947,16 +2530,131 @@ extern "system" fn barrier_groups(this: This, count: u32, _groups: *const u8) {
      }
      #[cfg(windows)]
      if count > 0
@@ -13981,7 +13999,7 @@ index 8ce9856..d0e4430 100644
  }
  
  /// The bottom-of-pipe value writes `(address, value, flush, flags)`, 32 and
-@@ -1998,7 +2678,7 @@ fn value_written(this: This, address: u64, value: u64) {
+@@ -1998,7 +2696,7 @@ fn value_written(this: This, address: u64, value: u64) {
          #[cfg(not(feature = "diagnostics"))]
          let _ = value;
          #[cfg(feature = "diagnostics")]
@@ -13990,7 +14008,7 @@ index 8ce9856..d0e4430 100644
              crate::capture::op(std::ptr::from_ref(host) as usize, || {
                  format!("WRITE VALUE at {address:#x} value {value:#x}")
              });
-@@ -2009,16 +2689,20 @@ fn value_written(this: This, address: u64, value: u64) {
+@@ -2009,16 +2707,20 @@ fn value_written(this: This, address: u64, value: u64) {
          {
              return;
          }
@@ -14014,7 +14032,7 @@ index 8ce9856..d0e4430 100644
          if let Some(done) = list.host.replace(fresh) {
              // The part so far keeps its waits; nothing stands before the
              // next one but this part itself.
-@@ -2041,7 +2725,10 @@ fn defer_write(this: This, address: u64, what: Written, bytes: usize) {
+@@ -2041,7 +2743,10 @@ fn defer_write(this: This, address: u64, what: Written, bytes: usize) {
          return;
      }
      #[cfg(windows)]
@@ -14026,7 +14044,7 @@ index 8ce9856..d0e4430 100644
          list.defer_write(address as *mut u8, what, bytes);
          return;
      }
-@@ -2206,6 +2893,8 @@ mod tests {
+@@ -2206,6 +2911,8 @@ mod tests {
          // List-owned upload memory: aligned, writable, gone at reset.
          let p = allocate_upload(list, 40, 0x100);
          assert!(!p.is_null() && (p as usize).is_multiple_of(0x100));
@@ -14035,7 +14053,7 @@ index 8ce9856..d0e4430 100644
          // SAFETY: 40 bytes were handed out.
          unsafe { p.write_bytes(0xab, 40) };
          assert!(allocate_upload(list, 8, 0x30).is_null(), "not a power of two");
-@@ -2216,4 +2905,18 @@ mod tests {
+@@ -2216,4 +2923,18 @@ mod tests {
          assert_eq!(release(list), 0);
          assert_eq!(release(allocator), 0);
      }
@@ -14949,7 +14967,7 @@ index 0000000..926b32b
 +    }
 +}
 diff --git a/crates/victory-gpu/src/memory.rs b/crates/victory-gpu/src/memory.rs
-index c256367..295890b 100644
+index c256367..789bad5 100644
 --- a/crates/victory-gpu/src/memory.rs
 +++ b/crates/victory-gpu/src/memory.rs
 @@ -9,13 +9,9 @@
@@ -15449,7 +15467,7 @@ index c256367..295890b 100644
      }
      // A title address in two constants (low dword, then bits 32 to 39), or
      // in one in 256-byte units. A constant that only looks like one names
-@@ -269,51 +483,279 @@ pub(crate) fn ready(
+@@ -269,51 +483,318 @@ pub(crate) fn ready(
              && (1..=0xFF).contains(&high)
              && c >= 0x1_0000
          {
@@ -15750,6 +15768,45 @@ index c256367..295890b 100644
 +            !guard.as_ref().unwrap().heaps.contains_key(&key),
 +            "MEMORY.heaps retained dropped HostHeap key {key:#x}"
 +        );
++    }
++
++    /// A list's builder upload holds the host heap past the title's release
++    /// of its heap and prepares with it at submission: the directory stays
++    /// until the upload lets the heap go, and then goes with it.
++    #[test]
++    fn a_heap_held_by_a_builder_upload_keeps_its_directory_until_it_is_let_go() {
++        let Some(host) = crate::host::host() else {
++            return;
++        };
++        let iid = guid(
++            0x8efb471d,
++            0x616c,
++            0x4f49,
++            [0x90, 0xf7, 0x12, 0x7b, 0xb7, 0x63, 0xfa, 0x51],
++        );
++        let desc = HeapDesc {
++            kind: 0,
++            count: 64,
++            flags: 1,
++            nodes: 1,
++        };
++        let mut h: This = std::ptr::null();
++        assert_eq!(create_heap(std::ptr::null(), &desc, &iid, &mut h), S_OK);
++        let list = host.new_list().unwrap();
++        assert!(heap(h).host().is_some());
++        let held = heap(h).hold_host().expect("host view heap");
++        let key = std::ptr::from_ref::<HostHeap>(&held) as usize;
++        let has = |key| MEMORY.lock().unwrap().as_ref().unwrap().heaps.contains_key(&key);
++        assert!(ready(&list, &held, &[], &[], false, true).is_some());
++        // SAFETY: `h` is a live COM object from `create_heap` (vtable slot 2: Release).
++        let release: extern "system" fn(This) -> u32 =
++            unsafe { std::mem::transmute(*(*(h as *const *const *const ())).add(2)) };
++        assert_eq!(release(h), 0);
++        // The upload prepares at submission, after the title let its heap go.
++        assert!(ready(&list, &held, &[], &[], false, true).is_some());
++        assert!(has(key), "the held heap keeps its directory");
++        drop(held);
++        assert!(!has(key), "the directory went with the last holder of the heap");
 +    }
 +}
 diff --git a/crates/victory-gpu/src/narrow.rs b/crates/victory-gpu/src/narrow.rs
@@ -30462,10 +30519,10 @@ index 0000000..5755f1a
 +    }
 +}
 diff --git a/crates/victory-gpu/src/shader_cache.rs b/crates/victory-gpu/src/shader_cache.rs
-index eabd0f3..427010e 100644
+index eabd0f3..02e89a7 100644
 --- a/crates/victory-gpu/src/shader_cache.rs
 +++ b/crates/victory-gpu/src/shader_cache.rs
-@@ -1,29 +1,126 @@
+@@ -1,29 +1,127 @@
 -//! Translated shaders kept on disk (decision 0003): under the configured
 -//! cache folder, keyed by the container's content and by the VIctory build
 -//! that translated it (the BLAKE3 of our executable), so a rebuilt
@@ -30530,13 +30587,14 @@ index eabd0f3..427010e 100644
 -static HITS: AtomicU64 = AtomicU64::new(0);
 -static MISSES: AtomicU64 = AtomicU64::new(0);
 +
-+fn append_view_heap_layout(key: &mut Vec<u8>, map: Option<(u32, u32)>) {
++fn append_view_heap_layout(key: &mut Vec<u8>, map: Option<(u32, u32)>, snapshots: bool) {
 +    let [window, slot] = map.map_or([u32::MAX; 2], |(window, slot)| [window, slot]);
 +    key.extend_from_slice(&window.to_le_bytes());
 +    key.extend_from_slice(&slot.to_le_bytes());
-+    if map.is_some() {
-+        // On capped heaps, translated table loads address a separate bank of
-+        // descriptor words. The previous translation indexed the title bank.
++    if map.is_some() && snapshots {
++        // With ray tracing on capped heaps, translated table loads address a
++        // separate bank of descriptor words. Otherwise they index the title
++        // bank, and the key stays as it was.
 +        key.extend_from_slice(b"descriptor snapshot words v1");
 +    }
 +}
@@ -30606,7 +30664,7 @@ index eabd0f3..427010e 100644
      match Cache::open(dir) {
          Ok(cache) => {
              let _ = CACHE.set(cache);
-@@ -32,18 +129,98 @@ pub fn use_shader_cache(dir: PathBuf) {
+@@ -32,18 +130,98 @@ pub fn use_shader_cache(dir: PathBuf) {
      }
  }
  
@@ -30710,7 +30768,7 @@ index eabd0f3..427010e 100644
          let limit = victory_shader::emit::loop_limit();
          if limit != victory_shader::emit::DEFAULT_LOOP_LIMIT {
              tracing::warn!(
-@@ -51,106 +228,445 @@ fn build() -> &'static [u8; 32] {
+@@ -51,106 +229,445 @@ fn build() -> &'static [u8; 32] {
                  "VICTORY_SHADER_LOOP_LIMIT: translated loops stop sooner"
              );
          }
@@ -30748,7 +30806,7 @@ index eabd0f3..427010e 100644
 +        let mut host = vec![u8::from(victory_shader::resource::rt_miss())];
 +        host.extend_from_slice(&victory_shader::emit::view_heap_limit().to_le_bytes());
 +        host.extend_from_slice(&victory_shader::emit::host_max_wave().to_le_bytes());
-+        append_view_heap_layout(&mut host, victory_shader::emit::view_heap_map());
++        append_view_heap_layout(&mut host, victory_shader::emit::view_heap_map(), victory_shader::emit::table_snapshots());
 +        // (The host marks constant buffer slots (`SLOT_CONSTANTS`): a translation from before the
 +        // mark would take it for a stride.)
 +        host.extend_from_slice(b"slot constants");
@@ -31237,7 +31295,7 @@ index eabd0f3..427010e 100644
  }
  
  const MAGIC: &[u8; 4] = b"VSH1";
-@@ -244,6 +760,11 @@ fn encode(s: &HostShader) -> Vec<u8> {
+@@ -244,6 +761,11 @@ fn encode(s: &HostShader) -> Vec<u8> {
              word(&mut out, value);
          }
      }
@@ -31249,7 +31307,7 @@ index eabd0f3..427010e 100644
      out
  }
  
-@@ -312,6 +833,11 @@ fn decode(bytes: &[u8]) -> Option<HostShader> {
+@@ -312,6 +834,11 @@ fn decode(bytes: &[u8]) -> Option<HostShader> {
              shift: u8::try_from(r.word()?).ok().filter(|&s| s < 32)?,
          });
      }
@@ -31261,7 +31319,7 @@ index eabd0f3..427010e 100644
      r.0.is_empty().then_some(HostShader {
          stage,
          dxil,
-@@ -322,6 +848,7 @@ fn decode(bytes: &[u8]) -> Option<HostShader> {
+@@ -322,6 +849,7 @@ fn decode(bytes: &[u8]) -> Option<HostShader> {
          root_srvs,
          root_uavs,
          root_indexed_views,
@@ -31269,27 +31327,31 @@ index eabd0f3..427010e 100644
      })
  }
  
-@@ -329,6 +856,19 @@ fn decode(bytes: &[u8]) -> Option<HostShader> {
+@@ -329,6 +857,23 @@ fn decode(bytes: &[u8]) -> Option<HostShader> {
  mod tests {
      use super::*;
  
 +    #[test]
-+    fn only_capped_heaps_need_new_keys_for_snapshot_words() {
-+        let mut plain = Vec::new();
-+        append_view_heap_layout(&mut plain, None);
-+        assert_eq!(plain, [0xff; 8]);
-+
-+        let mut capped = Vec::new();
-+        append_view_heap_layout(&mut capped, Some((4096, 8192)));
++    fn only_capped_heaps_with_ray_tracing_need_new_keys_for_snapshot_words() {
++        for snapshots in [false, true] {
++            let mut plain = Vec::new();
++            append_view_heap_layout(&mut plain, None, snapshots);
++            assert_eq!(plain, [0xff; 8]);
++        }
 +        let previous = [4096u32.to_le_bytes(), 8192u32.to_le_bytes()].concat();
-+        assert!(capped.starts_with(&previous));
-+        assert_ne!(capped, previous);
++        let mut capped = Vec::new();
++        append_view_heap_layout(&mut capped, Some((4096, 8192)), false);
++        assert_eq!(capped, previous);
++        let mut traced = Vec::new();
++        append_view_heap_layout(&mut traced, Some((4096, 8192)), true);
++        assert!(traced.starts_with(&previous));
++        assert_ne!(traced, previous);
 +    }
 +
      fn shader() -> HostShader {
          HostShader {
              stage: HwStage::Ps,
-@@ -356,52 +896,99 @@ mod tests {
+@@ -356,52 +901,99 @@ mod tests {
                  byte_offset: 32,
                  shift: 5,
              }],
@@ -31427,10 +31489,10 @@ index eabd0f3..427010e 100644
      #[test]
 diff --git a/crates/victory-gpu/src/shader_cache/legacy.rs b/crates/victory-gpu/src/shader_cache/legacy.rs
 new file mode 100644
-index 0000000..b4775f6
+index 0000000..738a8db
 --- /dev/null
 +++ b/crates/victory-gpu/src/shader_cache/legacy.rs
-@@ -0,0 +1,895 @@
+@@ -0,0 +1,899 @@
 +//! The translated-shader cache as fx-final (26f8afd) has it, kept as the default of fx-cand:
 +//! keyed by the container's content and by the translator that made it. The two-level cache
 +//! that keys by settings and rule stamps (`super`) is opt-in with `VICTORY_SHADER_CACHE_KEY=output`.
@@ -31561,7 +31623,7 @@ index 0000000..b4775f6
 +    bytes.extend_from_slice(&facts.view_limit.to_le_bytes());
 +    // (victory-amd) the host's widest wave, which picks how wave64 programs are made.
 +    bytes.extend_from_slice(&facts.max_wave.to_le_bytes());
-+    super::append_view_heap_layout(&mut bytes, facts.view_map);
++    super::append_view_heap_layout(&mut bytes, facts.view_map, facts.table_snapshots);
 +    // (`VICTORY_F3_VIEW_FIX=1` changes the translation of typed buffer accesses; named only
 +    // when on, so the key of a run without it is the one of fx-final)
 +    if facts.f3_view_fix {
@@ -31577,6 +31639,8 @@ index 0000000..b4775f6
 +    view_limit: u32,
 +    max_wave: u32,
 +    view_map: Option<(u32, u32)>,
++    /// Copied tables read their own descriptor words (with ray tracing).
++    table_snapshots: bool,
 +    f3_view_fix: bool,
 +}
 +
@@ -31587,13 +31651,14 @@ index 0000000..b4775f6
 +            view_limit: victory_shader::emit::view_heap_limit(),
 +            max_wave: victory_shader::emit::host_max_wave(),
 +            view_map: victory_shader::emit::view_heap_map(),
++            table_snapshots: victory_shader::emit::table_snapshots(),
 +            f3_view_fix: victory_shader::emit::words::f3_view_fix(),
 +        }
 +    }
 +
 +    /// As a key made before the view heap probe saw them (see [`build`]).
 +    fn unprobed(self) -> HostFacts {
-+        HostFacts { view_limit: 0, view_map: None, ..self }
++        HostFacts { view_limit: 0, view_map: None, table_snapshots: false, ..self }
 +    }
 +}
 +
@@ -32090,6 +32155,7 @@ index 0000000..b4775f6
 +            view_limit: 999_999,
 +            max_wave: 32,
 +            view_map: Some((1 << 17, 1_000_000 - (1 << 18) - 2)),
++            table_snapshots: false,
 +            f3_view_fix: false,
 +        };
 +        let unprobed = probed.unprobed();

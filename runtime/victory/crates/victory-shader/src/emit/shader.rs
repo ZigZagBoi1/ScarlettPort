@@ -208,6 +208,27 @@ pub fn set_view_heap_map(map: Option<(u32, u32)>) {
     VIEW_MAP.store(packed, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Whether a copied root table on a capped heap reads descriptor words of its
+/// own, past the title's ([`super::words::table_slot`]). The host sets it with
+/// ray tracing, whose passes read acceleration-structure addresses through
+/// such tables. Off (the default), a table reads the title's words as before.
+static TABLE_SNAPSHOTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Sets [`table_snapshots`]; before the first translation.
+pub fn set_table_snapshots(on: bool) {
+    TABLE_SNAPSHOTS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether copied root tables read descriptor words of their own
+/// ([`set_table_snapshots`]).
+pub fn table_snapshots() -> bool {
+    #[cfg(test)]
+    if let Some(on) = TEST_TABLE_SNAPSHOTS.get() {
+        return on;
+    }
+    TABLE_SNAPSHOTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The heap map shaders are translated with now ([`set_view_heap_map`]).
 pub fn view_heap_map() -> Option<(u32, u32)> {
     #[cfg(test)]
@@ -225,6 +246,8 @@ thread_local! {
     /// [`VIEW_MAP`], without reaching other tests' translations.
     pub(crate) static TEST_VIEW_HEAP: std::cell::Cell<Option<(u32, Option<(u32, u32)>)>> =
         const { std::cell::Cell::new(None) };
+    /// Tests: [`table_snapshots`] for this thread's translations.
+    pub(crate) static TEST_TABLE_SNAPSHOTS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 pub(crate) struct Shader {

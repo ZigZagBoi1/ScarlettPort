@@ -493,10 +493,8 @@ impl Drop for Heap {
                 .retain(|&page, _| page < start || page >= end);
         }
         heaps.retain(|&(_, _, h)| h != at);
-        drop(heaps);
-        if let Some(Some(host)) = self.host.get() {
-            crate::memory::forget_heap(host);
-        }
+        // The host heap's raw-address directory goes when the host heap does
+        // (`HostHeap`'s drop): a list's builder upload may still hold it.
     }
 }
 
