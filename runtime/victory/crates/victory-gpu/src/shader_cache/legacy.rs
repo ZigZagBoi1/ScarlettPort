@@ -3,11 +3,10 @@
 //! that keys by settings and rule stamps (`super`) is opt-in with `VICTORY_SHADER_CACHE_KEY=output`.
 //!
 //! One difference from 26f8afd: the translator named in the key is [`FINAL_SOURCE_HASH`], the
-//! source hash of fx-final's `victory-shader`, not this build's `victory_shader::SOURCE_HASH`. This
-//! tree's translator makes the same output as fx-final's with every new switch off (checked
-//! by comparing DXIL), and the two differ in source (new switches, rule notes, tests), so
-//! the build's own hash would throw away every translation the cache holds. A change to what
-//! the translator makes by default must change that constant.
+//! source hash of the last `victory-shader` whose default output changed, not this build's
+//! `victory_shader::SOURCE_HASH`. Sources change far more often than the default output (new
+//! switches, rule notes, tests), so the build's own hash would throw away every translation the
+//! cache holds. A change to what the translator makes by default must change that constant.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -18,8 +17,9 @@ use victory_shader::emit::{HostShader, StaticSampler, UserData};
 use victory_shader::resource::RootIndexedView;
 use victory_shader::{HwStage, RootType};
 
-/// `victory_shader::SOURCE_HASH` of fx-final 26f8afd's translator (see the module notes).
-const FINAL_SOURCE_HASH: &str = "ac08dbacc78b62c4a63890c50be4dfac7b935015bee43c3394fdb7f97ca7c2c5";
+/// `victory_shader::SOURCE_HASH` of the last translator whose default output changed (see the
+/// module notes): the one that reads only constant buffer slots as constant buffers.
+const FINAL_SOURCE_HASH: &str = "366a1edf33210d9aa302060578ab9fafdba0127caba70ac5109fe6443042cf5a";
 
 static CACHE: OnceLock<Cache> = OnceLock::new();
 static HITS: AtomicU64 = AtomicU64::new(0);

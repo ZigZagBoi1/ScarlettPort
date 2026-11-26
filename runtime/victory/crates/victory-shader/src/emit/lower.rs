@@ -6591,16 +6591,23 @@ impl<'a> Lower<'a> {
         // BatchCullPreSkinnedMeshlets, BatchCullBatchCSMeshlets) reads its
         // batch records, mesh headers and instance transforms this way, so
         // it passed no meshlet and every indirect mesh draw ran empty.
-        // The host's table of strides by heap slot tells a buffer view
-        // (not 0) from anything else, which is still read as a constant
-        // buffer; only the load that fits the slot runs.
+        // The host's table of strides by heap slot tells a buffer view and
+        // a constant buffer view (`SLOT_CONSTANTS`) from anything else (0),
+        // which gives zeros; only the load that fits the slot runs. A slot
+        // that is neither was read as a constant buffer, which page faulted
+        // the meshlet culling on an RX 9070 XT.
         let picked = match kind {
             None => self.slot_stride(src)?,
             Some(_) => None,
         };
         if let Some(stride) = picked {
             let zero = self.s.m.i32(0);
-            let is_buffer = self.s.m.cmp(self.cur, pred::NE, stride, zero);
+            let constants = self.s.m.i32(super::shader::SLOT_CONSTANTS);
+            // Neither 0 nor `SLOT_CONSTANTS` (the largest dword).
+            let ones = self.s.m.i32(u32::MAX);
+            let less = self.s.m.bin(self.cur, Bin::Add, stride, ones);
+            let most = self.s.m.i32(super::shader::SLOT_CONSTANTS - 1);
+            let is_buffer = self.s.m.cmp(self.cur, pred::IULT, less, most);
             let at = self.begin_guarded(Some(is_buffer));
             let h = self.handle(site, src, false, (11, 0))?;
             let mut raw = Vec::new();
@@ -6623,8 +6630,8 @@ impl<'a> Lower<'a> {
                 raw.push((x, zero));
             }
             let raw = self.end_guarded(at, &raw);
-            let other = self.s.m.cmp(self.cur, pred::EQ, stride, zero);
-            let at = self.begin_guarded(Some(other));
+            let is_constants = self.s.m.cmp(self.cur, pred::EQ, stride, constants);
+            let at = self.begin_guarded(Some(is_constants));
             let h = self.handle(site, src, false, (13, 0x1_0000))?;
             let mut both = Vec::new();
             for (k, &r) in raw.iter().enumerate() {
@@ -11880,6 +11887,11 @@ impl<'a> Lower<'a> {
             && !typed
             && used.is_none()
         {
+            // (A constant buffer's mark is no stride.)
+            let constants = self.s.m.i32(super::shader::SLOT_CONSTANTS);
+            let zero = self.s.m.i32(0);
+            let marked = self.s.m.cmp(c, pred::EQ, stride, constants);
+            let stride = self.s.m.select(c, marked, zero, stride);
             let at = self.s.m.bin(c, Bin::Mul, element, stride);
             off = self.s.m.bin(c, Bin::Add, at, off);
             index = None;

@@ -49,9 +49,10 @@ mod legacy;
 static CACHE: OnceLock<Cache> = OnceLock::new();
 
 /// `VICTORY_SHADER_CACHE_KEY=output`: the cache of this file (keyed by settings, entries stamped
-/// with the translator rules they used). Otherwise (the default) the cache of fx-final 26f8afd,
-/// keyed by the translator that made each entry (`legacy`), so a cache warmed by that build
-/// is still served. The two keep their entries apart (other keys), in the same folder.
+/// with the translator rules they used). Otherwise (the default) the cache as fx-final 26f8afd
+/// has it, keyed by the translator that made each entry (`legacy`), so a cache warmed by a build
+/// with the same default output is still served. The two keep their entries apart (other keys),
+/// in the same folder.
 fn output_key() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("VICTORY_SHADER_CACHE_KEY").is_ok_and(|v| v.trim() == "output"))
@@ -229,6 +230,9 @@ fn build() -> &'static [u8; 32] {
         for word in map {
             host.extend_from_slice(&word.to_le_bytes());
         }
+        // (The host marks constant buffer slots (`SLOT_CONSTANTS`): a translation from before the
+        // mark would take it for a stride.)
+        host.extend_from_slice(b"slot constants");
         // (`VICTORY_F3_VIEW_FIX=1` changes how typed buffer accesses are translated)
         if victory_shader::emit::words::f3_view_fix() {
             host.extend_from_slice(b"f3 view fix");

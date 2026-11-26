@@ -17,13 +17,17 @@ pub const ROOT_CBV_SPACE: u32 = 1;
 /// reads buffers through descriptors it picks from the view heap at an
 /// index it computes (SM 6.6 dynamic resources): a raw buffer of
 /// [`SLOT_STRIDES_COUNT`] dwords the host keeps, dword `i` the bytes per
-/// element of the buffer view at heap slot `i` (0: none or not a buffer).
+/// element of the buffer view at heap slot `i` (0: none or neither a buffer
+/// nor a constant buffer; [`SLOT_CONSTANTS`]: a constant buffer view).
 /// The console's descriptor holds that stride and its hardware multiplies
 /// the element index by it; the program's code does not say it, and the
 /// used-resource list only names what tables hold. A shader that has this
 /// root SRV also tells the host that the buffer views of the whole heap
 /// must be ready when it runs, not only those its tables name.
 pub const SLOT_STRIDES: u8 = 255;
+/// The [`SLOT_STRIDES`] dword of a heap slot that holds a constant buffer
+/// view. Only such a slot is read as a constant buffer.
+pub const SLOT_CONSTANTS: u32 = u32::MAX;
 /// Dwords of the [`SLOT_STRIDES`] buffer: heap indices are clamped to it.
 pub const SLOT_STRIDES_COUNT: u32 = 1 << 21;
 /// Where the [`SLOT_STRIDES`] buffer goes on, in dwords: two per heap slot,
