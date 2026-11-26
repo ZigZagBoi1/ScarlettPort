@@ -80,6 +80,10 @@ pub(crate) struct Shader {
     /// A compute program's thread group size, as the console runs it.
     #[cfg(windows)]
     group: OnceLock<Option<[u32; 3]>>,
+    /// Whether it makes a texture the title bakes once, once looked at
+    /// ([`Shader::bakes`]).
+    #[cfg(windows)]
+    bakes: OnceLock<bool>,
 }
 
 impl std::fmt::Debug for Shader {
@@ -138,6 +142,8 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
                 limited_twin: OnceLock::new(),
                 #[cfg(windows)]
                 group: OnceLock::new(),
+                #[cfg(windows)]
+                bakes: OnceLock::new(),
             })
         })
         .clone()
@@ -163,6 +169,7 @@ pub fn warm(stage: &'static str, container: &[u8], compute: bool) -> (bool, Opti
         thread_limited: false,
         limited_twin: OnceLock::new(),
         group: OnceLock::new(),
+        bakes: OnceLock::new(),
     });
     let translated = shader.translated().is_some();
     let made = (translated && compute).then(|| make::warm(vec![shader])).flatten();
@@ -263,6 +270,7 @@ impl Shader {
                     limited_twin: OnceLock::new(),
                     group: OnceLock::new(),
                     walks: OnceLock::new(),
+                    bakes: OnceLock::new(),
                 })
             })
             .clone()
@@ -491,6 +499,21 @@ impl Shader {
     /// at once, when a dispatch first asks.
     fn walks(&self) -> bool {
         *self.walks.get_or_init(|| container_walks(&self.container))
+    }
+
+    /// Whether the program belongs to a pass that makes a texture once and
+    /// keeps it: the decoration bake and blend of a character's head
+    /// (`PS_BakeDecorations_*`, `PS_DecorationBlend_*` and their vertex
+    /// program) and the block compression of what it baked
+    /// (`texturecompression:CS_CompressBC*`). Each container holds one of
+    /// these names, and no other program of the title does.
+    pub(crate) fn bakes(&self) -> bool {
+        *self.bakes.get_or_init(|| {
+            const NAMES: [&[u8]; 3] = [b"BakeDecorations", b"DecorationBlend", b"CS_CompressBC"];
+            NAMES
+                .iter()
+                .any(|name| self.container.windows(name.len()).any(|w| w == *name))
+        })
     }
 }
 

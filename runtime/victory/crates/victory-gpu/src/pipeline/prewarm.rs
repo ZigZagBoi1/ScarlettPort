@@ -47,6 +47,7 @@ fn shader(stage: &'static str, container: &[u8]) -> Arc<Shader> {
         thread_limited: false,
         limited_twin: OnceLock::new(),
         group: OnceLock::new(),
+        bakes: OnceLock::new(),
     })
 }
 

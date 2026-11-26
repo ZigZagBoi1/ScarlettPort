@@ -13,7 +13,10 @@
 //! whose pipeline is not ready is dropped, as an untranslated one is.
 //!
 //! The default budget is half a second per title frame. A pass the title
-//! runs only once and whose pipeline takes longer is lost.
+//! runs only once and whose pipeline takes longer is lost, unless it is
+//! known to run once ([`ScreenPass::Once`]: the lighting tables, the
+//! decoration bakes of clothing and their block compression), which is
+//! waited for up to 12 s whatever the budget.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
@@ -27,7 +30,10 @@ use super::host::{GraphicsState, HostPipeline, TargetFormats};
 enum ScreenPass {
     None,
     Other,
-    LightingTable,
+    /// A pass the title records once and keeps the output of: dropped, the
+    /// output stays empty for the rest of the run. Waited for even when play
+    /// skips other pending pipelines (`VICTORY_PIPELINE_WAIT_MS=0`).
+    Once,
 }
 
 /// What a host pipeline is made from, and the host pipeline once made.
@@ -126,8 +132,13 @@ impl Pending {
         // share this vertex program. The title records them once when it enters the world.
         const LIGHT_TABLE_VERTEX: &str = "ce57291b5a1750ca";
         let light_table = shaders.iter().any(|s| s.stage == "vertex" && s.hash == LIGHT_TABLE_VERTEX);
-        let screen = if light_table {
-            ScreenPass::LightingTable
+        // A character's head textures are baked once when the title makes the character,
+        // during the load screen while hundreds of pipelines are queued. With these passes
+        // dropped, the heads of the cell's characters drew as nothing for the whole run (the
+        // eyes and teeth floated). In ten earlier runs the first decoration bake and the
+        // first BC3 compression were dropped in every one.
+        let screen = if light_table || shaders.iter().any(|s| s.bakes()) {
+            ScreenPass::Once
         } else if screen_workers() && graphics.as_ref().is_some_and(|g| g.screen_pass()) {
             ScreenPass::Other
         } else {
@@ -261,11 +272,27 @@ pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
     if p.made.get().is_none() {
         start(p, REQUESTED);
         let frame = crate::frame::current();
+        let asked = Instant::now();
         if !wait_once() || waits_in(p, frame) {
             wait(p, frame);
         }
+        if p.screen == ScreenPass::Once {
+            once_waited(p, asked.elapsed());
+        }
     }
     p.made.get()?.as_ref()
+}
+
+/// How a pass the title runs once fared when its pipeline was not made at
+/// its use: made within the wait, or dropped (its table or texture then
+/// stays empty for the rest of the run).
+fn once_waited(p: &Pending, waited: Duration) {
+    let ms = waited.as_millis() as u64;
+    match p.made.get() {
+        Some(Some(_)) => tracing::info!(ms, pipeline = ?p.shaders, "a pass the title runs once waited for its pipeline"),
+        Some(None) => tracing::warn!(pipeline = ?p.shaders, "a pass the title runs once has no host pipeline: dropped"),
+        None => tracing::warn!(ms, pipeline = ?p.shaders, "a pass the title runs once was dropped: its pipeline was not made in time"),
+    }
 }
 
 /// Whether a pipeline not made yet is waited for in one title frame at most
@@ -401,7 +428,7 @@ fn shared_budget() -> bool {
 }
 
 fn frame_wait_budget(ordinary: Duration, loading: Duration, compute: bool, screen: ScreenPass) -> Duration {
-    if ordinary.is_zero() && screen != ScreenPass::LightingTable {
+    if ordinary.is_zero() && screen != ScreenPass::Once {
         return Duration::ZERO;
     }
     if screen != ScreenPass::None { return SCREEN_BUDGET; }
@@ -762,9 +789,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lighting_tables_keep_their_wait_when_play_skips_other_pending_pipelines() {
+    fn passes_run_once_keep_their_wait_when_play_skips_other_pending_pipelines() {
         let loading = Duration::from_secs(60);
-        assert_eq!(frame_wait_budget(Duration::ZERO, loading, false, ScreenPass::LightingTable), SCREEN_BUDGET);
+        for compute in [false, true] {
+            assert_eq!(frame_wait_budget(Duration::ZERO, loading, compute, ScreenPass::Once), SCREEN_BUDGET);
+        }
         for compute in [false, true] {
             assert_eq!(frame_wait_budget(Duration::ZERO, loading, compute, ScreenPass::None), Duration::ZERO);
         }
@@ -772,6 +801,19 @@ mod tests {
         let ordinary = Duration::from_millis(500);
         assert_eq!(frame_wait_budget(ordinary, loading, true, ScreenPass::None), LOADING_FRAME_COMPUTE);
         assert_eq!(frame_wait_budget(ordinary, Duration::ZERO, false, ScreenPass::None), ordinary);
+    }
+
+    /// The decoration bake of a character's clothing and the block
+    /// compression of what it baked run once: their pipelines are waited
+    /// for. A program that only reads a baked texture is not.
+    #[test]
+    fn decoration_bakes_and_their_compression_run_once() {
+        let pass = |stage, container: &[u8]| Pending::new(vec![super::super::shader(stage, container)], None).screen;
+        assert!(pass("compute", b"DXBC texturecompression:CS_CompressBC3Mip0 code") == ScreenPass::Once);
+        assert!(pass("pixel", b"DXBC PS_BakeDecorations_1010 code") == ScreenPass::Once);
+        assert!(pass("pixel", b"DXBC PS_DecorationBlend_0000 code") == ScreenPass::Once);
+        assert!(pass("pixel", b"DXBC PS_DeferredPedTexturedNC code") == ScreenPass::None);
+        assert!(pass("compute", b"DXBC CS_ScreenProbes_Temporal code") == ScreenPass::None);
     }
 
     /// A first use queues the pipeline and, within the budget, gets the

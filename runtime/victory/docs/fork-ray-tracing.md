@@ -118,6 +118,15 @@ head-shaped shadow on the wall opposite the cell window.
   `PS_DeferredPedTexturedNC_b1a27fc2_Wrapped` writing RGBA (0, 0, 0, 5).
   In a run where the shirt appeared orange, the same area had RGB values
   around (209, 90, 49). Toggling the rays left the material values unchanged.
+  The normal and material targets differ at the same pixels too, so every map
+  of the shirt is wrong, not only its color. In one of ten later runs the
+  shirt showed the diamond pattern of the window's fence instead of black:
+  the shirt's textures, which it picks by index, showed another texture.
+  Its table textures were the same as in good runs. Two causes were ruled
+  out. With every decoration bake dropped, the shirt stayed orange and the
+  heads went invisible. Refreshing placed textures uploaded before their
+  streamed bytes arrived (`VICTORY_PAGE_WRITES=1`) did not stop it; those
+  were the same three or four small textures in every run.
 - Gameplay measurements cover the opening cell on one GPU.
 - An access to a title page that has no host copy is lost (a read gives zero, a
   store is dropped).

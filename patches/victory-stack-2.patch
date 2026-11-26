@@ -19507,7 +19507,7 @@ index 0000000..4ceedd8
 +    }
 +}
 diff --git a/crates/victory-gpu/src/pipeline.rs b/crates/victory-gpu/src/pipeline.rs
-index 60ed05c..ce92ab0 100644
+index 60ed05c..9695481 100644
 --- a/crates/victory-gpu/src/pipeline.rs
 +++ b/crates/victory-gpu/src/pipeline.rs
 @@ -9,9 +9,12 @@
@@ -19526,7 +19526,7 @@ index 60ed05c..ce92ab0 100644
  //! packet after the header stays zero: titles only copy it inline, which
  //! our null command-list limits keep from running.
  #![allow(clippy::not_unsafe_ptr_arg_deref)]
-@@ -63,6 +66,20 @@ pub(crate) struct Shader {
+@@ -63,6 +66,24 @@ pub(crate) struct Shader {
      container: Vec<u8>,
      #[cfg(windows)]
      translated: OnceLock<Option<Translated>>,
@@ -19544,10 +19544,14 @@ index 60ed05c..ce92ab0 100644
 +    /// A compute program's thread group size, as the console runs it.
 +    #[cfg(windows)]
 +    group: OnceLock<Option<[u32; 3]>>,
++    /// Whether it makes a texture the title bakes once, once looked at
++    /// ([`Shader::bakes`]).
++    #[cfg(windows)]
++    bakes: OnceLock<bool>,
  }
  
  impl std::fmt::Debug for Shader {
-@@ -113,11 +130,45 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
+@@ -113,11 +134,48 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
                  container: bytes.to_vec(),
                  #[cfg(windows)]
                  translated: OnceLock::new(),
@@ -19559,6 +19563,8 @@ index 60ed05c..ce92ab0 100644
 +                limited_twin: OnceLock::new(),
 +                #[cfg(windows)]
 +                group: OnceLock::new(),
++                #[cfg(windows)]
++                bakes: OnceLock::new(),
              })
          })
          .clone()
@@ -19584,6 +19590,7 @@ index 60ed05c..ce92ab0 100644
 +        thread_limited: false,
 +        limited_twin: OnceLock::new(),
 +        group: OnceLock::new(),
++        bakes: OnceLock::new(),
 +    });
 +    let translated = shader.translated().is_some();
 +    let made = (translated && compute).then(|| make::warm(vec![shader])).flatten();
@@ -19593,7 +19600,7 @@ index 60ed05c..ce92ab0 100644
  /// A translated shader and the console resources its code reads.
  #[cfg(windows)]
  pub(crate) struct Translated {
-@@ -126,6 +177,14 @@ pub(crate) struct Translated {
+@@ -126,6 +184,14 @@ pub(crate) struct Translated {
      /// Whether the shader's code can store to buffer memory ([`stores`]);
      /// true when its code is not known.
      pub(crate) stores: bool,
@@ -19608,7 +19615,7 @@ index 60ed05c..ce92ab0 100644
  }
  
  #[cfg(windows)]
-@@ -135,7 +194,7 @@ impl Shader {
+@@ -135,7 +201,7 @@ impl Shader {
      pub(crate) fn translated(&self) -> Option<&Translated> {
          self.translated
              .get_or_init(|| {
@@ -19617,7 +19624,7 @@ index 60ed05c..ce92ab0 100644
                  // `VICTORY_SHADER_SAVE=<dir>`: each shader as the title gave it (`.cdxil`) and as
                  // translated (`.dxil`), by the hash crash reports name it with
                  if let Some(dir) = std::env::var_os("VICTORY_SHADER_SAVE") {
-@@ -144,7 +203,8 @@ impl Shader {
+@@ -144,7 +210,8 @@ impl Shader {
                      let stem = format!("{}.{}", self.hash, self.stage);
                      let _ = std::fs::write(dir.join(format!("{stem}.cdxil")), &self.container);
                      if let Ok(t) = &done {
@@ -19627,7 +19634,7 @@ index 60ed05c..ce92ab0 100644
                      }
                  }
                  if let Ok(t) = &done {
-@@ -152,28 +212,168 @@ impl Shader {
+@@ -152,28 +219,169 @@ impl Shader {
                      KEPT[3].fetch_add(t.host.dxil.len() as u64, std::sync::atomic::Ordering::Relaxed);
                  }
                  match &done {
@@ -19685,6 +19692,7 @@ index 60ed05c..ce92ab0 100644
 +                    limited_twin: OnceLock::new(),
 +                    group: OnceLock::new(),
 +                    walks: OnceLock::new(),
++                    bakes: OnceLock::new(),
 +                })
 +            })
 +            .clone()
@@ -19704,8 +19712,8 @@ index 60ed05c..ce92ab0 100644
 +            })
 +        })
 +    }
-+}
-+
+ }
+ 
 +/// A mesh shader linked to the pixel shader it draws for
 +/// (`victory_shader::emit::link`), when its own translation's outputs pass
 +/// D3D12's 32 KiB: the mesh code with only the outputs the pixel shader
@@ -19714,7 +19722,8 @@ index 60ed05c..ce92ab0 100644
 +/// fits alone (or a link cannot be made: the pipeline is then made from the
 +/// two translations, as before). Mesh variants are kept by (mesh, inputs the
 +/// pixel shader reads), pixel variants by pixel shader.
-+#[cfg(windows)]
+ #[cfg(windows)]
+-fn translate(container: &[u8]) -> Result<Translated, String> {
 +pub(crate) fn linked(ms: &Shader, ps: Option<&Shader>) -> Option<(Arc<Vec<u8>>, Option<Arc<Vec<u8>>>)> {
 +    use victory_shader::emit::{self, link};
 +    type Made = Option<Arc<emit::HostShader>>;
@@ -19792,15 +19801,14 @@ index 60ed05c..ce92ab0 100644
 +        "mesh shader linked to its pixel shader"
 +    );
 +    Some((Arc::new(m.dxil.clone()), p.map(|p| Arc::new(p.dxil.clone()))))
- }
- 
- #[cfg(windows)]
--fn translate(container: &[u8]) -> Result<Translated, String> {
++}
++
++#[cfg(windows)]
 +fn translate(container: &[u8], thread_limited: bool) -> Result<Translated, String> {
      use victory_shader::{Container, FourCC, HwStage};
      // The translation depends on it (a view index past a capped heap).
      crate::descriptor::host::probe_view_limit();
-@@ -182,19 +382,40 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
+@@ -182,19 +390,40 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
          Some(part) => victory_shader::native_programs(part.data).map_err(|e| e.to_string())?,
          None => Vec::new(),
      };
@@ -19844,7 +19852,7 @@ index 60ed05c..ce92ab0 100644
  }
  
  /// The compute pipelines of the console's ray-tracing structure builder
-@@ -263,6 +484,87 @@ pub(crate) fn builder_quarantined(this: This) -> bool {
+@@ -263,6 +492,102 @@ pub(crate) fn builder_quarantined(this: This) -> bool {
      is_builder(this) && *ON.get_or_init(|| std::env::var_os("VICTORY_BVH_QUARANTINE").is_some_and(|v| v == "1"))
  }
  
@@ -19855,6 +19863,21 @@ index 60ed05c..ce92ab0 100644
 +    /// at once, when a dispatch first asks.
 +    fn walks(&self) -> bool {
 +        *self.walks.get_or_init(|| container_walks(&self.container))
++    }
++
++    /// Whether the program belongs to a pass that makes a texture once and
++    /// keeps it: the decoration bake and blend of a character's head
++    /// (`PS_BakeDecorations_*`, `PS_DecorationBlend_*` and their vertex
++    /// program) and the block compression of what it baked
++    /// (`texturecompression:CS_CompressBC*`). Each container holds one of
++    /// these names, and no other program of the title does.
++    pub(crate) fn bakes(&self) -> bool {
++        *self.bakes.get_or_init(|| {
++            const NAMES: [&[u8]; 3] = [b"BakeDecorations", b"DecorationBlend", b"CS_CompressBC"];
++            NAMES
++                .iter()
++                .any(|name| self.container.windows(name.len()).any(|w| w == *name))
++        })
 +    }
 +}
 +
@@ -19932,7 +19955,7 @@ index 60ed05c..ce92ab0 100644
  /// Whether the title's pipeline `this` is one of the structure builder's.
  #[cfg(windows)]
  pub(crate) fn is_builder(this: This) -> bool {
-@@ -279,12 +581,20 @@ pub(crate) fn builder_off(why: &'static str) {
+@@ -279,12 +604,20 @@ pub(crate) fn builder_off(why: &'static str) {
      }
  }
  
@@ -19957,7 +19980,7 @@ index 60ed05c..ce92ab0 100644
          return false;
      }
      let mut b = BUILDER.lock().unwrap_or_else(|e| e.into_inner());
-@@ -294,9 +604,24 @@ pub(crate) fn builder_runs() -> bool {
+@@ -294,9 +627,24 @@ pub(crate) fn builder_runs() -> bool {
      if b.whole {
          return true;
      }
@@ -19983,7 +20006,7 @@ index 60ed05c..ce92ab0 100644
          tracing::warn!(
              missing,
              of = b.pipelines.len(),
-@@ -347,6 +672,10 @@ struct Pipeline {
+@@ -347,6 +695,10 @@ struct Pipeline {
      packet: [u32; 8],
      /// Each used stage's container.
      shaders: Vec<Arc<Shader>>,
@@ -19994,7 +20017,7 @@ index 60ed05c..ce92ab0 100644
      /// Whether a list has bound it yet (its shaders are logged then).
      bound: std::sync::atomic::AtomicBool,
      /// What its host pipeline is made from, and the host pipeline once made
-@@ -356,6 +685,11 @@ struct Pipeline {
+@@ -356,6 +708,11 @@ struct Pipeline {
      /// One of the ray-tracing structure builder's ([`Builder`]).
      #[cfg(windows)]
      builder: bool,
@@ -20006,7 +20029,7 @@ index 60ed05c..ce92ab0 100644
  }
  const _: () = assert!(offset_of!(Pipeline, packet) == 0x10);
  
-@@ -379,7 +713,7 @@ pub(crate) fn bound(this: This) {
+@@ -379,7 +736,7 @@ pub(crate) fn bound(this: This) {
      }
      let frame = crate::frame::current();
      for shader in &p.shaders {
@@ -20015,7 +20038,7 @@ index 60ed05c..ce92ab0 100644
      }
  }
  
-@@ -394,6 +728,62 @@ pub(crate) fn host_pipeline<'a>(this: This) -> Option<&'a host::HostPipeline> {
+@@ -394,6 +751,62 @@ pub(crate) fn host_pipeline<'a>(this: This) -> Option<&'a host::HostPipeline> {
      make::ready(&pipeline(this).host)
  }
  
@@ -20078,7 +20101,7 @@ index 60ed05c..ce92ab0 100644
  /// Host pipelines queued and not made yet.
  #[cfg(windows)]
  pub(crate) fn making() -> u64 {
-@@ -426,13 +816,58 @@ fn parse_skip_hashes(value: &str) -> Vec<String> {
+@@ -426,13 +839,58 @@ fn parse_skip_hashes(value: &str) -> Vec<String> {
          .collect()
  }
  
@@ -20142,7 +20165,7 @@ index 60ed05c..ce92ab0 100644
      if hashes.is_empty() {
          return None;
      }
-@@ -457,6 +892,10 @@ pub(crate) fn note_drop(this: This) {
+@@ -457,6 +915,10 @@ pub(crate) fn note_drop(this: This) {
          let p = pipeline(this);
          skipped_shader(p)
              .map(|hash| format!("skipped shader {hash}"))
@@ -20153,7 +20176,7 @@ index 60ed05c..ce92ab0 100644
              .or_else(|| make::missing(&p.host))
      };
      if let Some(why) = why {
-@@ -497,6 +936,7 @@ fn copy(stage: &'static str, code: &Bytecode) -> Option<Arc<Shader>> {
+@@ -497,6 +959,7 @@ fn copy(stage: &'static str, code: &Bytecode) -> Option<Arc<Shader>> {
  fn hand_out(
      shaders: Vec<Arc<Shader>>,
      #[cfg(windows)] graphics: Option<Box<host::GraphicsState>>,
@@ -20161,7 +20184,7 @@ index 60ed05c..ce92ab0 100644
      iid: *const Iid,
      out: *mut This,
  ) -> HRESULT {
-@@ -521,7 +961,10 @@ fn hand_out(
+@@ -521,7 +984,10 @@ fn hand_out(
          host,
          #[cfg(windows)]
          builder,
@@ -20172,7 +20195,7 @@ index 60ed05c..ce92ab0 100644
          bound: std::sync::atomic::AtomicBool::new(false),
      });
      object::hand_out(PIPELINE, pipeline, iid, &PIPELINE_IIDS, out)
-@@ -544,6 +987,7 @@ pub(crate) extern "system" fn create_graphics(
+@@ -544,6 +1010,7 @@ pub(crate) extern "system" fn create_graphics(
          shaders,
          #[cfg(windows)]
          None,
@@ -20180,7 +20203,7 @@ index 60ed05c..ce92ab0 100644
          iid,
          out,
      )
-@@ -564,6 +1008,7 @@ pub(crate) extern "system" fn create_compute(
+@@ -564,6 +1031,7 @@ pub(crate) extern "system" fn create_compute(
          copy("compute", &desc.stage).into_iter().collect(),
          #[cfg(windows)]
          None,
@@ -20188,7 +20211,7 @@ index 60ed05c..ce92ab0 100644
          iid,
          out,
      )
-@@ -666,6 +1111,7 @@ pub(crate) extern "system" fn create_stream(
+@@ -666,6 +1134,7 @@ pub(crate) extern "system" fn create_stream(
          shaders,
          #[cfg(windows)]
          Some(Box::new(graphics)),
@@ -20196,7 +20219,7 @@ index 60ed05c..ce92ab0 100644
          iid,
          out,
      )
-@@ -688,12 +1134,30 @@ static FUNCTIONS: Table<24> = {
+@@ -688,12 +1157,30 @@ static FUNCTIONS: Table<24> = {
      Table(f)
  };
  
@@ -20227,7 +20250,7 @@ index 60ed05c..ce92ab0 100644
  
  /// Lets the pipeline library's mapped file go from memory when no pipeline
  /// has loaded for a while (`library::trim`); called by the host's sweep.
-@@ -716,6 +1180,14 @@ pub fn use_pipeline_cache(dir: std::path::PathBuf) {
+@@ -716,6 +1203,14 @@ pub fn use_pipeline_cache(dir: std::path::PathBuf) {
      library::use_pipeline_cache(dir);
  }
  
@@ -21509,11 +21532,18 @@ index 7047331..2fef8ca 100644
 +    }
 +}
 diff --git a/crates/victory-gpu/src/pipeline/make.rs b/crates/victory-gpu/src/pipeline/make.rs
-index 9862446..3016bde 100644
+index 9862446..9d13634 100644
 --- a/crates/victory-gpu/src/pipeline/make.rs
 +++ b/crates/victory-gpu/src/pipeline/make.rs
-@@ -16,16 +16,23 @@
- //! runs only once and whose pipeline takes longer is lost.
+@@ -13,19 +13,32 @@
+ //! whose pipeline is not ready is dropped, as an untranslated one is.
+ //!
+ //! The default budget is half a second per title frame. A pass the title
+-//! runs only once and whose pipeline takes longer is lost.
++//! runs only once and whose pipeline takes longer is lost, unless it is
++//! known to run once ([`ScreenPass::Once`]: the lighting tables, the
++//! decoration bakes of clothing and their block compression), which is
++//! waited for up to 12 s whatever the budget.
  
  use std::collections::VecDeque;
 -use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -21529,7 +21559,10 @@ index 9862446..3016bde 100644
 +enum ScreenPass {
 +    None,
 +    Other,
-+    LightingTable,
++    /// A pass the title records once and keeps the output of: dropped, the
++    /// output stays empty for the rest of the run. Waited for even when play
++    /// skips other pending pipelines (`VICTORY_PIPELINE_WAIT_MS=0`).
++    Once,
 +}
  
  /// What a host pipeline is made from, and the host pipeline once made.
@@ -21539,7 +21572,7 @@ index 9862446..3016bde 100644
      pub(crate) graphics: Option<Box<GraphicsState>>,
      queue_state: AtomicU8,
      made: OnceLock<Option<HostPipeline>>,
-@@ -33,6 +40,66 @@ pub(crate) struct Pending {
+@@ -33,6 +46,66 @@ pub(crate) struct Pending {
      /// whether a draw or dispatch has requested it yet.
      key: String,
      used: AtomicBool,
@@ -21606,7 +21639,7 @@ index 9862446..3016bde 100644
  }
  
  // SAFETY: D3D12 objects are free-threaded; the graphics state (whose input
-@@ -42,6 +109,11 @@ unsafe impl Send for Pending {}
+@@ -42,6 +115,11 @@ unsafe impl Send for Pending {}
  unsafe impl Sync for Pending {}
  
  impl Pending {
@@ -21618,7 +21651,7 @@ index 9862446..3016bde 100644
      pub(crate) fn new(shaders: Vec<Arc<Shader>>, graphics: Option<Box<GraphicsState>>) -> Pending {
          let mut key = blake3::Hasher::new();
          for s in &shaders {
-@@ -49,17 +121,41 @@ impl Pending {
+@@ -49,17 +127,46 @@ impl Pending {
              key.update(s.hash.as_bytes());
          }
          key.update(graphics.as_ref().map(|g| g.describe()).unwrap_or_default().as_bytes());
@@ -21627,8 +21660,13 @@ index 9862446..3016bde 100644
 +        // share this vertex program. The title records them once when it enters the world.
 +        const LIGHT_TABLE_VERTEX: &str = "ce57291b5a1750ca";
 +        let light_table = shaders.iter().any(|s| s.stage == "vertex" && s.hash == LIGHT_TABLE_VERTEX);
-+        let screen = if light_table {
-+            ScreenPass::LightingTable
++        // A character's head textures are baked once when the title makes the character,
++        // during the load screen while hundreds of pipelines are queued. With these passes
++        // dropped, the heads of the cell's characters drew as nothing for the whole run (the
++        // eyes and teeth floated). In ten earlier runs the first decoration bake and the
++        // first BC3 compression were dropped in every one.
++        let screen = if light_table || shaders.iter().any(|s| s.bakes()) {
++            ScreenPass::Once
 +        } else if screen_workers() && graphics.as_ref().is_some_and(|g| g.screen_pass()) {
 +            ScreenPass::Other
 +        } else {
@@ -21660,7 +21698,7 @@ index 9862446..3016bde 100644
          self.made
              .get_or_init(|| HostPipeline::new(&self.shaders, self.graphics.as_deref()));
          let (lock, done) = &DONE;
-@@ -74,7 +170,10 @@ impl Pending {
+@@ -74,7 +181,10 @@ impl Pending {
  pub(crate) fn missing(p: &Pending) -> Option<String> {
      match p.made.get() {
          Some(Some(_)) => None,
@@ -21672,7 +21710,7 @@ index 9862446..3016bde 100644
          Some(None) => {
              let failed: Vec<String> = p
                  .shaders
-@@ -96,15 +195,48 @@ static DONE: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
+@@ -96,15 +206,48 @@ static DONE: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
  
  /// Waiting allowed per title frame, over all threads.
  fn wait_budget() -> Duration {
@@ -21728,7 +21766,7 @@ index 9862446..3016bde 100644
  }
  
  /// Pipelines queued and not made yet.
-@@ -118,6 +250,9 @@ pub(crate) fn waiting() -> u64 {
+@@ -118,6 +261,9 @@ pub(crate) fn waiting() -> u64 {
  /// The host pipeline if it is made (or is made within the frame's budget);
  /// queues it on first use.
  pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
@@ -21738,19 +21776,35 @@ index 9862446..3016bde 100644
      // A still-pending pipeline was requested by the title too. Prewarm it
      // on the next launch, even if this run never got to use it.
      if !p.used.load(Ordering::Relaxed) && !p.used.swap(true, Ordering::Relaxed) {
-@@ -125,22 +260,128 @@ pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
+@@ -125,22 +271,144 @@ pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
      }
      if p.made.get().is_none() {
          start(p, REQUESTED);
 -        wait(p, crate::frame::current());
 +        let frame = crate::frame::current();
++        let asked = Instant::now();
 +        if !wait_once() || waits_in(p, frame) {
 +            wait(p, frame);
++        }
++        if p.screen == ScreenPass::Once {
++            once_waited(p, asked.elapsed());
 +        }
      }
      p.made.get()?.as_ref()
  }
  
++/// How a pass the title runs once fared when its pipeline was not made at
++/// its use: made within the wait, or dropped (its table or texture then
++/// stays empty for the rest of the run).
++fn once_waited(p: &Pending, waited: Duration) {
++    let ms = waited.as_millis() as u64;
++    match p.made.get() {
++        Some(Some(_)) => tracing::info!(ms, pipeline = ?p.shaders, "a pass the title runs once waited for its pipeline"),
++        Some(None) => tracing::warn!(pipeline = ?p.shaders, "a pass the title runs once has no host pipeline: dropped"),
++        None => tracing::warn!(ms, pipeline = ?p.shaders, "a pass the title runs once was dropped: its pipeline was not made in time"),
++    }
++}
++
 +/// Whether a pipeline not made yet is waited for in one title frame at most
 +/// (`VICTORY_PIPELINE_WAIT_ONCE=1`; off by default): later frames draw
 +/// without it until a worker has made it, and do not spend their wait
@@ -21869,12 +21923,12 @@ index 9862446..3016bde 100644
          super::library::EARLY.fetch_add(1, Ordering::Relaxed);
          start(p, EARLY);
      }
-@@ -159,18 +400,34 @@ fn shared_budget() -> bool {
+@@ -159,18 +427,34 @@ fn shared_budget() -> bool {
      *ON.get_or_init(|| std::env::var_os("VICTORY_PIPELINE_WAIT_SHARED").is_none_or(|v| v != "0"))
  }
  
 +fn frame_wait_budget(ordinary: Duration, loading: Duration, compute: bool, screen: ScreenPass) -> Duration {
-+    if ordinary.is_zero() && screen != ScreenPass::LightingTable {
++    if ordinary.is_zero() && screen != ScreenPass::Once {
 +        return Duration::ZERO;
 +    }
 +    if screen != ScreenPass::None { return SCREEN_BUDGET; }
@@ -21908,7 +21962,7 @@ index 9862446..3016bde 100644
          if spent.0 != frame {
              *spent = (frame, Duration::ZERO);
          }
-@@ -186,17 +443,21 @@ fn wait(p: &Pending, frame: u64) {
+@@ -186,17 +470,21 @@ fn wait(p: &Pending, frame: u64) {
      let started = Instant::now();
      let (lock, done) = &DONE;
      let mut held = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -21932,7 +21986,7 @@ index 9862446..3016bde 100644
          // A frame that began meanwhile has its own budget.
          if spent.0 == frame {
              if shared {
-@@ -206,6 +467,7 @@ fn wait(p: &Pending, frame: u64) {
+@@ -206,6 +494,7 @@ fn wait(p: &Pending, frame: u64) {
              }
          }
      }
@@ -21940,7 +21994,7 @@ index 9862446..3016bde 100644
      #[cfg(feature = "diagnostics")]
      crate::copystat::add(
          crate::copystat::C::PipelineWaitUs,
-@@ -221,6 +483,9 @@ const MAKING: u8 = 3;
+@@ -221,6 +510,9 @@ const MAKING: u8 = 3;
  struct Queue {
      early: VecDeque<Arc<Pending>>,
      requested: VecDeque<Arc<Pending>>,
@@ -21950,7 +22004,7 @@ index 9862446..3016bde 100644
  }
  
  impl Queue {
-@@ -228,6 +493,7 @@ impl Queue {
+@@ -228,6 +520,7 @@ impl Queue {
          Self {
              early: VecDeque::new(),
              requested: VecDeque::new(),
@@ -21958,7 +22012,7 @@ index 9862446..3016bde 100644
          }
      }
  
-@@ -239,7 +505,9 @@ impl Queue {
+@@ -239,7 +532,9 @@ impl Queue {
              return None;
          }
          p.queue_state.store(priority, Ordering::Relaxed);
@@ -21969,7 +22023,7 @@ index 9862446..3016bde 100644
              self.requested.push_back(p.clone());
          } else {
              self.early.push_back(p.clone());
-@@ -247,17 +515,83 @@ impl Queue {
+@@ -247,17 +542,83 @@ impl Queue {
          Some(prev == NOT_QUEUED)
      }
  
@@ -22060,7 +22114,7 @@ index 9862446..3016bde 100644
  static QUEUE: Mutex<Queue> = Mutex::new(Queue::new());
  static AVAILABLE: Condvar = Condvar::new();
  
-@@ -282,22 +616,96 @@ fn start(p: &Arc<Pending>, priority: u8) {
+@@ -282,22 +643,96 @@ fn start(p: &Arc<Pending>, priority: u8) {
      }
  }
  
@@ -22160,7 +22214,7 @@ index 9862446..3016bde 100644
          for i in 0..workers {
              let spawned = std::thread::Builder::new()
                  .name(format!("victory-pipelines-{i}"))
-@@ -309,7 +717,11 @@ fn workers() -> bool {
+@@ -309,7 +744,11 @@ fn workers() -> bool {
                          let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
                      }
                      loop {
@@ -22173,14 +22227,16 @@ index 9862446..3016bde 100644
                          if WAITING.fetch_sub(1, Ordering::Relaxed) == 1 {
                              drained();
                          } else {
-@@ -349,6 +761,19 @@ fn drained() {
+@@ -349,6 +788,34 @@ fn drained() {
  mod tests {
      use super::*;
  
 +    #[test]
-+    fn lighting_tables_keep_their_wait_when_play_skips_other_pending_pipelines() {
++    fn passes_run_once_keep_their_wait_when_play_skips_other_pending_pipelines() {
 +        let loading = Duration::from_secs(60);
-+        assert_eq!(frame_wait_budget(Duration::ZERO, loading, false, ScreenPass::LightingTable), SCREEN_BUDGET);
++        for compute in [false, true] {
++            assert_eq!(frame_wait_budget(Duration::ZERO, loading, compute, ScreenPass::Once), SCREEN_BUDGET);
++        }
 +        for compute in [false, true] {
 +            assert_eq!(frame_wait_budget(Duration::ZERO, loading, compute, ScreenPass::None), Duration::ZERO);
 +        }
@@ -22190,10 +22246,23 @@ index 9862446..3016bde 100644
 +        assert_eq!(frame_wait_budget(ordinary, Duration::ZERO, false, ScreenPass::None), ordinary);
 +    }
 +
++    /// The decoration bake of a character's clothing and the block
++    /// compression of what it baked run once: their pipelines are waited
++    /// for. A program that only reads a baked texture is not.
++    #[test]
++    fn decoration_bakes_and_their_compression_run_once() {
++        let pass = |stage, container: &[u8]| Pending::new(vec![super::super::shader(stage, container)], None).screen;
++        assert!(pass("compute", b"DXBC texturecompression:CS_CompressBC3Mip0 code") == ScreenPass::Once);
++        assert!(pass("pixel", b"DXBC PS_BakeDecorations_1010 code") == ScreenPass::Once);
++        assert!(pass("pixel", b"DXBC PS_DecorationBlend_0000 code") == ScreenPass::Once);
++        assert!(pass("pixel", b"DXBC PS_DeferredPedTexturedNC code") == ScreenPass::None);
++        assert!(pass("compute", b"DXBC CS_ScreenProbes_Temporal code") == ScreenPass::None);
++    }
++
      /// A first use queues the pipeline and, within the budget, gets the
      /// worker's answer (here: no host pipeline for no shaders).
      #[test]
-@@ -363,6 +788,30 @@ mod tests {
+@@ -363,6 +830,30 @@ mod tests {
          assert!(matches!(p.made.get(), Some(None)));
      }
  
@@ -22224,7 +22293,7 @@ index 9862446..3016bde 100644
      #[test]
      fn pending_pipeline_is_recorded_for_the_next_launch() {
          let mut p = Pending::new(Vec::new(), None);
-@@ -390,10 +839,76 @@ mod tests {
+@@ -390,10 +881,76 @@ mod tests {
          assert_eq!(queue.push(&promoted, REQUESTED), Some(false));
          assert_eq!(queue.push(&promoted, REQUESTED), None);
  
@@ -23434,10 +23503,10 @@ index 0000000..de616e7
 +}
 diff --git a/crates/victory-gpu/src/pipeline/prewarm.rs b/crates/victory-gpu/src/pipeline/prewarm.rs
 new file mode 100644
-index 0000000..b875469
+index 0000000..a97d5dd
 --- /dev/null
 +++ b/crates/victory-gpu/src/pipeline/prewarm.rs
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,148 @@
 +//! First-boot prewarm (`victory prewarm`): what a warm cache's runs translated and compiled,
 +//! named by hashes only, made again from the user's own game files before the first run.
 +//!
@@ -23487,6 +23556,7 @@ index 0000000..b875469
 +        thread_limited: false,
 +        limited_twin: OnceLock::new(),
 +        group: OnceLock::new(),
++        bakes: OnceLock::new(),
 +    })
 +}
 +
