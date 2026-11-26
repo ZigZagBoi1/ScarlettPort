@@ -10,8 +10,6 @@
 #                          shader builds instead of ending itself
 #   SCARLETT_SYNC_PRECISE=1 a submission waits only for the submissions it depends on
 #   SCARLETT_READ_SETTLE_PRECISE=1  read-backs settle on the exact submissions they need
-#   SCARLETT_PRECOMPILED_GRAPHICS=1 graphics pipelines come from the title's precompiled cache,
-#                          prebuilt by `scarlett precompile-graphics` (run once, below; needs a GPU)
 #   SCARLETT_READFIX, SCARLETT_COPY_BACK_ONLY_READBACK, SCARLETT_NARROW_ROOT / _VIEWS / _BVH,
 #                          SCARLETT_PREP_BARRIERS / _TABLES / _REUSE = 1: the other verified speed settings
 #   SCARLETT_RELAY=2        submission relay, form 2 (needed by the two settings above)
@@ -39,9 +37,9 @@ param(
     [switch]$RayTracing,
     # Save slot name (SCARLETT_SAVE_SLOT).
     [string]$SaveSlot = '',
-    # Run `scarlett precompile-graphics` even if it already ran once.
+    # Run `scarlett shaders` even if it already ran once.
     [switch]$Precompile,
-    # Do not run `scarlett precompile-graphics` (pipelines are then built while you play).
+    # Do not run `scarlett shaders` (shaders are then translated while you play).
     [switch]$SkipPrecompile
 )
 $ErrorActionPreference = 'Stop'
@@ -63,8 +61,8 @@ if (-not $KeepWatchdog) { $env:SCARLETT_NO_WATCHDOG = '1' }
 $env:SCARLETT_RELAY = '2'
 $env:SCARLETT_SYNC_PRECISE = '1'
 $env:SCARLETT_READ_SETTLE_PRECISE = '1'
-# The rest of the verified speed settings. The grid fix is in this runtime, so precompiled graphics pipelines are on.
-foreach ($k in 'SCARLETT_PRECOMPILED_GRAPHICS','SCARLETT_READFIX','SCARLETT_COPY_BACK_ONLY_READBACK','SCARLETT_NARROW_ROOT','SCARLETT_NARROW_VIEWS','SCARLETT_NARROW_BVH','SCARLETT_PREP_BARRIERS','SCARLETT_PREP_TABLES','SCARLETT_PREP_REUSE') { Set-Item "env:$k" '1' }
+# The rest of the verified speed settings.
+foreach ($k in 'SCARLETT_READFIX','SCARLETT_COPY_BACK_ONLY_READBACK','SCARLETT_NARROW_ROOT','SCARLETT_NARROW_VIEWS','SCARLETT_NARROW_BVH','SCARLETT_PREP_BARRIERS','SCARLETT_PREP_TABLES','SCARLETT_PREP_REUSE') { Set-Item "env:$k" '1' }
 # fx-cand4: sub-page memory, copies without the extra query, 4 GB card buffers. SCARLETT_REMAP_LAZY is left
 # out: a moving A/B showed it now slows the world down.
 $env:SCARLETT_MEM_SUBPAGE = '1'; $env:SCARLETT_COPY_NOQUERY = '1'; $env:SCARLETT_CARD_BUFFERS_MB = '4096'
@@ -79,16 +77,18 @@ $env:SCARLETT_PRESS_FILE = Join-Path $root 'press.txt'
 Set-Content -Path $env:SCARLETT_PRESS_FILE -Value '' -NoNewline
 if ($AutoInput) { $env:SCARLETT_AUTO_INPUT = '1' }
 
-# Prebuild the title's precompiled graphics pipelines into the pipeline library (needs a GPU; the
-# first run takes a while and is done once, marked by a stamp file).
-$stamp = Join-Path $root 'logs\precompile-graphics.done'
+# Translate every shader in the dump into the shader cache, so the first run does not stop to do
+# it (a few minutes, done once and marked by a stamp file). The engine since 0.4.6 has no
+# `precompile-graphics`; its `warm` only makes pipelines that runs with SCARLETT_PIPELINE_BOOK=1
+# recorded, so this script does not run it.
+$stamp = Join-Path $root 'logs\shaders.done'
 if (-not $SkipPrecompile -and ($Precompile -or -not (Test-Path $stamp))) {
-    Write-Host 'Building the title''s precompiled graphics pipelines (once)...' -ForegroundColor Cyan
+    Write-Host 'Translating the title''s shaders into the cache (once)...' -ForegroundColor Cyan
     $ErrorActionPreference = 'Continue'
-    & $vic precompile-graphics
+    & $vic shaders $Game
     $code = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
-    if ($code -ne 0) { throw "scarlett precompile-graphics failed (exit $code)." }
+    if ($code -ne 0) { throw "scarlett shaders failed (exit $code)." }
     New-Item -ItemType Directory -Force (Split-Path $stamp) | Out-Null
     Set-Content -Path $stamp -Value (Get-Date -Format s)
 }

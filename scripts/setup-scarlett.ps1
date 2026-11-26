@@ -1,7 +1,7 @@
 # Builds the ScarlettPort-based runtime (the build that gets furthest today) and fetches the
 # D3D12 Agility SDK it needs on Windows 10.
 # Usage: .\scripts\setup-scarlett.ps1 [-Game "D:\path	o\your\dump"] [-SkipPrecompile]
-# With -Game it also prebuilds the title's precompiled graphics pipelines (needs a GPU; takes a while).
+# With -Game it also translates the title's shaders into the shader cache (a few minutes).
 param(
     [string]$Game = '',
     [switch]$SkipPrecompile
@@ -40,16 +40,16 @@ if (-not (Test-Path (Join-Path $agility 'D3D12Core.dll'))) {
 
 if ($Game -and -not $SkipPrecompile) {
     if (-not (Test-Path $Game)) { throw "No folder '$Game'." }
-    Write-Host '==> Prebuilding precompiled graphics pipelines (scarlett precompile-graphics)...' -ForegroundColor Cyan
+    Write-Host '==> Translating the title''s shaders into the cache (scarlett shaders)...' -ForegroundColor Cyan
     $env:SCARLETT_GAME_DIR = $Game
     $ErrorActionPreference = 'Continue'
-    & (Join-Path $bin 'scarlett.exe') precompile-graphics
+    & (Join-Path $bin 'scarlett.exe') shaders $Game
     $code = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
-    if ($code -ne 0) { throw "scarlett precompile-graphics failed (exit $code)." }
+    if ($code -ne 0) { throw "scarlett shaders failed (exit $code)." }
     $logs = Join-Path $root 'logs'
     New-Item -ItemType Directory -Force $logs | Out-Null
-    Set-Content -Path (Join-Path $logs 'precompile-graphics.done') -Value (Get-Date -Format s)
+    Set-Content -Path (Join-Path $logs 'shaders.done') -Value (Get-Date -Format s)
 }
 
 Write-Host ''

@@ -44,7 +44,6 @@ Every switch is a `SCARLETT_*` environment variable. The full list is in the sou
 | `SCARLETT_RELAY=1\|2` | submission relay (off in the runtime by default; `play-scarlett.ps1` sets `2`) |
 | `SCARLETT_SYNC_PRECISE=1` | a submission waits only for the submissions it depends on. Set by `play-scarlett.ps1` |
 | `SCARLETT_READ_SETTLE_PRECISE=1` | read-backs settle on the exact submissions they need (needs the relay). Set by `play-scarlett.ps1` |
-| `SCARLETT_PRECOMPILED_GRAPHICS=1` | make graphics pipelines from the title's precompiled cache, prebuilt with `scarlett precompile-graphics` (25,200 of 25,471 made). Set by `play-scarlett.ps1`, which runs the precompile once; `setup-scarlett.ps1 -Game <dump>` can do it too |
 | `SCARLETT_PIPELINE_WAIT_MS=0` | do not hold a draw back for a pipeline build. Set by `play-scarlett.ps1` |
 | `SCARLETT_SHADER_OPT=on` | opt-in shader clean-up passes (off by default; they can drop walls and roofs on some cards) |
 | `SCARLETT_FAIR_DUE=0\|1\|2` | order of the texture upload queue. `2` (default): textures showing less than the title holds first, then the longest due; `1`: plain turns; `0`: the older order |
