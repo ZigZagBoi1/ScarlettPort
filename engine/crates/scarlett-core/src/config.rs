@@ -26,8 +26,9 @@ pub struct Config {
     pub source: Option<PathBuf>,
 }
 
+/// Other sections are ignored: the ScarlettPort launcher writes `[display]`, `[game]` and
+/// `[pace]` for older runtimes into the same file. Keys inside `[paths]` stay checked.
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct FileConfig {
     #[serde(default)]
     paths: FilePaths,
@@ -267,6 +268,14 @@ mod tests {
         let text = include_str!("../../../scarlett.example.toml");
         let parsed: FileConfig = toml::from_str(text).unwrap();
         assert!(parsed.paths.game_dir.is_some());
+    }
+
+    #[test]
+    fn launcher_sections_are_ignored_and_paths_stay_checked() {
+        let text = "[display]\nhdr = false\n\n[game]\nrumble = true\n\n[pace]\npace = false\n\n[paths]\ngame_dir = \"D:/game\"\n";
+        let parsed: FileConfig = toml::from_str(text).unwrap();
+        assert_eq!(parsed.paths.game_dir, Some(PathBuf::from("D:/game")));
+        assert!(toml::from_str::<FileConfig>("[paths]\ngame_folder = \"D:/game\"\n").is_err());
     }
 
     #[test]

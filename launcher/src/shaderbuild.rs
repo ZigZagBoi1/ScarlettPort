@@ -3,7 +3,9 @@
 //! World engine: `scarlett warm` translates every shader into the cache and makes the compute
 //! pipelines (about 3 min); when the runtime uses them (`engine::PRECOMPILED_GRAPHICS`),
 //! `scarlett precompile-graphics` then makes the title's graphics pipelines in chunks of
-//! `engine::CHUNK` records, each chunk saved when it ends.
+//! `engine::CHUNK` records, each chunk saved when it ends. Runtimes since 0.4.6 have other
+//! commands (found from their `--help`): `scarlett shaders <game>` translates, then
+//! `scarlett warm` makes the pipelines earlier runs recorded.
 //! Classic engine: `xcl shaders <pack> --precompile --pipelines --only cs`, which already skips
 //! what is in its cache.
 //!
@@ -194,7 +196,24 @@ fn send(job: &Job, p: &Progress) {
     let _ = job.tx.send(Message::Build(p.clone()));
 }
 
+/// Whether the runtime has the commands before 0.4.6 (`warm <game>` translating, and
+/// `precompile-graphics`). The 0.4.6 runtime translates with `shaders` and its `warm` makes the
+/// pipelines earlier runs recorded.
+fn older_commands(job: &Job) -> bool {
+    let mut cmd = Command::new(&job.exe);
+    cmd.current_dir(&job.runtime).arg("--help").stdin(Stdio::null()).stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    cmd.output().map_or(true, |o| String::from_utf8_lossy(&o.stdout).contains("precompile-graphics"))
+}
+
 fn world(job: &Job) -> Result<String, String> {
+    if !older_commands(job) {
+        return world_split(job);
+    }
     let path = state_path(&job.cache_dir, true);
     let mut st = State::load(&path, &job.hash);
     let phases = if engine::PRECOMPILED_GRAPHICS { 2 } else { 1 };
@@ -321,6 +340,125 @@ fn world(job: &Job) -> Result<String, String> {
         format!("Shaders built in {}.", flow::duration(p.started.elapsed().as_secs()))
     } else {
         format!("Shaders built in {}; {} pipeline chunks compile in game.", flow::duration(p.started.elapsed().as_secs()), st.on_demand.len())
+    })
+}
+
+/// The 0.4.6 runtime: `scarlett shaders <game>` translates every shader into the cache, then
+/// `scarlett warm` makes the host pipelines of those earlier runs recorded. Both skip what is
+/// already done, so a stop resumes; `warm` prints only every 1,000 pipelines, so the slow-step
+/// stop does not apply to it.
+fn world_split(job: &Job) -> Result<String, String> {
+    let path = state_path(&job.cache_dir, true);
+    let mut st = State::load(&path, &job.hash);
+    let share = 0.8;
+    let now = Instant::now();
+    let mut p = Progress {
+        phase: 1,
+        phases: 2,
+        name: "Translating shaders",
+        done: 0,
+        total: engine::SHADERS_TOTAL,
+        current: String::new(),
+        current_since: now,
+        last_output: now,
+        overall: 0.,
+        on_demand: 0,
+        started: now,
+        jobs: 1,
+    };
+    let base = |c: &mut Command| {
+        c.current_dir(&job.runtime);
+        for (k, v) in &job.env {
+            crate::runtime::set_switch(c, k, v);
+        }
+    };
+    let mut untranslated = 0;
+    if st.warm {
+        log(&job.tx, "Shaders already translated for this engine build: skipping `scarlett shaders`.");
+    } else {
+        p.jobs = engine::jobs(cores(), free_mb(), 512);
+        let mut cmd = Command::new(&job.exe);
+        base(&mut cmd);
+        cmd.args(engine::shaders_args(&job.game, p.jobs));
+        log(&job.tx, format!("> scarlett shaders \"{}\" --jobs {}  (phase 1 of 2: translate every shader, a few minutes; already translated ones are skipped)", job.game.display(), p.jobs));
+        p.current = "translating (the engine reports every 1,000 shaders)".into();
+        send(job, &p);
+        let mut tick = Instant::now();
+        let out = run(cmd, job, None, |l| {
+            if let Some(n) = engine::parse_shaders(l) {
+                p.done = n;
+                p.total = p.total.max(n);
+                p.current = format!("translating shaders {}–{}", n, (n + 1000).min(p.total));
+                p.current_since = Instant::now();
+            }
+            if let Some(f) = engine::parse_shaders_failed(l) {
+                untranslated = f;
+            }
+            if !l.is_empty() {
+                p.last_output = Instant::now();
+            }
+            p.overall = share * p.done as f32 / p.total.max(1) as f32;
+            if !l.is_empty() || tick.elapsed() >= Duration::from_secs(1) {
+                tick = Instant::now();
+                send(job, &p);
+            }
+        })?;
+        match out {
+            Outcome::Exit(Some(0)) => {
+                st.warm = true;
+                st.save(&path);
+            }
+            Outcome::Exit(c) => return Err(format!("scarlett shaders failed (exit code {c:?}); see Logs")),
+            Outcome::Stopped | Outcome::Idle => return Err("Stopped. Press Build shaders again to resume.".into()),
+        }
+    }
+    p.phase = 2;
+    p.name = "Preparing pipelines";
+    p.done = 0;
+    p.total = 0;
+    p.jobs = engine::jobs(cores(), free_mb(), 1024);
+    p.current = "reading the pipelines earlier runs recorded".into();
+    p.current_since = Instant::now();
+    p.overall = share;
+    let mut cmd = Command::new(&job.exe);
+    base(&mut cmd);
+    cmd.args(engine::warm_book_args(p.jobs));
+    log(&job.tx, format!("> scarlett warm --jobs {}  (phase 2 of 2: makes the pipelines earlier runs recorded, at low priority; none on a first build)", p.jobs));
+    send(job, &p);
+    let mut tick = Instant::now();
+    let mut planned = None;
+    let out = run(cmd, job, None, |l| {
+        if let Some(t) = engine::parse_warm_plan(l) {
+            planned = Some(t);
+            p.total = t;
+            p.current = if t == 0 { "no recorded pipelines to make".into() } else { format!("{t} pipelines (the engine reports every 1,000)") };
+            p.current_since = Instant::now();
+        }
+        if let Some(n) = engine::parse_warm_made(l) {
+            p.done = n.min(p.total);
+        }
+        if !l.is_empty() {
+            p.last_output = Instant::now();
+        }
+        p.overall = share + (1. - share) * if p.total == 0 { 0. } else { p.done as f32 / p.total as f32 };
+        if !l.is_empty() || tick.elapsed() >= Duration::from_secs(1) {
+            tick = Instant::now();
+            send(job, &p);
+        }
+    })?;
+    match out {
+        Outcome::Exit(Some(0)) => {}
+        // The 0.4.6 runtime's warm fails after "0 to make" when no run recorded pipelines (its
+        // pipelines folder is missing); nothing was left undone.
+        Outcome::Exit(_) if planned == Some(0) => {}
+        Outcome::Exit(c) => return Err(format!("scarlett warm failed (exit code {c:?}); see Logs")),
+        Outcome::Stopped | Outcome::Idle => return Err("Stopped. Press Build shaders again to resume.".into()),
+    }
+    let took = flow::duration(p.started.elapsed().as_secs());
+    Ok(if untranslated == 0 {
+        format!("Shaders built in {took}.")
+    } else {
+        format!("Shaders built in {took}; {untranslated} do not translate yet (see Logs).")
     })
 }
 

@@ -63,6 +63,47 @@ pub fn warm_args(game: &Path, jobs: usize) -> Vec<String> {
     vec!["warm".into(), game.display().to_string(), "--jobs".into(), jobs.max(1).to_string()]
 }
 
+/// Distinct shader programs `scarlett shaders` translates (runtimes since 0.4.6; refined as it runs).
+pub const SHADERS_TOTAL: u64 = 26_084;
+
+/// `shaders "<game>" --jobs N`: the translation step of runtimes since 0.4.6 (its `warm` no longer
+/// translates).
+pub fn shaders_args(game: &Path, jobs: usize) -> Vec<String> {
+    vec!["shaders".into(), game.display().to_string(), "--jobs".into(), jobs.max(1).to_string()]
+}
+
+/// `warm --jobs N`: runtimes since 0.4.6 make the pipelines earlier runs recorded
+/// (`SCARLETT_PIPELINE_BOOK=1`); the game and the cache come from the environment.
+pub fn warm_book_args(jobs: usize) -> Vec<String> {
+    vec!["warm".into(), "--jobs".into(), jobs.max(1).to_string()]
+}
+
+/// `scarlett shaders` progress and summary: `4000 shaders in the cache, 37 s` -> 4000.
+pub fn parse_shaders(line: &str) -> Option<u64> {
+    line.trim().split_once(" shaders in the cache")?.0.trim().parse().ok()
+}
+
+/// `scarlett shaders`'s summary: `26084 shaders in the cache, 3 do not translate, 171 s` -> 3.
+pub fn parse_shaders_failed(line: &str) -> Option<u64> {
+    let (_, rest) = line.split_once(" shaders in the cache, ")?;
+    rest.split_once(" do not translate")?.0.trim().parse().ok()
+}
+
+/// `scarlett warm`'s plan: `120 pipelines known, 20 made before (f), 0 bad; 100 to make, 8 processes` -> 100.
+pub fn parse_warm_plan(line: &str) -> Option<u64> {
+    let (_, rest) = line.split_once(" bad; ")?;
+    rest.split_once(" to make")?.0.trim().parse().ok()
+}
+
+/// `scarlett warm` progress: `1000 of 5200, 40 s` -> 1000.
+pub fn parse_warm_made(line: &str) -> Option<u64> {
+    let (n, rest) = line.trim().split_once(" of ")?;
+    if !rest.ends_with(" s") {
+        return None;
+    }
+    n.parse().ok()
+}
+
 /// `precompile-graphics "<shaders.rpf>" --jobs N --skip S --limit L`.
 pub fn graphics_args(game: &Path, jobs: usize, skip: u64, limit: u64) -> Vec<String> {
     vec![
@@ -222,6 +263,22 @@ mod tests {
         assert_eq!(a[0], "precompile-graphics");
         assert!(a[1].ends_with("shaders.rpf"));
         assert_eq!(&a[2..], ["--jobs", "4", "--skip", "2000", "--limit", "1000"]);
+    }
+
+    #[test]
+    fn split_build_commands_and_output() {
+        let g = PathBuf::from("D:/game");
+        assert_eq!(shaders_args(&g, 0), ["shaders", "D:/game", "--jobs", "1"]);
+        assert_eq!(warm_book_args(6), ["warm", "--jobs", "6"]);
+        assert_eq!(parse_shaders("4000 shaders in the cache, 37 s"), Some(4000));
+        let end = "26084 shaders in the cache, 3 do not translate, 171 s";
+        assert_eq!(parse_shaders(end), Some(26084));
+        assert_eq!(parse_shaders_failed(end), Some(3));
+        assert_eq!(parse_shaders_failed("4000 shaders in the cache, 37 s"), None);
+        assert_eq!(parse_warm_plan("120 pipelines known, 20 made before (ab12), 0 bad; 100 to make, 8 processes"), Some(100));
+        assert_eq!(parse_warm_made("1000 of 5200, 40 s"), Some(1000));
+        assert_eq!(parse_warm_made("pipeline 7 0123abcd: compiler ended of itself s"), None);
+        assert_eq!(parse_warm_made("100 made in 12 s (0 have no host pipeline, 0 ended their process); ms each: median 1.0"), None);
     }
 
     #[test]
