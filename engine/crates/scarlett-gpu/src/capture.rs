@@ -890,8 +890,9 @@ const HEADER: &str = "frame,after_anchor,wall_ms,anchor_ms,frame_ms,drawn,saved,
 /// A line of `frames.csv`; `None` is an empty field. `frame` is the number
 /// of `frame-<n>.png`; `after_anchor` and `anchor_ms` count frames and
 /// milliseconds from the anchor ([`Log::step`]), `wall_ms` from the first
-/// present, `frame_ms` (a pause or a stall is a long one) and `drawn` (host
-/// draws) from the present before.
+/// line and `frame_ms` from the line before (a pause or a stall is a long
+/// one), at the time the frame is shown ([`log_frame`]); `drawn` the host
+/// draws from the title's present before to this frame's.
 #[derive(Debug, PartialEq)]
 struct Row {
     frame: u64,
@@ -967,12 +968,13 @@ impl Log {
         }
     }
 
-    /// The line of the present of `frame` at `now`: `drawn` the host draws
-    /// so far, `world` the frame `SCARLETT_CAPTURE_WORLD` counts from (if
-    /// found), `levels` the frame's probe levels, `saved` whether its
-    /// picture was written. The anchor is the first present of 500 draws or
-    /// more, the same rule as [`frame_drew`]'s: `world` when that switch
-    /// has found it, else found here, so the log needs no saved frames.
+    /// The line of `frame`, shown at `now`: `drawn` the host draws so far at
+    /// its present (as given to [`frame_drew`]), `world` the frame
+    /// `SCARLETT_CAPTURE_WORLD` counts from (if found, maybe not shown yet),
+    /// `levels` the frame's probe levels, `saved` whether its picture was
+    /// written. The anchor is the first frame of 500 draws or more, the same
+    /// rule as [`frame_drew`]'s: `world` when that switch has found it (at
+    /// that frame's line), else found here, so the log needs no saved frames.
     fn step(
         &mut self,
         frame: u64,
@@ -985,7 +987,13 @@ impl Log {
         let ms = |d: std::time::Duration| d.as_micros() as f64 / 1000.0;
         let wall_ms = ms(now.saturating_duration_since(self.start));
         let draws = drawn.saturating_sub(self.drawn);
-        if self.anchor.is_none() && (world.is_some() || draws >= 500) {
+        // (With our thread writing the lines, the title may have found the
+        // world frame a frame or more on: it waits for that frame's line.)
+        let latch = match world {
+            Some(w) => w <= frame,
+            None => draws >= 500,
+        };
+        if self.anchor.is_none() && latch {
             self.anchor = Some((world.unwrap_or(frame), wall_ms));
         }
         let cut = match (self.probed, levels) {
@@ -1014,9 +1022,13 @@ impl Log {
 
 /// With `SCARLETT_CAPTURE_LOG=1`: `frame`'s line of `frames.csv`, written at
 /// once. Frame times are in `SCARLETT_FRAME_LOG` too; this log is keyed to
-/// the saved frames, the anchor and the probe. With
-/// `SCARLETT_ASYNC_PRESENT=1` it is written at the title's present.
-pub(crate) fn log_frame(frame: u64) {
+/// the saved frames, the anchor and the probe. Written once the frame is
+/// shown, by the thread that shows it: the title's at its present, or ours
+/// with submissions sent by our thread (`SCARLETT_ASYNC_SUBMIT=1` or
+/// `SCARLETT_THIN=1`), after the title's present; `wall_ms` and `frame_ms`
+/// are times of showing. `drawn`: the host draws so far at the title's
+/// present of it (as given to [`frame_drew`]).
+pub(crate) fn log_frame(frame: u64, drawn: u64) {
     use std::io::Write;
     struct Out {
         file: std::fs::File,
@@ -1053,7 +1065,7 @@ pub(crate) fn log_frame(frame: u64) {
     let line = row(&out.log.step(
         frame,
         now,
-        DRAWN.load(Relaxed),
+        drawn,
         (first != u64::MAX).then_some(first),
         levels,
         SAVED.load(Relaxed) == frame,
@@ -1191,13 +1203,28 @@ mod tests {
         }
     }
 
-    /// `SCARLETT_CAPTURE_WORLD`'s frame, when known, is the anchor.
+    /// `SCARLETT_CAPTURE_WORLD`'s frame, when known, is the anchor; with our
+    /// thread writing the lines as it shows frames, the title may have found
+    /// it a frame or more on, and the anchor waits for that frame's line.
     #[test]
     fn frame_log_takes_the_world_frame_as_its_anchor() {
         let start = std::time::Instant::now();
         let mut log = super::Log::new(start);
         let r = log.step(9, start, 10, Some(9), None, false);
         assert_eq!((r.after_anchor, r.anchor_ms), (Some(0), Some(0.0)));
+        let at = |ms| start + std::time::Duration::from_millis(ms);
+        // (frame, at ms, draws so far) and the line's (after_anchor, anchor_ms).
+        let few = [(7, 0, 70), (8, 33, 80), (9, 66, 90), (10, 100, 100)];
+        // 500 draws or more a line before the world frame: still that frame.
+        let many = [(7, 0, 70), (8, 33, 700), (9, 66, 720), (10, 100, 730)];
+        let want = [None, None, Some((0, 0.0)), Some((1, 34.0))];
+        for steps in [few, many] {
+            let mut log = super::Log::new(start);
+            for ((frame, ms, drawn), want) in steps.into_iter().zip(want) {
+                let r = log.step(frame, at(ms), drawn, Some(9), None, false);
+                assert_eq!(r.after_anchor.zip(r.anchor_ms), want, "frame {frame}");
+            }
+        }
     }
 
     /// Off unless asked for: test runs set neither switch.

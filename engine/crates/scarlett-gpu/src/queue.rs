@@ -967,9 +967,12 @@ extern "system" fn present(
             tracing::info!(hits, misses, "shaders from the cache and translated so far");
         }
     }
+    // (Host draws so far at the title's present, for `frames.csv` too.)
+    #[cfg(all(windows, feature = "diagnostics"))]
+    let drawn = crate::draw::drawn();
     #[cfg(all(windows, feature = "diagnostics"))]
     {
-        crate::capture::frame_drew(frame, crate::draw::drawn());
+        crate::capture::frame_drew(frame, drawn);
         if crate::capture::listed(frame) {
             before_sync();
             crate::capture::dump_targets(frame);
@@ -1010,8 +1013,14 @@ extern "system" fn present(
             this,
             texture.map(|(_, copy, state)| (copy, state)),
             overlay.map(|(_, copy, state)| (copy, state)),
-            Shown { frame, resource },
+            Shown {
+                frame,
+                resource,
+                #[cfg(feature = "diagnostics")]
+                drawn,
+            },
         );
+        // (Its line of `frames.csv` is written by our thread as it shows it.)
         called.end();
         #[cfg(feature = "diagnostics")]
         frame_ends();
@@ -1046,7 +1055,12 @@ extern "system" fn present(
             texture,
             state,
             overlay.as_ref().map(|(_, tex, st)| (*tex, *st)),
-            Shown { frame, resource: resource as usize },
+            Shown {
+                frame,
+                resource: resource as usize,
+                #[cfg(feature = "diagnostics")]
+                drawn,
+            },
         );
         crate::resource::host_transition(resource, state);
         if let Some((over_res, _, over_state)) = overlay {
@@ -1056,7 +1070,7 @@ extern "system" fn present(
     }
     // After the frame is shown: its probed levels are known by now.
     #[cfg(all(windows, feature = "diagnostics"))]
-    crate::capture::log_frame(frame);
+    crate::capture::log_frame(frame, drawn);
     #[cfg(not(windows))]
     let _ = (planes, plane_parameters);
     called.end();
@@ -1083,6 +1097,9 @@ fn frame_ends() {
 struct Shown {
     frame: u64,
     resource: usize,
+    /// Host draws so far at the title's present.
+    #[cfg(feature = "diagnostics")]
+    drawn: u64,
 }
 
 /// Shows `texture` (with optional `overlay` plane blended over it) in our window.

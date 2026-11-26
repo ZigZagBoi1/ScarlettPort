@@ -584,6 +584,10 @@ impl Work for Job {
                     });
                     super::show_planes(&texture.texture, state, over, shown);
                 }
+                // Its line of `frames.csv`, now that it is shown (its saved
+                // picture and probe were set by this thread just now).
+                #[cfg(feature = "diagnostics")]
+                crate::capture::log_frame(shown.frame, shown.drawn);
                 QUEUED.fetch_sub(1, Relaxed);
             }
         }
