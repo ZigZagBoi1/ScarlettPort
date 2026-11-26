@@ -1233,6 +1233,7 @@ fn translated_compute_matches_pc() {
             .map(|v| match *v {
                 View::RawUav(_) => 1,
                 View::HalfUav(_) => 8,
+                View::Cbv(_) => super::SLOT_CONSTANTS,
                 View::Buffer { stride, .. } => match stride {
                     Stride::Raw => 1,
                     Stride::Typed => 16,

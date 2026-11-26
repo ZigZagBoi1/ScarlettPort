@@ -1181,8 +1181,18 @@ fn view_stride_and_kind(view: &View) -> (Option<u32>, u32) {
 
 /// Packed [`scarlett_shader::emit::SLOT_STRIDES`] word for `view`.
 fn view_stride_word(view: &View) -> u32 {
-    let (stride, kind) = view_stride_and_kind(view);
-    stride.unwrap_or(0) | kind
+    stride_word(view, view_stride_and_kind(view))
+}
+
+/// The [`scarlett_shader::emit::SLOT_STRIDES`] word of a slot that holds
+/// `view`, whose stride and kind are `found` ([`view_stride_and_kind`]): a
+/// buffer view's, the mark of a constant buffer view
+/// ([`scarlett_shader::emit::SLOT_CONSTANTS`]), or 0.
+fn stride_word(view: &View, (stride, kind): (Option<u32>, u32)) -> u32 {
+    match view {
+        View::Constant(..) => scarlett_shader::emit::SLOT_CONSTANTS,
+        _ => stride.unwrap_or(0) | kind,
+    }
 }
 
 #[cfg(test)]
@@ -2745,8 +2755,9 @@ impl HostHeap {
                 textures.remove(slot);
             }
         }
-        let (stride, kind) = view.map_or((None, 0), view_stride_and_kind);
-        self.write_stride(index, stride.unwrap_or(0) | kind);
+        let found = view.map_or((None, 0), view_stride_and_kind);
+        let stride = found.0;
+        self.write_stride(index, view.map_or(0, |view| stride_word(view, found)));
         let was = if stride.is_some() {
             self.buffers.put(index);
             true
@@ -3095,7 +3106,7 @@ impl HostHeap {
             unsafe { host.device.CreateShaderResourceView(buffer, Some(&raw), twin) };
         }
         self.twin_made(index, twin.is_some());
-        self.write_stride(index, 0);
+        self.write_stride(index, scarlett_shader::emit::SLOT_CONSTANTS);
         // After the descriptor: what it showed is let go when nothing shows
         // it any more.
         self.keep(index, holds.then(|| buffer.clone()));
@@ -5031,6 +5042,24 @@ mod tests {
         assert_eq!(view_stride(&uav(12, 0, 0)), Some(8));
     }
 
+    /// The table of strides marks constant buffer views apart from buffer
+    /// views and from slots that hold neither.
+    #[test]
+    fn slot_words_tell_constant_buffers_from_buffers_and_the_rest() {
+        use scarlett_shader::emit::SLOT_CONSTANTS;
+        assert_eq!(view_stride_word(&View::Constant(0x1_0000, 256)), SLOT_CONSTANTS);
+        // A structured buffer view of 16-byte elements: its stride.
+        let mut buffer = [0u32; 10];
+        buffer[1] = D3D12_SRV_DIMENSION_BUFFER.0 as u32;
+        buffer[7] = 16;
+        assert_eq!(view_stride_word(&View::Shader(0, Some(buffer))), 16);
+        // A texture view and a sampler: nothing.
+        let mut texture = buffer;
+        texture[1] = D3D12_SRV_DIMENSION_TEXTURE2D.0 as u32;
+        assert_eq!(view_stride_word(&View::Shader(0, Some(texture))), 0);
+        assert_eq!(view_stride_word(&View::Sampler([0; 13])), 0);
+    }
+
     /// What may stand for a texture that is not there yet: one of its kind in
     /// another place or size; another one only if asked; nothing a shader
     /// cannot read in its place.
@@ -5768,6 +5797,22 @@ mod tests {
         assert_eq!(read_stride(s0 + 3), 0);
         assert!(heap.make_listed(0x1234, rec, s0 + 3).is_some());
         assert_eq!(read_stride(s0 + 3), 8 | VIEW_INTEGER);
+
+        // A constant buffer view of host memory: the mark, not a stride.
+        use scarlett_shader::emit::SLOT_CONSTANTS;
+        let (buffer, _) = host().unwrap().upload_buffer(1 << 16).expect("an upload buffer");
+        // SAFETY: a live upload buffer.
+        heap.constant_at(s0 + 1, &buffer, unsafe { buffer.GetGPUVirtualAddress() }, 256);
+        assert_eq!(read_stride(s0 + 1), SLOT_CONSTANTS);
+
+        // A title slot: a constant buffer view marks it, a buffer view
+        // gives its stride, and no view gives 0.
+        heap.note_buffer(0, Some(&View::Constant(0x1_0000, 256)), false);
+        assert_eq!(read_stride(0), SLOT_CONSTANTS);
+        heap.note_buffer(0, Some(&placed_typed(true, 12, 64)), false);
+        assert_eq!(read_stride(0), 8 | VIEW_INTEGER);
+        heap.note_buffer(0, None, false);
+        assert_eq!(read_stride(0), 0);
     }
 }
 

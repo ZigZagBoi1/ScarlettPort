@@ -2136,6 +2136,170 @@ fn build_table_typed_cs(body: &[u32], used: Vec<UsedResource>) -> HostShader {
     shader
 }
 
+/// Lowers the one-thread program `words` with constants in `s0`..`s3` and
+/// the resource heap itself in `s4` (`ResourceHeap`: bindless, no
+/// used-resource entry).
+fn lower_heap_cs(words: &[u32]) -> HostShader {
+    let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let native = NativeProgram {
+        stage: HwStage::Cs,
+        wave64: false,
+        vgprs: 8,
+        layout: vec![
+            RootParam {
+                root: RootType::Constants,
+                table_offset_dwords: 0,
+                sgprs: 4,
+                base_register: 0,
+                user_data: 0,
+                slot: 0,
+            },
+            RootParam {
+                root: RootType::ResourceHeap,
+                table_offset_dwords: 0,
+                sgprs: 1,
+                base_register: 0,
+                user_data: 4,
+                slot: 1,
+            },
+        ],
+        used: Vec::new(),
+        io: StageIo::Cs(ComputeIo {
+            rsrc2: 5 << 1, // 5 user SGPRs: s0..s4
+            threads: [1, 1, 1],
+        }),
+        code,
+    };
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+    let st = structure::structure(&p).expect("structure");
+    let res =
+        resource::track(&p, &native.layout, native.stage, Some(&st)).expect("resource::track");
+    let io = io::raise(&p, &native).expect("io::raise");
+    let lowered = lower::lower(&lower::Parts {
+        native: &native,
+        p: &p,
+        st: &st,
+        io: &io,
+        res: &res,
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        prims: Vec::new(),
+        mesh_stride: 0,
+    })
+    .expect("lower");
+    let shader = HostShader {
+        stage: HwStage::Cs,
+        dxil: lowered.dxil,
+        user_data: lowered.user_data,
+        samplers: lowered.samplers,
+        static_samplers: Vec::new(),
+        root_cbvs: lowered.root_cbvs,
+        root_srvs: lowered.root_srvs,
+        root_uavs: lowered.root_uavs,
+        root_indexed_views: res.root_indexed_views,
+    };
+    if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        let mut copy = shader.dxil.clone();
+        v.validate(&mut copy).expect("DXIL validation failed");
+    }
+    shader
+}
+
+/// On the hardware GPU and WARP, a scalar buffer load from a slot picked by
+/// a computed index reads what the host's table says the slot holds: a
+/// buffer view (its stride) as raw bytes, a constant buffer view
+/// (`SLOT_CONSTANTS`) as one, and zeros from any other slot (0), here
+/// a constant buffer the table does not mark, which must not be read.
+#[test]
+fn a_scalar_load_from_a_picked_slot_reads_what_the_table_says_it_holds() {
+    use super::shader::{SLOT_CONSTANTS, SLOT_STRIDES};
+    let words = [
+        s_mov_b32(5, 0x80),     // s5 = 0
+        sop2(0x1E, 6, 0, 0x85), // s_lshl_b32 s6, s0, 5: the slot read
+        sop2(0x1E, 7, 1, 0x85), // s_lshl_b32 s7, s1, 5: the slot written
+        // s_load_dwordx4 s[8:11], s[4:5], s6; s[12:15], s[4:5], s7
+        s_load_dwordx4(8, 4)[0],
+        6 << 25,
+        s_load_dwordx4(12, 4)[0],
+        7 << 25,
+        0xF420_0404, // s_buffer_load_dword s16, s[8:11], null
+        0xFA00_0000,
+        vop1(0x001, 0, sgpr(16)), // v_mov_b32 v0, s16
+        buffer_store_dword(0, 12, 0)[0],
+        buffer_store_dword(0, 12, 0)[1],
+        S_ENDPGM,
+    ];
+    let shader = lower_heap_cs(&words);
+    assert!(shader.root_srvs.contains(&SLOT_STRIDES));
+    // The tables by root SRV, in the order their root parameters have.
+    let mut tables: Vec<(u8, Vec<u32>)> = shader
+        .root_srvs
+        .iter()
+        .map(|&slot| match slot {
+            SLOT_STRIDES => (slot, vec![1, SLOT_CONSTANTS, 0, 1]),
+            other => panic!("unexpected root SRV {other}"),
+        })
+        .collect();
+    tables.sort_unstable();
+    // (slot, what the load gives)
+    let cases = [(0u32, 11u32), (1, 22), (2, 0)];
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ran = 0;
+    for (label, warp) in [("hardware", false), ("warp", true)] {
+        let Ok(host) = Host::new(warp) else {
+            eprintln!("no SM 6.6 {label} device; skipped");
+            continue;
+        };
+        let (root, pso) = host
+            .compute_pipeline(&shader)
+            .unwrap_or_else(|e| panic!("{label}: compute_pipeline failed: {e}"));
+        for (slot, want) in cases {
+            let mut ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
+            for u in &shader.user_data {
+                ud[u.index as usize] = match (u.root, u.dword) {
+                    (RootType::Constants, 0) => slot,
+                    (RootType::Constants, 1) => 3,
+                    (RootType::Constants, _) => 0,
+                    other => panic!("unexpected user data {other:?}"),
+                };
+            }
+            let out = host
+                .dispatch(
+                    &root,
+                    &pso,
+                    &Dispatch {
+                        roots: std::iter::once((0, Root::Constants(ud)))
+                            .chain((1u32..).zip(&tables).map(|(param, (_, data))| {
+                                (
+                                    param,
+                                    Root::View {
+                                        srv: true,
+                                        data: data.clone(),
+                                    },
+                                )
+                            }))
+                            .collect(),
+                        views: &[
+                            View::Buffer {
+                                data: &[11],
+                                stride: super::host::Stride::Raw,
+                            },
+                            View::Cbv(&[22]),
+                            View::Cbv(&[33]),
+                            View::RawUav(1),
+                        ],
+                        samplers: &[],
+                        groups: [1, 1, 1],
+                    },
+                )
+                .unwrap_or_else(|e| panic!("{label}: dispatch failed: {e}"));
+            assert_eq!(out[0][0], want, "{label}: slot {slot}");
+        }
+        ran += 1;
+    }
+    assert!(ran > 0, "neither hardware nor WARP SM 6.6 device available");
+}
+
 /// `compute_graph_ops` (facial lip-sync & wrapped submesh solver) binds
 /// `R16G16B16A16_UINT` / `R16_UINT` UAVs via `RootType::Table` (which on NVIDIA
 /// are snapshotted into dynamic descriptor slots) and reads/writes FP16 bit
