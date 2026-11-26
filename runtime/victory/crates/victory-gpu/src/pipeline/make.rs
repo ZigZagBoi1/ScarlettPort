@@ -461,10 +461,26 @@ fn wait(p: &Pending, frame: u64) {
     if budget.is_zero() || slow(p) {
         return;
     }
+    let started = Instant::now();
+    let waited = if p.screen == ScreenPass::None {
+        wait_ordinary(p, frame, budget, compute)
+    } else {
+        static SCREEN: Mutex<Overlap> = Mutex::new(Overlap::NONE);
+        wait_overlapping(p, frame, budget, &SCREEN)
+    };
+    let Some(waited) = waited else { return };
+    let past = waited.saturating_sub(wait_budget());
+    past_total.fetch_add(past.as_millis() as u64, Ordering::Relaxed);
+    note_wait(started);
+}
+
+/// [`wait`] for an ordinary pipeline (`compute` or graphics), within what
+/// the frame has left of `budget`; how long it waited, if it did.
+fn wait_ordinary(p: &Pending, frame: u64, budget: Duration, compute: bool) -> Option<Duration> {
     // The frame the budget belongs to, and what was waited of it (or is
     // taken by a thread waiting now).
-    static SPENTS: [Mutex<(u64, Duration)>; 3] = [const { Mutex::new((u64::MAX, Duration::ZERO)) }; 3];
-    let frame_spent = &SPENTS[if p.screen != ScreenPass::None { 2 } else { usize::from(compute) }];
+    static SPENTS: [Mutex<(u64, Duration)>; 2] = [const { Mutex::new((u64::MAX, Duration::ZERO)) }; 2];
+    let frame_spent = &SPENTS[usize::from(compute)];
     let shared = shared_budget();
     let left = {
         let mut spent = frame_spent.lock().unwrap_or_else(|e| e.into_inner());
@@ -478,13 +494,45 @@ fn wait(p: &Pending, frame: u64) {
         left
     };
     if left.is_zero() {
-        return;
+        return None;
     }
     let started = Instant::now();
+    wait_until(p, started + left);
+    let waited = started.elapsed().min(left);
+    let mut spent = frame_spent.lock().unwrap_or_else(|e| e.into_inner());
+    // A frame that began meanwhile has its own budget.
+    if spent.0 == frame {
+        if shared {
+            spent.1 = spent.1.saturating_sub(left - waited);
+        } else {
+            spent.1 += waited;
+        }
+    }
+    Some(waited)
+}
+
+/// [`wait`] for a screen pass or a pass run once: until the deadline of the
+/// waits of frame `frame` that overlap it ([`Overlap`]); how long it waited,
+/// if it did. Reserved whole, the budget went to the first recording thread
+/// that waited, and a second thread waiting for another such pass in the
+/// same frame got nothing: that pass was dropped for good even when its
+/// pipeline was made a moment later.
+fn wait_overlapping(p: &Pending, frame: u64, budget: Duration, waits: &Mutex<Overlap>) -> Option<Duration> {
+    let started = Instant::now();
+    let deadline = waits.lock().unwrap_or_else(|e| e.into_inner()).begin(frame, budget, started)?;
+    wait_until(p, deadline);
+    let now = Instant::now();
+    waits.lock().unwrap_or_else(|e| e.into_inner()).end(frame, now);
+    Some(now.saturating_duration_since(started))
+}
+
+/// Waits until `p` is made, has become a slow one ([`slow`]), or
+/// `deadline` has passed.
+fn wait_until(p: &Pending, deadline: Instant) {
     let (lock, done) = &DONE;
     let mut held = lock.lock().unwrap_or_else(|e| e.into_inner());
     while p.made.get().is_none() && !slow(p) {
-        let rest = left.saturating_sub(started.elapsed());
+        let rest = deadline.saturating_duration_since(Instant::now());
         if rest.is_zero() {
             break;
         }
@@ -492,21 +540,59 @@ fn wait(p: &Pending, frame: u64) {
         let rest = rest.min(Duration::from_millis(250));
         held = done.wait_timeout(held, rest).unwrap_or_else(|e| e.into_inner()).0;
     }
-    drop(held);
-    let waited = started.elapsed().min(left);
-    let past = waited.saturating_sub(wait_budget());
-    past_total.fetch_add(past.as_millis() as u64, Ordering::Relaxed);
-    {
-        let mut spent = frame_spent.lock().unwrap_or_else(|e| e.into_inner());
-        // A frame that began meanwhile has its own budget.
-        if spent.0 == frame {
-            if shared {
-                spent.1 = spent.1.saturating_sub(left - waited);
-            } else {
-                spent.1 += waited;
-            }
+}
+
+/// The waits of one title frame that share a budget by the clock: waits
+/// that overlap count once, so recording threads waiting at the same time
+/// all wait until the same deadline, and successive waits add up to the
+/// budget at most.
+struct Overlap {
+    frame: u64,
+    /// Time of the frame's waits that have all ended.
+    spent: Duration,
+    /// Waits under way, and since when one has been.
+    waiting: u32,
+    since: Option<Instant>,
+}
+
+impl Overlap {
+    const NONE: Overlap = Overlap { frame: u64::MAX, spent: Duration::ZERO, waiting: 0, since: None };
+
+    /// A wait of frame `frame` begins at `now`: its deadline (that of every
+    /// wait it overlaps), or `None` if `budget` is used up.
+    fn begin(&mut self, frame: u64, budget: Duration, now: Instant) -> Option<Instant> {
+        if self.frame != frame {
+            *self = Overlap { frame, ..Overlap::NONE };
+        }
+        let running = self.since.map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
+        let left = budget.saturating_sub(self.spent + running);
+        if left.is_zero() {
+            return None;
+        }
+        if self.waiting == 0 {
+            self.since = Some(now);
+        }
+        self.waiting += 1;
+        Some(now + left)
+    }
+
+    /// A wait begun in frame `frame` ends at `now` (one of a frame that
+    /// has since ended counts for nothing).
+    fn end(&mut self, frame: u64, now: Instant) {
+        if self.frame != frame || self.waiting == 0 {
+            return;
+        }
+        self.waiting -= 1;
+        if self.waiting == 0
+            && let Some(since) = self.since.take()
+        {
+            self.spent += now.saturating_duration_since(since);
         }
     }
+}
+
+/// Sends the time a wait took to the frame lines.
+fn note_wait(started: Instant) {
     crate::framelog::add(crate::framelog::T::PipelineWaitUs, started.elapsed().as_micros() as u64);
     #[cfg(feature = "diagnostics")]
     crate::copystat::add(
@@ -828,6 +914,65 @@ mod tests {
         assert!(pass("pixel", b"DXBC PS_DecorationBlend_0000 code") == ScreenPass::Once);
         assert!(pass("pixel", b"DXBC PS_DeferredPedTexturedNC code") == ScreenPass::None);
         assert!(pass("compute", b"DXBC CS_ScreenProbes_Temporal code") == ScreenPass::None);
+    }
+
+    /// Waits that overlap share one deadline and count once; successive
+    /// ones add up to the budget; the next frame has it whole again.
+    #[test]
+    fn overlapping_waits_count_once_and_successive_ones_add_up() {
+        let ms = Duration::from_millis;
+        let (t0, budget) = (Instant::now(), ms(1000));
+        let mut o = Overlap::NONE;
+        assert_eq!(o.begin(1, budget, t0), Some(t0 + ms(1000)));
+        assert_eq!(o.begin(1, budget, t0 + ms(200)), Some(t0 + ms(1000)));
+        o.end(1, t0 + ms(300));
+        o.end(1, t0 + ms(400));
+        // 400 ms of the frame are gone, not 300 + 200.
+        assert_eq!(o.begin(1, budget, t0 + ms(500)), Some(t0 + ms(1100)));
+        o.end(1, t0 + ms(1100));
+        assert_eq!(o.begin(1, budget, t0 + ms(1200)), None);
+        assert_eq!(o.begin(2, budget, t0 + ms(1300)), Some(t0 + ms(2300)));
+        // A wait of the frame before ends: the new frame's count stays.
+        o.end(1, t0 + ms(1400));
+        assert_eq!(o.waiting, 1);
+    }
+
+    /// Two recording threads wait in one frame for two different passes run
+    /// once, the second while the first waits. Both pipelines are made
+    /// before the deadline, and both threads come back with theirs.
+    #[test]
+    fn two_threads_waiting_for_passes_run_once_in_one_frame_both_get_them() {
+        let pass = |container: &[u8]| Arc::new(Pending::new(vec![super::super::shader("compute", container)], None));
+        let (a, b) = (pass(b"DXBC CS_CompressBC1Mip0 wait test a"), pass(b"DXBC CS_CompressBC3Mip0 wait test b"));
+        assert!(a.screen == ScreenPass::Once && b.screen == ScreenPass::Once);
+        let waits = Mutex::new(Overlap::NONE);
+        let made_after = |p: &Arc<Pending>, after: Duration| {
+            let p = p.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(after);
+                let _ = p.made.set(None);
+                let (lock, done) = &DONE;
+                let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+                done.notify_all();
+            })
+        };
+        let budget = Duration::from_secs(5);
+        let (first, second) = std::thread::scope(|s| {
+            let first = s.spawn(|| (wait_overlapping(&a, 7, budget, &waits), a.made.get().is_some()));
+            std::thread::sleep(Duration::from_millis(50));
+            let second = s.spawn(|| (wait_overlapping(&b, 7, budget, &waits), b.made.get().is_some()));
+            let makers = [made_after(&a, Duration::from_millis(250)), made_after(&b, Duration::from_millis(400))];
+            let results = (first.join().unwrap(), second.join().unwrap());
+            for m in makers {
+                m.join().unwrap();
+            }
+            results
+        });
+        assert!(first.0.is_some() && first.1, "the first thread waited for its pipeline");
+        assert!(second.0.is_some() && second.1, "the second thread waited for its pipeline");
+        let waits = waits.lock().unwrap();
+        assert_eq!(waits.waiting, 0);
+        assert!(waits.spent < budget);
     }
 
     /// `VICTORY_SCREEN_WORKERS=0` restores the queue and waits from before:
