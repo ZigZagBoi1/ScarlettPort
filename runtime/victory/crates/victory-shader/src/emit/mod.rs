@@ -136,6 +136,9 @@ pub use lower::{host_max_wave, set_host_max_wave};
 pub use lower::wave64_lds;
 // rule-region: end
 pub use per_program::{deep_skips_allowed, for_program, wave64_retried};
+// rule-region: begin program:activate-rays-cleanup
+pub use per_program::activate_rays_cleanup;
+// rule-region: end
 pub use rect::rect_list_gs;
 pub use shader::{
     MEMORY_FAULTS, MEMORY_PAGES, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_ADDRESSES, SLOT_CONSTANTS, SLOT_FAULTS, SLOT_MEMORY,

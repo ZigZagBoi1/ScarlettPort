@@ -559,6 +559,9 @@ impl Shader {
         // feature whose last use it removed must not be declared (the
         // validator compares the flags with what the code uses).
         let passes = super::shader_opt() & super::bitcode::opt::MODULE;
+        // rule-region: begin program:activate-rays-cleanup
+        let passes = super::per_program::module_passes(passes);
+        // rule-region: end
         if passes != 0 {
             self.m.optimise(passes);
             let used = self.m.usage();
