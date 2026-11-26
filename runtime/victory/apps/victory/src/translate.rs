@@ -409,6 +409,26 @@ pub fn run(
     Ok(())
 }
 
+// Most large files in a dump have no shader containers. Scan them in a reusable
+// buffer before allocating the entire file for sources(). Both signatures can
+// occur anywhere, including across a read boundary.
+fn has_shader_marker(mut input: impl std::io::Read, buf: &mut [u8]) -> std::io::Result<bool> {
+    let mut carry = 0;
+    loop {
+        let n = input.read(&mut buf[carry..])?;
+        if n == 0 {
+            return Ok(false);
+        }
+        let end = carry + n;
+        let chunk = &buf[..end];
+        if victory_game::sgd5::is_sgd5(chunk) || memchr::memmem::find(chunk, b"DXBC").is_some() {
+            return Ok(true);
+        }
+        carry = end.min(3);
+        buf.copy_within(end - carry..end, 0);
+    }
+}
+
 /// `victory warm`: fills the caches a run reads (`Command::Warm`).
 pub fn warm(paths: Vec<PathBuf>, jobs: Option<usize>, pipelines: bool, incremental: bool, verify_all: bool) -> Result<()> {
     let paths = crate::default_paths(paths)?;
@@ -421,10 +441,21 @@ pub fn warm(paths: Vec<PathBuf>, jobs: Option<usize>, pipelines: bool, increment
     let seen = Mutex::new(HashSet::new());
     let [done, refused, made, unmade] = [const { AtomicUsize::new(0) }; 4];
     let started = std::time::Instant::now();
+    let mut scan_buf = vec![0; 1024 * 1024];
     for root in &paths {
         for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
-            if !entry.file_type().is_file() || entry.metadata().map_or(0, |m| m.len()) > MAX_FILE {
+            if !entry.file_type().is_file() {
                 continue;
+            }
+            let size = entry.metadata().map_or(0, |m| m.len());
+            if size > MAX_FILE {
+                continue;
+            }
+            if size > scan_buf.len() as u64 {
+                let Ok(file) = std::fs::File::open(entry.path()) else { continue };
+                if matches!(has_shader_marker(file, &mut scan_buf), Ok(false)) {
+                    continue;
+                }
             }
             let Ok(data) = std::fs::read(entry.path()) else {
                 continue;
@@ -1211,5 +1242,23 @@ mod wave_env_tests {
         assert_eq!(f(Some("0".into())), None);
         assert_eq!(f(Some("-32".into())), None);
         assert_eq!(f(Some("48".into())), None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_shader_marker;
+
+    #[test]
+    fn shader_scan_preserves_markers_across_reads() {
+        for marker in [b"SGD5", b"DXBC"] {
+            for offset in 0..20 {
+                let mut file = vec![0; offset];
+                file.extend(marker);
+                assert!(has_shader_marker(file.as_slice(), &mut [0; 8]).unwrap());
+                file.pop();
+                assert!(!has_shader_marker(file.as_slice(), &mut [0; 8]).unwrap());
+            }
+        }
     }
 }

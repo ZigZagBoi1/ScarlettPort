@@ -50,6 +50,26 @@ pub(super) fn current() -> Option<String> {
     PROGRAM.with_borrow(Clone::clone)
 }
 
+// rule-region: begin program:activate-rays-cleanup
+/// Clean up ActivateRays before handing its large compute program to the driver.
+/// An explicit VICTORY_SHADER_OPT still selects the passes for every program.
+pub fn activate_rays_cleanup(hash: &str) -> bool {
+    static AUTO: OnceLock<bool> = OnceLock::new();
+    hash == "39f0e9aeb156a61c"
+        && *AUTO.get_or_init(|| std::env::var_os("VICTORY_SHADER_OPT").is_none())
+}
+
+pub(super) fn module_passes(default: u32) -> u32 {
+    use super::bitcode::opt::MODULE;
+    if PROGRAM.with_borrow(|hash| hash.as_deref().is_some_and(activate_rays_cleanup)) {
+        crate::rules::note("program:activate-rays-cleanup");
+        MODULE
+    } else {
+        default
+    }
+}
+
+// rule-region: end
 /// Whether the deep-skips form may be tried for the program whose hash is
 /// `hash` (`None`: not known, as for a translation outside
 /// [`for_program`]), by the switches in the module notes.
@@ -170,6 +190,28 @@ mod tests {
         assert!(decide(true, Some(&only), Some(&both), Some(B)));
     }
 
+    // rule-region: begin program:activate-rays-cleanup
+    #[test]
+    fn activate_rays_cleanup_is_scoped_to_its_program() {
+        let global = super::super::shader_opt() & super::super::bitcode::opt::MODULE;
+        let target = if std::env::var_os("VICTORY_SHADER_OPT").is_none() {
+            super::super::bitcode::opt::MODULE
+        } else {
+            global
+        };
+        let passes = || module_passes(global);
+        let rule = "program:activate-rays-cleanup";
+        assert!(crate::rules::fingerprint(rule).is_some());
+        let (actual, used) = crate::rules::record(|| for_program("39f0e9aeb156a61c", passes));
+        assert_eq!(actual, target);
+        assert_eq!(used.contains(&rule), std::env::var_os("VICTORY_SHADER_OPT").is_none());
+        let (actual, used) = crate::rules::record(|| for_program("39f0e9aeb156a61d", passes));
+        assert_eq!(actual, global);
+        assert_eq!(used, [crate::rules::CORE]);
+        assert_eq!(passes(), global);
+    }
+
+    // rule-region: end
     #[test]
     fn the_program_hash_is_seen_inside_its_translation_only() {
         assert_eq!(current(), None);
