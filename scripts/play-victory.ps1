@@ -3,7 +3,8 @@
 # Usage: .\scripts\play-victory.ps1 -Game "D:\path\to\dump" [-AutoInput] [-Console series-s|series-x]
 #          [-NoOwnUpscaler] [-KeepWatchdog] [-FastBoot] [-RayTracing] [-SaveSlot name] [-Precompile] [-SkipPrecompile]
 #
-# Environment it sets (you can also set these by hand before running the exe):
+# Environment it sets for the launch (you can also set these by hand before running the exe); the
+# VICTORY_ variables are put back as they were when the script ends:
 #   VICTORY_GAME_DIR       the dump folder
 #   VICTORY_OWN_UPSCALER=1 ask for the title's own upscaler on the Series S profile (recommended)
 #   VICTORY_NO_WATCHDOG=1  disarm the title's stall watchdog so it can wait for slow first-run
@@ -51,50 +52,63 @@ if (-not (Test-Path $exe)) {
     throw "No game_scarlett_master.exe in '$Game'. Point -Game at your own dump."
 }
 
-$env:VICTORY_GAME_DIR = $Game
-if (-not $NoOwnUpscaler) { $env:VICTORY_OWN_UPSCALER = '1' }
-if (-not $KeepWatchdog) { $env:VICTORY_NO_WATCHDOG = '1' }
-# The verified speed settings (see docs/RUNTIMES.md). The experimental memory switches
-# (msfix, mem2) stay off.
-$env:VICTORY_RELAY = '2'
-$env:VICTORY_SYNC_PRECISE = '1'
-$env:VICTORY_READ_SETTLE_PRECISE = '1'
-# The rest of the verified speed settings. The grid fix is in this runtime, so precompiled graphics pipelines are on.
-foreach ($k in 'VICTORY_PRECOMPILED_GRAPHICS','VICTORY_READFIX','VICTORY_COPY_BACK_ONLY_READBACK','VICTORY_NARROW_ROOT','VICTORY_NARROW_VIEWS','VICTORY_NARROW_BVH','VICTORY_PREP_BARRIERS','VICTORY_PREP_TABLES','VICTORY_PREP_REUSE') { Set-Item "env:$k" '1' }
-# fx-cand4: sub-page memory, copies without the extra query, 4 GB card buffers. VICTORY_REMAP_LAZY is left
-# out: a moving A/B showed it now slows the world down.
-$env:VICTORY_MEM_SUBPAGE = '1'; $env:VICTORY_COPY_NOQUERY = '1'; $env:VICTORY_CARD_BUFFERS_MB = '4096'
-# Leaves processor time to the desktop while the title runs.
-$env:VICTORY_FRIENDLY = '1'
-$env:VICTORY_PIPELINE_WAIT_MS = '0'
-if ($FastBoot) { $env:VICTORY_FAST_BOOT = '1' }
-if ($RayTracing) { $env:VICTORY_RAYTRACING = '1' }
-if ($SaveSlot) { $env:VICTORY_SAVE_SLOT = $SaveSlot }
-# Write button names here ("A", "DOWN DOWN A") to press them while the game runs.
-$env:VICTORY_PRESS_FILE = Join-Path $root 'press.txt'
-Set-Content -Path $env:VICTORY_PRESS_FILE -Value '' -NoNewline
-if ($AutoInput) { $env:VICTORY_AUTO_INPUT = '1' }
+# PowerShell's environment belongs to the whole session, so what this script sets would reach the
+# next launch from the same window (a plain launch after one with -RayTracing still ran with ray
+# tracing). Every VICTORY_ variable is put back as it was when the script ends, also on an error
+# or Ctrl+C; one you set yourself before running it is kept unless a switch here sets it.
+$before = @{}
+Get-ChildItem Env: | Where-Object { $_.Name -like 'VICTORY_*' } | ForEach-Object { $before[$_.Name] = $_.Value }
+try {
+    $env:VICTORY_GAME_DIR = $Game
+    if (-not $NoOwnUpscaler) { $env:VICTORY_OWN_UPSCALER = '1' }
+    if (-not $KeepWatchdog) { $env:VICTORY_NO_WATCHDOG = '1' }
+    # The verified speed settings (see docs/RUNTIMES.md). The experimental memory switches
+    # (msfix, mem2) stay off.
+    $env:VICTORY_RELAY = '2'
+    $env:VICTORY_SYNC_PRECISE = '1'
+    $env:VICTORY_READ_SETTLE_PRECISE = '1'
+    # The rest of the verified speed settings. The grid fix is in this runtime, so precompiled graphics pipelines are on.
+    foreach ($k in 'VICTORY_PRECOMPILED_GRAPHICS','VICTORY_READFIX','VICTORY_COPY_BACK_ONLY_READBACK','VICTORY_NARROW_ROOT','VICTORY_NARROW_VIEWS','VICTORY_NARROW_BVH','VICTORY_PREP_BARRIERS','VICTORY_PREP_TABLES','VICTORY_PREP_REUSE') { Set-Item "env:$k" '1' }
+    # fx-cand4: sub-page memory, copies without the extra query, 4 GB card buffers. VICTORY_REMAP_LAZY is left
+    # out: a moving A/B showed it now slows the world down.
+    $env:VICTORY_MEM_SUBPAGE = '1'; $env:VICTORY_COPY_NOQUERY = '1'; $env:VICTORY_CARD_BUFFERS_MB = '4096'
+    # Leaves processor time to the desktop while the title runs.
+    $env:VICTORY_FRIENDLY = '1'
+    $env:VICTORY_PIPELINE_WAIT_MS = '0'
+    if ($FastBoot) { $env:VICTORY_FAST_BOOT = '1' }
+    if ($RayTracing) { $env:VICTORY_RAYTRACING = '1' }
+    if ($SaveSlot) { $env:VICTORY_SAVE_SLOT = $SaveSlot }
+    # Write button names here ("A", "DOWN DOWN A") to press them while the game runs.
+    $env:VICTORY_PRESS_FILE = Join-Path $root 'press.txt'
+    Set-Content -Path $env:VICTORY_PRESS_FILE -Value '' -NoNewline
+    if ($AutoInput) { $env:VICTORY_AUTO_INPUT = '1' }
 
-# Prebuild the title's precompiled graphics pipelines into the pipeline library (needs a GPU; the
-# first run takes a while and is done once, marked by a stamp file).
-$stamp = Join-Path $root 'logs\precompile-graphics.done'
-if (-not $SkipPrecompile -and ($Precompile -or -not (Test-Path $stamp))) {
-    Write-Host 'Building the title''s precompiled graphics pipelines (once)...' -ForegroundColor Cyan
+    # Prebuild the title's precompiled graphics pipelines into the pipeline library (needs a GPU; the
+    # first run takes a while and is done once, marked by a stamp file).
+    $stamp = Join-Path $root 'logs\precompile-graphics.done'
+    if (-not $SkipPrecompile -and ($Precompile -or -not (Test-Path $stamp))) {
+        Write-Host 'Building the title''s precompiled graphics pipelines (once)...' -ForegroundColor Cyan
+        $ErrorActionPreference = 'Continue'
+        & $vic precompile-graphics
+        $code = $LASTEXITCODE
+        $ErrorActionPreference = 'Stop'
+        if ($code -ne 0) { throw "victory precompile-graphics failed (exit $code)." }
+        New-Item -ItemType Directory -Force (Split-Path $stamp) | Out-Null
+        Set-Content -Path $stamp -Value (Get-Date -Format s)
+    }
+
+    $logs = Join-Path $root 'logs'
+    New-Item -ItemType Directory -Force $logs | Out-Null
+    $log = Join-Path $logs ("victory-{0:yyyyMMdd-HHmmss}.log" -f (Get-Date))
+    Write-Host "Starting on the $Console profile... log: $log" -ForegroundColor Cyan
+    # Windows PowerShell 5.1 turns a native program's stderr into a terminating error under 'Stop'
+    # when it is redirected, which would kill the run on the first log line.
     $ErrorActionPreference = 'Continue'
-    & $vic precompile-graphics
+    & $vic run $exe --execute --console $Console *> $log
     $code = $LASTEXITCODE
-    $ErrorActionPreference = 'Stop'
-    if ($code -ne 0) { throw "victory precompile-graphics failed (exit $code)." }
-    New-Item -ItemType Directory -Force (Split-Path $stamp) | Out-Null
-    Set-Content -Path $stamp -Value (Get-Date -Format s)
+} finally {
+    $now = @(Get-ChildItem Env: | Where-Object { $_.Name -like 'VICTORY_*' } | ForEach-Object { $_.Name })
+    foreach ($name in $now) { if (-not $before.ContainsKey($name)) { Remove-Item "Env:$name" } }
+    foreach ($name in $before.Keys) { Set-Item "Env:$name" $before[$name] }
 }
-
-$logs = Join-Path $root 'logs'
-New-Item -ItemType Directory -Force $logs | Out-Null
-$log = Join-Path $logs ("victory-{0:yyyyMMdd-HHmmss}.log" -f (Get-Date))
-Write-Host "Starting on the $Console profile... log: $log" -ForegroundColor Cyan
-# Windows PowerShell 5.1 turns a native program's stderr into a terminating error under 'Stop'
-# when it is redirected, which would kill the run on the first log line.
-$ErrorActionPreference = 'Continue'
-& $vic run $exe --execute --console $Console *> $log
-exit $LASTEXITCODE
+exit $code
