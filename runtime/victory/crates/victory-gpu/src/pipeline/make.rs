@@ -23,6 +23,13 @@ use std::time::{Duration, Instant};
 use super::Shader;
 use super::host::{GraphicsState, HostPipeline, TargetFormats};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScreenPass {
+    None,
+    Other,
+    LightingTable,
+}
+
 /// What a host pipeline is made from, and the host pipeline once made.
 pub(crate) struct Pending {
     pub(crate) shaders: Vec<Arc<Shader>>,
@@ -40,9 +47,8 @@ pub(crate) struct Pending {
     /// ([`for_formats`]): a chain from the title's pipeline, one link per
     /// set of formats met, never shortened.
     variant: OnceLock<Arc<Pending>>,
-    /// A pass over the screen ([`GraphicsState::screen_pass`]) with
-    /// [`screen_workers`] on.
-    screen: bool,
+    /// A lighting table, or another screen pass given its own compilation budget.
+    screen: ScreenPass,
     /// The first title frame a recording thread waited for this pipeline in
     /// (`u64::MAX`: never), for [`wait_once`].
     waited_frame: AtomicU64,
@@ -92,7 +98,7 @@ fn too_dear(shaders: &[Arc<Shader>]) -> bool {
 fn without_structures(shaders: &[Arc<Shader>]) -> bool {
     static MADE: OnceLock<bool> = OnceLock::new();
     let on = |name| std::env::var_os(name).is_some_and(|v| v == "1");
-    let made = *MADE.get_or_init(|| on("VICTORY_RT_RESOLVE") || on("VICTORY_BVH_BUILDER"));
+    let made = *MADE.get_or_init(|| on("VICTORY_RT_RESOLVE") || super::builder_requested());
     !made && named(shaders, b"CS_RaytracingResolve")
 }
 
@@ -116,7 +122,17 @@ impl Pending {
         }
         key.update(graphics.as_ref().map(|g| g.describe()).unwrap_or_default().as_bytes());
         let left_out = left_out(&shaders);
-        let screen = screen_workers() && graphics.as_ref().is_some_and(|g| g.screen_pass());
+        // The six draws that build the environment BRDF, area-light and scattering tables
+        // share this vertex program. The title records them once when it enters the world.
+        const LIGHT_TABLE_VERTEX: &str = "ce57291b5a1750ca";
+        let light_table = shaders.iter().any(|s| s.stage == "vertex" && s.hash == LIGHT_TABLE_VERTEX);
+        let screen = if light_table {
+            ScreenPass::LightingTable
+        } else if screen_workers() && graphics.as_ref().is_some_and(|g| g.screen_pass()) {
+            ScreenPass::Other
+        } else {
+            ScreenPass::None
+        };
         Pending {
             screen,
             formats: graphics.as_ref().map_or([0; 9], |g| g.formats()),
@@ -195,7 +211,7 @@ fn slow(p: &Pending) -> bool {
     // A screen pass ([`screen_workers`]) is waited for up to its own
     // budget: given up on at 3 s, a lighting-table pass was still dropped
     // (Marvisak #2433).
-    let most = if p.screen { SCREEN_BUDGET.as_secs() } else if p.computes() { 10 } else { 3 };
+    let most = if p.screen != ScreenPass::None { SCREEN_BUDGET.as_secs() } else if p.computes() { 10 } else { 3 };
     p.begun.get().is_some_and(|at| at.elapsed() > Duration::from_secs(most))
 }
 
@@ -384,25 +400,31 @@ fn shared_budget() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_PIPELINE_WAIT_SHARED").is_none_or(|v| v != "0"))
 }
 
+fn frame_wait_budget(ordinary: Duration, loading: Duration, compute: bool, screen: ScreenPass) -> Duration {
+    if ordinary.is_zero() && screen != ScreenPass::LightingTable {
+        return Duration::ZERO;
+    }
+    if screen != ScreenPass::None { return SCREEN_BUDGET; }
+    let startup = if compute { LOADING_FRAME_COMPUTE } else { LOADING_FRAME };
+    ordinary.max(startup.min(loading))
+}
+
 /// Waits for `p` while frame `frame` has budget left.
 fn wait(p: &Pending, frame: u64) {
-    let budget = wait_budget();
-    if budget.is_zero() || slow(p) {
-        return;
-    }
     // What was waited past the budget since the start, in milliseconds; the
     // second of each is the compute pipelines'.
     static LOADINGS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
     let compute = p.computes();
     let past_total = &LOADINGS[usize::from(compute)];
     let loading = loading_left(Duration::from_millis(past_total.load(Ordering::Relaxed)));
-    let budget = budget.max((if compute { LOADING_FRAME_COMPUTE } else { LOADING_FRAME }).min(loading));
-    // Screen passes: a budget of their own, longer (`screen_workers`).
-    let budget = if p.screen { SCREEN_BUDGET } else { budget };
+    let budget = frame_wait_budget(wait_budget(), loading, compute, p.screen);
+    if budget.is_zero() || slow(p) {
+        return;
+    }
     // The frame the budget belongs to, and what was waited of it (or is
     // taken by a thread waiting now).
     static SPENTS: [Mutex<(u64, Duration)>; 3] = [const { Mutex::new((u64::MAX, Duration::ZERO)) }; 3];
-    let frame_spent = &SPENTS[if p.screen { 2 } else { usize::from(compute) }];
+    let frame_spent = &SPENTS[if p.screen != ScreenPass::None { 2 } else { usize::from(compute) }];
     let shared = shared_budget();
     let left = {
         let mut spent = frame_spent.lock().unwrap_or_else(|e| e.into_inner());
@@ -483,7 +505,7 @@ impl Queue {
             return None;
         }
         p.queue_state.store(priority, Ordering::Relaxed);
-        if priority == REQUESTED && p.screen {
+        if priority == REQUESTED && p.screen != ScreenPass::None {
             self.screen.push_back(p.clone());
         } else if priority == REQUESTED {
             self.requested.push_back(p.clone());
@@ -738,6 +760,19 @@ fn drained() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lighting_tables_keep_their_wait_when_play_skips_other_pending_pipelines() {
+        let loading = Duration::from_secs(60);
+        assert_eq!(frame_wait_budget(Duration::ZERO, loading, false, ScreenPass::LightingTable), SCREEN_BUDGET);
+        for compute in [false, true] {
+            assert_eq!(frame_wait_budget(Duration::ZERO, loading, compute, ScreenPass::None), Duration::ZERO);
+        }
+        assert_eq!(frame_wait_budget(Duration::ZERO, loading, false, ScreenPass::Other), Duration::ZERO);
+        let ordinary = Duration::from_millis(500);
+        assert_eq!(frame_wait_budget(ordinary, loading, true, ScreenPass::None), LOADING_FRAME_COMPUTE);
+        assert_eq!(frame_wait_budget(ordinary, Duration::ZERO, false, ScreenPass::None), ordinary);
+    }
 
     /// A first use queues the pipeline and, within the budget, gets the
     /// worker's answer (here: no host pipeline for no shaders).

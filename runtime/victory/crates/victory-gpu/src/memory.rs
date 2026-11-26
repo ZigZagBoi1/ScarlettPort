@@ -9,13 +9,9 @@
 //! a root view and a raw address reach the same host bytes. This module
 //! keeps what a shader needs to find them:
 //!
-//! - the **directory**: per 64 KiB page of title address space the number
-//!   of the copy that holds the page (0: none) and the page's byte offset
-//!   in it; one buffer for all lists, entries only ever go from empty to
-//!   filled;
-//! - per view heap a run of slots with a raw unordered access view of each
-//!   numbered copy (slot 0 of the run: a null view, for pages without a
-//!   copy);
+//! - a directory per host view heap, indexed by 64 KiB title page. Each entry
+//!   gives the raw UAV slot relative to the null slot, and its byte offset.
+//!   New mappings take free slots as the title streams its structures;
 //! - the **faults**: the page numbers shaders found empty, read back here
 //!   once a frame, so the copies exist from the next frame on. A pointer a
 //!   shader takes out of memory cannot be known before it runs; the
@@ -30,19 +26,8 @@
 //! constant that is one in 256-byte units (the builder passes structures
 //! all three ways), and the 4 MiB after each (a structure may cross a
 //! window's end).
-//! shortcut: what a stage reaches only through pointers it reads out of
-//! memory (InitHeaders' table of structure addresses, LoadInstances'
-//! instance records) is not made ready unless something else named it;
-//! the fault count in the log says whether that happens. The whole answer
-//! is the extent of the title's allocation around an address, which the
-//! memory module of the layer knows and this one does not ask yet.
-//!
-//! shortcut: a copy that is numbered is kept for the rest of the run, and
-//! there are at most [`COPIES`] of them (4 MiB windows mostly: 4 GiB at
-//! most). Every dispatch of such a shader brings all numbered copies up to
-//! date and, if it can store, declares all of them written (the bytes are
-//! compared on the CPU afterwards, as for any unordered access view): a
-//! dirty-page mask written by the shader would bound both.
+//! InitHeaders records are filled after recording and resolved at submission.
+//! Other pointer chains can still fault the first time they are traversed.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -54,23 +39,20 @@ use crate::descriptor::host::HostHeap;
 use crate::host::{HostList, host};
 use crate::shadow::Shadow;
 
-/// Copies that can be numbered (the run of heap slots is one longer). A
-/// listed frame of the opening cutscene names about 50 windows.
-const COPIES: u32 = 1023;
 /// A window of memory outside buffers (`shadow.rs`).
 const CELL: u64 = 4 << 20;
 /// A directory page.
 const PAGE: u64 = 1 << 16;
 
 struct Memory {
-    /// Buffer, its mapping, its GPU address.
-    directory: (ID3D12Resource, *mut u32, u64),
+    /// Zero means unmapped. Other entries identify a copy by its index plus one.
+    page_copy: Vec<u32>,
+    /// Mappings in publication order, for heaps that have not seen them yet.
+    pages: Vec<Page>,
     faults: (ID3D12Resource, *mut u32, u64),
     /// Copy `n` is `copies[n - 1]`.
     copies: Vec<Arc<Shadow>>,
-    /// Per host view heap (by address): the first slot of its run, and how
-    /// many copies have their view there.
-    heaps: HashMap<usize, (u32, u32)>,
+    heaps: HashMap<usize, HeapDirectory>,
     /// The frame the faults were last read in.
     frame: u64,
     /// Pages asked for this frame that are not the title's memory.
@@ -81,7 +63,227 @@ struct Memory {
 // the mutex.
 unsafe impl Send for Memory {}
 
+struct Page {
+    index: u32,
+    copy: usize,
+    offset: u32,
+}
+
+struct HeapDirectory {
+    buffer: (ID3D12Resource, *mut u32, u64),
+    null: u32,
+    slots: Vec<u32>,
+    published: usize,
+}
+
+fn mapped_words(dwords: u64, name: &str) -> Option<(ID3D12Resource, *mut u32, u64)> {
+    let (buffer, data) = host()?.shared_buffer(dwords * 4)?;
+    crate::host::name(&buffer, || format!("title memory by address: {name}"));
+    // SAFETY: the buffer owns the whole mapping.
+    let gpu = unsafe {
+        std::ptr::write_bytes(data, 0, (dwords * 4) as usize);
+        buffer.GetGPUVirtualAddress()
+    };
+    Some((buffer, data.cast(), gpu))
+}
+
+impl HeapDirectory {
+    fn new(heap: &HostHeap) -> Option<Self> {
+        let buffer = mapped_words(u64::from(MEMORY_PAGES) * 2, "directory")?;
+        let null = heap.dynamic(1)?;
+        heap.null_raw_uav_at(null);
+        Some(Self { buffer, null, slots: Vec::new(), published: 0 })
+    }
+
+    fn publish(&mut self, heap: &HostHeap, copies: &[Arc<Shadow>], pages: &[Page]) -> Option<()> {
+        for shadow in &copies[self.slots.len()..] {
+            let slot = heap.dynamic(1)?;
+            heap.raw_uav_at(slot, &shadow.buffer, 0, shadow.span().1);
+            self.slots.push(slot);
+        }
+        for page in &pages[self.published..] {
+            let relative = self.slots[page.copy].wrapping_sub(self.null);
+            // SAFETY: the last row is reserved. Publish the slot after its offset.
+            unsafe {
+                let entry = self.buffer.1.add(page.index as usize * 2);
+                entry.add(1).write_volatile(page.offset);
+                std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+                entry.write_volatile(relative);
+            }
+        }
+        self.published = pages.len();
+        Some(())
+    }
+}
+
 static MEMORY: Mutex<Option<Memory>> = Mutex::new(None);
+
+fn contiguous_copy(page_copy: &[u32], address: u64, reach: u64) -> Option<usize> {
+    let end = address.checked_add(reach.checked_sub(1)?)?;
+    let pages = page_copy.get((address / PAGE) as usize..=(end / PAGE) as usize)?;
+    let (&first, remaining) = pages.split_first()?;
+    let copy = first.checked_sub(1)?;
+    remaining.iter().all(|&page| page == first).then_some(copy as usize)
+}
+
+/// A builder can address the same bytes through a root UAV and through a
+/// node pointer. Overlapping title buffers may have different host copies.
+/// Bind the directory's copy when it covers the whole shader access.
+pub(crate) fn builder_root(address: u64, reach: u64, original: &Arc<Shadow>) -> Option<Arc<Shadow>> {
+    if reach == 0 || address / PAGE >= u64::from(MEMORY_PAGES) - 1 {
+        return None;
+    }
+    let mut memory = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
+    if memory.is_none() {
+        *memory = Memory::new();
+    }
+    let memory = memory.as_mut()?;
+    // DecompressHeader can write a structure using only root UAVs, before
+    // any shader requests a raw view. Remember the backing it writes now.
+    memory.map_with_root(address, Some(original));
+    memory.builder_root(address, reach, original)
+}
+
+#[derive(Clone)]
+pub(crate) struct BuilderUpload {
+    pub(crate) heap: Arc<HostHeap>,
+    pub(crate) inputs: BuilderInputs,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum BuilderInputs {
+    Headers { table: u64, count: u32 },
+    Leaves { table: u64, source: u64, destination: u64, offset: u32, count: u32 },
+}
+
+impl BuilderUpload {
+    pub(crate) fn prepare(&self, list: &HostList) {
+        let mut addresses = Vec::new();
+        match self.inputs {
+            BuilderInputs::Headers { table, count } => header_destinations(table, count, &mut addresses),
+            BuilderInputs::Leaves { table, source, destination, offset, count } => {
+                leaf_inputs(table, source, destination, offset, count, &mut addresses);
+                addresses.sort_unstable();
+                addresses.dedup();
+            }
+        }
+        if !addresses.is_empty() {
+            ready(list, &self.heap, &addresses, &[], false, true);
+        }
+    }
+}
+
+/// The raw-address directory maps whole pages. Include the last one when
+/// the shader's stream ends partway through it.
+fn stream_pages(address: u64, length: u64, pages: &mut Vec<u64>) {
+    if address == 0 || length == 0 { return; }
+    let Some(end) = address.checked_add(length - 1) else { return };
+    if end / PAGE >= u64::from(MEMORY_PAGES) - 1 { return; }
+    pages.extend((address / PAGE..=end / PAGE).map(|page| page * PAGE));
+}
+
+fn leaf_inputs(table: u64, source: u64, destination: u64, offset: u32, count: u32, pages: &mut Vec<u64>) {
+    let length = u64::from(count) * 64;
+    let Some(start) = source.checked_add(u64::from(offset)) else { return };
+    let Some(end) = start.checked_add(length) else { return };
+    if source == 0 || table == 0 || count == 0 || end > (u64::from(MEMORY_PAGES) - 1) * PAGE { return; }
+    stream_pages(start, length, pages);
+    if destination != 0 && let Some(dest) = destination.checked_add(u64::from(offset)) {
+        stream_pages(dest, length, pages);
+    }
+    for id in leaf_geometries(start, count) {
+        let mut record = [0; 48];
+        let Some(address) = table.checked_add(u64::from(id) * 48) else { continue };
+        if crate::host::read_into(address as *const u8, &mut record) {
+            geometry_streams(&record, pages);
+        }
+    }
+}
+
+/// Each group starts with one little-endian 24-bit geometry index per
+/// leaf, then padding and other fields up to the next 128 KiB boundary
+/// relative to the first group. Read only the indices of live leaves.
+fn leaf_geometries(start: u64, count: u32) -> std::collections::BTreeSet<u32> {
+    const GROUP: u32 = 2048;
+    let mut ids = std::collections::BTreeSet::new();
+    let mut packed = [0; GROUP as usize * 3];
+    for group in 0..count.div_ceil(GROUP) {
+        let address = start + u64::from(group) * u64::from(GROUP) * 64;
+        let leaves = (count - group * GROUP).min(GROUP) as usize;
+        let packed = &mut packed[..3 * leaves];
+        if !crate::host::read_into(address as *const u8, packed) { continue; }
+        for id in packed.chunks_exact(3) {
+            ids.insert(u32::from_le_bytes([id[0], id[1], id[2], 0]));
+        }
+    }
+    ids
+}
+
+/// The builder reads console D3D12_RAYTRACING_GEOMETRY_TRIANGLES_DESC
+/// records. Flag bits above the low 15 stride bits describe packed geometry.
+fn geometry_streams(record: &[u8; 48], pages: &mut Vec<u64>) {
+    let word = |i: usize| u32::from_le_bytes(record[i..i+4].try_into().unwrap());
+    let address = |i: usize| u64::from_le_bytes(record[i..i+8].try_into().unwrap());
+    let index = address(24);
+    let index_count = u64::from(word(16));
+    let length = match word(8) {
+        42 => index_count * 4,
+        57 => index_count * 2,
+        53 if index != 0 => {
+            let mut header = [0; 12];
+            if crate::host::read_into(index as *const u8, &mut header) {
+                packed_index_bytes(&header, index_count)
+            } else {
+                12
+            }
+        }
+        _ => 0,
+    };
+    stream_pages(index, length, pages);
+    stream_pages(address(32), u64::from(word(20)) * (address(40) & 0x7fff), pages);
+    stream_pages(address(0), 48, pages);
+}
+
+/// The packed index layout has a 16-byte record per meshlet, a dword per
+/// triangle and a 16-bit vertex remap. LeafRehydration loads the remap in
+/// aligned dwords. An incomplete upload may still have an old header.
+fn packed_index_bytes(header: &[u8; 12], index_count: u64) -> u64 {
+    let word = |i: usize| u64::from(u32::from_le_bytes(header[i..i+4].try_into().unwrap()));
+    let meshlets = word(0) & 0x1ffff;
+    let triangles = word(4);
+    let remap = word(8);
+    if triangles * 3 != index_count || meshlets > triangles || remap > index_count {
+        return 12;
+    }
+    (12 + meshlets * 16 + triangles * 4 + remap * 2).next_multiple_of(4)
+}
+
+/// Each 40-byte InitHeaders record names a 64-byte header and, optionally,
+/// another 24 bytes for the bounding box. Read the upload in small chunks.
+fn header_destinations(mut table: u64, mut count: u32, addresses: &mut Vec<u64>) {
+    let mut chunk = [0u8; 40 * 32];
+    while count != 0 {
+        let n = count.min(32);
+        let bytes = &mut chunk[..40 * n as usize];
+        let Some(next) = table.checked_add(bytes.len() as u64) else { break };
+        if !crate::host::read_into(table as *const u8, bytes) {
+            break;
+        }
+        for record in bytes.chunks_exact(40) {
+            for (word, len) in [(0, 64), (8, 24)] {
+                let address = u64::from_le_bytes(record[word..word + 8].try_into().unwrap());
+                if address != 0 && address < (u64::from(MEMORY_PAGES) - 1) * PAGE {
+                    addresses.push(address);
+                    if address % PAGE + len > PAGE {
+                        addresses.push(address + len - 1);
+                    }
+                }
+            }
+        }
+        count -= n;
+        table = next;
+    }
+}
 
 /// What a draw binds.
 pub(crate) struct Ready {
@@ -92,21 +294,26 @@ pub(crate) struct Ready {
 }
 
 impl Memory {
+    fn builder_root(&self, address: u64, reach: u64, original: &Shadow) -> Option<Arc<Shadow>> {
+        let index = self.copy_at(address)?;
+        let copy = self.copies.get(index)?;
+        if std::ptr::eq(copy.as_ref(), original)
+            || copy.offset_in(address).is_none()
+            || copy.left(address) < reach
+            || (copy.gpu(address) & 15) != (original.gpu(address) & 15)
+            || contiguous_copy(&self.page_copy, address, reach) != Some(index)
+        {
+            return None;
+        }
+        Some(copy.clone())
+    }
+
     fn new() -> Option<Memory> {
-        let host = host()?;
-        let make = |dwords: u64, what: &str| {
-            let (buffer, data) = host.shared_buffer(dwords * 4)?;
-            crate::host::name(&buffer, || format!("title memory by address: {what}"));
-            // SAFETY: a fresh mapping of at least that many bytes.
-            unsafe { std::ptr::write_bytes(data, 0, (dwords * 4) as usize) };
-            // SAFETY: a live buffer.
-            let gpu = unsafe { buffer.GetGPUVirtualAddress() };
-            Some((buffer, data.cast::<u32>(), gpu))
-        };
         tracing::info!("title memory by address: a shader reads or writes through raw addresses");
         Some(Memory {
-            directory: make(u64::from(MEMORY_PAGES) * 2, "directory")?,
-            faults: make(u64::from(MEMORY_FAULTS), "faults")?,
+            page_copy: vec![0; MEMORY_PAGES as usize],
+            pages: Vec::new(),
+            faults: mapped_words(u64::from(MEMORY_FAULTS), "faults")?,
             copies: Vec::new(),
             heaps: HashMap::new(),
             frame: u64::MAX,
@@ -117,15 +324,16 @@ impl Memory {
     /// Gives the page of `address` its copy, if it has none and the memory
     /// is the title's.
     fn map(&mut self, address: u64) {
+        self.map_with_root(address, None);
+    }
+
+    fn map_with_root(&mut self, address: u64, root: Option<&Arc<Shadow>>) {
         let page = address / PAGE;
         // The last entry stays empty: addresses past the directory read it.
         if page >= u64::from(MEMORY_PAGES) - 1 {
             return;
         }
-        // SAFETY: inside the directory's mapping.
-        let entry = unsafe { self.directory.1.add(page as usize * 2) };
-        // SAFETY: as above.
-        if unsafe { entry.read() } != 0 {
+        if self.page_copy[page as usize] != 0 {
             return;
         }
         let start = page * PAGE;
@@ -140,57 +348,44 @@ impl Memory {
         }
         // The copy a root view at that address would get; a buffer that
         // ends inside the page is passed over for what holds all of it.
-        let whole = |s: &Arc<Shadow>| s.offset_in(start).is_some_and(|_| s.left(start) >= PAGE);
-        let Some(shadow) = crate::shadow::find(start, 1)
-            .filter(whole)
-            .or_else(|| crate::shadow::find(start, PAGE).filter(whole))
+        let usable = |s: &Arc<Shadow>| {
+            if s.offset_in(start).is_none() || s.left(start) < PAGE {
+                return false;
+            }
+            // SAFETY: the copy owns its live host buffer.
+            unsafe { s.buffer.GetDesc() }.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 != 0
+        };
+        let Some(shadow) = root.filter(|s| usable(s)).cloned()
+            .or_else(|| crate::shadow::find(start, 1).filter(usable))
+            .or_else(|| crate::shadow::find(start, PAGE).filter(usable))
         else {
             return;
         };
-        // SAFETY: a live buffer.
-        let flags = unsafe { shadow.buffer.GetDesc() }.Flags;
-        if flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0 {
-            return;
-        }
         let n = match self.copies.iter().position(|c| Arc::ptr_eq(c, &shadow)) {
             Some(n) => n,
-            None if self.copies.len() < COPIES as usize => {
+            None => {
+                let n = self.copies.len();
                 self.copies.push(shadow.clone());
-                let n = self.copies.len() - 1;
-                // Every page the copy holds whole, not only the one asked
-                // for: a structure is more than 64 KiB.
-                // shortcut: a page of a title buffer inside this one that
-                // has a copy of its own is given this copy too.
                 let (first, len) = shadow.span();
                 let mut at = first.next_multiple_of(PAGE);
                 while at + PAGE <= first + len && at / PAGE < u64::from(MEMORY_PAGES) - 1 {
-                    // SAFETY: inside the directory's mapping.
-                    let other = unsafe { self.directory.1.add((at / PAGE) as usize * 2) };
-                    // SAFETY: as above; the offset first, as below.
-                    unsafe {
-                        if other.read() == 0 {
-                            other.add(1).write_volatile((at - first) as u32);
-                            other.write_volatile(n as u32 + 1);
-                        }
-                    }
+                    self.add_page(at / PAGE, n, at - first);
                     at += PAGE;
+                }
+                if (n + 1).is_power_of_two() && n >= 1023 {
+                    tracing::info!(copies = n + 1, pages = self.pages.len(), "mapped title memory for raw-address shaders");
                 }
                 n
             }
-            None => {
-                static ONCE: std::sync::Once = std::sync::Once::new();
-                ONCE.call_once(|| {
-                    tracing::warn!(COPIES, "title memory by address: no number left for another copy; its pages read zeros")
-                });
-                return;
-            }
         };
-        let offset = shadow.offset_in(start).unwrap_or(0);
-        // The offset first: a shader that sees the number sees it too.
-        // SAFETY: inside the directory's mapping.
-        unsafe {
-            entry.add(1).write_volatile(offset as u32);
-            entry.write_volatile(n as u32 + 1);
+        self.add_page(page, n, shadow.offset_in(start).unwrap_or(0));
+    }
+
+    fn add_page(&mut self, index: u64, copy: usize, offset: u64) {
+        let id = &mut self.page_copy[index as usize];
+        if *id == 0 {
+            *id = copy as u32 + 1;
+            self.pages.push(Page { index: index as u32, copy, offset: offset as u32 });
         }
     }
 
@@ -241,8 +436,7 @@ impl Memory {
         if page >= u64::from(MEMORY_PAGES) - 1 {
             return None;
         }
-        // SAFETY: inside the directory's mapping.
-        let n = unsafe { self.directory.1.add(page as usize * 2).read() };
+        let n = self.page_copy[page as usize];
         (n != 0).then(|| n as usize - 1)
     }
 }
@@ -277,7 +471,6 @@ pub(crate) fn ready(
         m.refused.clear();
         m.take_faults();
     }
-    let numbered = m.copies.len();
     let mut named: Vec<usize> = Vec::new();
     for &address in addresses {
         named.extend(m.name(address).into_iter().flatten());
@@ -297,49 +490,46 @@ pub(crate) fn ready(
         }
     }
     let key = std::ptr::from_ref(heap) as usize;
-    let (base, made) = match m.heaps.get(&key) {
-        Some(&run) => run,
-        None => {
-            // Held for the heap's life: not given back with a list's slots.
-            let base = heap.dynamic(COPIES + 1)?;
-            heap.null_raw_uav_at(base);
-            (base, 0)
-        }
+    let directory = match m.heaps.entry(key) {
+        std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+        std::collections::hash_map::Entry::Vacant(e) => e.insert(HeapDirectory::new(heap)?),
     };
-    for (n, shadow) in m.copies.iter().enumerate().skip(made as usize) {
-        let (_, len) = shadow.span();
-        heap.raw_uav_at(base + 1 + n as u32, &shadow.buffer, 0, len);
+    directory.publish(heap, &m.copies, &m.pages)?;
+    let gpu = directory.buffer.2;
+    let base = directory.null;
+    if list.first_use(directory.buffer.1 as usize) {
+        list.keep(&directory.buffer.0);
     }
-    m.heaps.insert(key, (base, m.copies.len() as u32));
     // Once per list, and for copies numbered since: the builder alone
     // dispatches hundreds of times a frame.
-    // shortcut: a copy another list numbers meanwhile is brought up to date
-    // by that list's submission, which may run after this one's.
     const READ: usize = usize::MAX - 0x6d;
-    const WRITE: usize = usize::MAX - 0x6e;
     // (`VICTORY_NARROW_BVH`: the copies left out are counted once per list
     // too; with 2, each named copy is declared once per list.)
-    const LEFT_OUT: usize = usize::MAX - 0x6f;
     const NAMED: usize = usize::MAX - 0x1_0000;
     let level = crate::narrow::bvh();
     let declare = plan(level, writes, by_address);
     let first_read = list.first_use(READ);
-    let first_write = declare == Declare::All && list.first_use(WRITE);
-    let first_left_out = writes && declare != Declare::All && list.first_use(LEFT_OUT);
-    for (n, shadow) in m.copies.iter().enumerate() {
+    let [read, written, omitted] = list.raw_copy_counts(m.copies.len(), declare == Declare::All, writes && declare != Declare::All);
+    let first = match declare {
+        Declare::All => read.min(written),
+        Declare::Named if !named.is_empty() => 0,
+        _ if writes => read.min(omitted),
+        _ => read,
+    };
+    for (n, shadow) in m.copies.iter().enumerate().skip(first) {
         let (start, len) = shadow.span();
-        if first_read || n >= numbered {
+        if n >= read {
             shadow.refresh(list, start, len);
         }
         let declared = match declare {
-            Declare::All => first_write || n >= numbered,
+            Declare::All => n >= written,
             Declare::Named => named.contains(&n) && list.first_use(NAMED - n),
             Declare::None => false,
         };
         if declared {
             shadow.gpu_writes(list, start, len);
         } else if declare != Declare::All
-            && (first_left_out || n >= numbered)
+            && writes && n >= omitted
             && !(declare == Declare::Named && named.contains(&n))
             && !shadow.in_place()
         {
@@ -347,11 +537,10 @@ pub(crate) fn ready(
         }
     }
     if first_read {
-        list.keep(&m.directory.0);
         list.keep(&m.faults.0);
     }
     Some(Ready {
-        directory: m.directory.2,
+        directory: gpu,
         faults: m.faults.2,
         base,
     })
@@ -416,6 +605,117 @@ mod tests {
     use super::*;
     use crate::descriptor::{HeapDesc, create_heap, heap};
     use crate::object::{S_OK, This, guid};
+
+    #[test]
+    fn a_builder_root_maps_the_backing_that_received_the_header() {
+        use windows_sys::Win32::System::Memory::{
+            MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
+        };
+        let Some(mut memory) = Memory::new() else { return };
+        // The console's raw pointers are 40 bits. A normal host allocation
+        // can land above that range on Windows.
+        let allocation = (1usize..256).find_map(|i| {
+            let hint = (i << 32) as *const std::ffi::c_void;
+            let ptr = unsafe { VirtualAlloc(hint, 2 * PAGE as usize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) };
+            (!ptr.is_null()).then_some(ptr)
+        }).expect("two free pages below the console address limit");
+        let start = allocation as u64;
+        let page = start + PAGE;
+        crate::shadow::register(start as usize, start, 2 * PAGE);
+        let writer = crate::shadow::find(start, 2 * PAGE).unwrap();
+        crate::shadow::register(page as usize, page, PAGE);
+        let inner = crate::shadow::find(page, PAGE).unwrap();
+        assert!(!Arc::ptr_eq(&writer, &inner));
+
+        memory.map_with_root(page + 256, Some(&writer));
+        memory.map_with_root(page, Some(&inner));
+        let copy = memory.copy_at(page).unwrap();
+        assert!(Arc::ptr_eq(&writer, &memory.copies[copy]));
+        let entry = memory.pages.iter().find(|p| u64::from(p.index) == page / PAGE).unwrap();
+        assert_eq!(entry.offset, PAGE as u32);
+
+        crate::shadow::unregister(page as usize, page);
+        crate::shadow::unregister(start as usize, start);
+        unsafe { VirtualFree(allocation, 0, MEM_RELEASE) };
+    }
+
+    #[test]
+    fn compressed_leaf_groups_skip_padding_and_keep_24_bit_geometry_ids() {
+        let pitch = 2048 * 64;
+        let mut input = vec![0xffu8; pitch + 3];
+        input[..2048 * 3].fill(0);
+        input[pitch..].copy_from_slice(&[0x26, 0x13, 0x02]);
+        let ids = leaf_geometries(input.as_ptr() as u64, 2049);
+        assert_eq!(ids.into_iter().collect::<Vec<_>>(), [0, 0x021326]);
+    }
+
+    #[test]
+    fn leaf_geometry_streams_include_the_last_vertex_and_index_pages() {
+        let mut record = [0u8; 48];
+        record[8..12].copy_from_slice(&57u32.to_le_bytes());
+        record[16..20].copy_from_slice(&6u32.to_le_bytes());
+        record[20..24].copy_from_slice(&3u32.to_le_bytes());
+        record[24..32].copy_from_slice(&(2 * PAGE - 4).to_le_bytes());
+        record[32..40].copy_from_slice(&(5 * PAGE - 16).to_le_bytes());
+        record[40..48].copy_from_slice(&0x8008u64.to_le_bytes());
+        let mut pages = Vec::new();
+        geometry_streams(&record, &mut pages);
+        assert_eq!(pages, [PAGE, 2 * PAGE, 4 * PAGE, 5 * PAGE]);
+    }
+
+    #[test]
+    fn packed_indices_cover_meshlets_triangles_and_vertex_remaps() {
+        let mut header = [0u8; 12];
+        header[..4].copy_from_slice(&0x8000_0003u32.to_le_bytes());
+        header[4..8].copy_from_slice(&210u32.to_le_bytes());
+        header[8..].copy_from_slice(&335u32.to_le_bytes());
+        assert_eq!(packed_index_bytes(&header, 630), 1572);
+        assert_eq!(packed_index_bytes(&header, 18), 12);
+    }
+
+    #[test]
+    fn a_builder_root_must_reach_one_copy_across_every_page() {
+        let pages = [0, 5, 5, 2];
+        assert_eq!(contiguous_copy(&pages, 2 * PAGE - 8, 16), Some(4));
+        assert_eq!(contiguous_copy(&pages, 3 * PAGE - 8, 16), None);
+        assert_eq!(contiguous_copy(&pages, PAGE - 8, 16), None);
+        assert_eq!(contiguous_copy(&pages, PAGE, 0), None);
+        assert_eq!(contiguous_copy(&pages, u64::MAX - 7, 16), None);
+    }
+
+    #[test]
+    fn a_heap_directory_can_add_the_1024th_copy_after_other_tables() {
+        if host().is_none() { return; }
+        let heap = HostHeap::new(false, 64).unwrap();
+        let mut directory = HeapDirectory::new(&heap).unwrap();
+        let data = [0u8; 64];
+        let shadow = crate::shadow::find(data.as_ptr() as u64, data.len() as u64).unwrap();
+        let mut copies = vec![shadow.clone(); 1023];
+        let mut pages = vec![Page { index: 1, copy: 0, offset: 64 }];
+        directory.publish(&heap, &copies, &pages).unwrap();
+        let occupied = heap.dynamic(7).unwrap();
+        copies.push(shadow);
+        pages.push(Page { index: 2, copy: 1023, offset: 128 });
+        directory.publish(&heap, &copies, &pages).unwrap();
+        let slot = directory.slots[1023];
+        assert!(!(occupied..occupied + 7).contains(&slot));
+        // SAFETY: rows one and two were published above. No GPU work is in flight.
+        let rows = unsafe { std::slice::from_raw_parts(directory.buffer.1.add(2), 4) };
+        assert_eq!(directory.null.wrapping_add(rows[0]), directory.slots[0]);
+        assert_eq!(directory.null.wrapping_add(rows[2]), slot);
+        assert_eq!((rows[1], rows[3]), (64, 128));
+    }
+
+    #[test]
+    fn header_upload_maps_both_ends_of_cross_page_writes() {
+        let mut records = [[0u64; 5]; 2];
+        records[0][0] = 2 * PAGE - 16;
+        records[1][0] = 3 * PAGE;
+        records[1][1] = 5 * PAGE - 8;
+        let mut pages = Vec::new();
+        header_destinations(records.as_ptr() as u64, 2, &mut pages);
+        assert_eq!(pages, [2 * PAGE - 16, 2 * PAGE + 47, 3 * PAGE, 5 * PAGE - 8, 5 * PAGE + 15]);
+    }
 
     #[test]
     fn dropping_a_view_heap_evicts_its_memory_heaps_entry() {

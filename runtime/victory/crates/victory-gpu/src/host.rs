@@ -44,6 +44,7 @@ const RTV_RING: u32 = 1024;
 
 pub(crate) struct Host {
     pub(crate) device: ID3D12Device,
+    pub(crate) casts_fully_typed_formats: bool,
     queue: ID3D12CommandQueue,
     fence: ID3D12Fence,
     /// The last value signalled on `fence`, behind the submission lock.
@@ -701,7 +702,11 @@ fn create() -> windows::core::Result<Host> {
             {
                 if let Ok(d1) = l.cast::<ID3D12Debug1>() {
                     d1.SetEnableGPUBasedValidation(true);
+                    #[cfg(test)]
+                    queue2_tests::GPU_VALIDATION.store(true, Ordering::Relaxed);
                 }
+                // Tests exercise the resource states of individual commands.
+                #[cfg(not(test))]
                 if let Ok(d2) = l.cast::<ID3D12Debug2>() {
                     d2.SetGPUBasedValidationFlags(
                         D3D12_GPU_BASED_VALIDATION_FLAGS_DISABLE_STATE_TRACKING,
@@ -774,6 +779,15 @@ fn create() -> windows::core::Result<Host> {
             tracing::info!(min = o1.WaveLaneCountMin, max = o1.WaveLaneCountMax, "host wave lanes");
             victory_shader::emit::set_host_max_wave(o1.WaveLaneCountMax);
         }
+        let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS3::default();
+        let casts_fully_typed_formats = device
+            .CheckFeatureSupport(
+                D3D12_FEATURE_D3D12_OPTIONS3,
+                (&raw mut options).cast(),
+                size_of_val(&options) as u32,
+            )
+            .is_ok()
+            && options.CastingFullyTypedFormatSupported.as_bool();
         let messages = debug
             .then(|| device.cast::<ID3D12InfoQueue>().ok())
             .flatten();
@@ -822,6 +836,7 @@ fn create() -> windows::core::Result<Host> {
         tracing::info!("host D3D12 device ready");
         Ok(Host {
             device,
+            casts_fully_typed_formats,
             queue,
             fence,
             submitted: Mutex::new(0),
@@ -2356,11 +2371,21 @@ enum Step {
     Texture(std::sync::Arc<crate::texture::Staging>),
 }
 
+struct BuilderReport {
+    shadow: std::sync::Arc<crate::shadow::Shadow>,
+    address: u64,
+    len: u64,
+    after_step: usize,
+}
+
 /// What a list does on the CPU when it is submitted: copies between host
 /// memory regions (title buffers, upload buffers and buffer copies), and
 /// the upload buffers its GPU commands read, kept until the list is reset.
 #[derive(Default)]
 struct Deferred {
+    builder_uploads: Vec<crate::memory::BuilderUpload>,
+    builder_reports: Vec<BuilderReport>,
+    raw_copies: [usize; 3],
     /// Destination, source, bytes.
     copies: Vec<Step>,
     uploads: Vec<ID3D12Resource>,
@@ -2437,6 +2462,9 @@ impl Deferred {
         ALIVE[7].fetch_sub(self.upload_bytes, Ordering::Relaxed);
         self.upload_bytes = 0;
         self.budget_zeroed = false;
+        self.builder_uploads.clear();
+        self.builder_reports.clear();
+        self.raw_copies = [0; 3];
         // Dropped in the same order as a whole `Deferred` drops its fields.
         if self.copies.capacity() > KEEP_STEPS {
             self.copies = Vec::new();
@@ -7730,6 +7758,12 @@ impl Host {
         crate::native::gpumem::flush(&self.device, &self.queue);
         crate::native::buffers::line();
         submitting(1, runs.len());
+        for &list in runs {
+            let uploads = list.deferred().builder_uploads.clone();
+            for upload in uploads {
+                upload.prepare(list);
+            }
+        }
         // Flights in the air ([`late`]): a submission that is waited for
         // settles them first, one sent ahead only if preparing it reads
         // what they write or would overwrite an in-flight texture staging
@@ -8325,6 +8359,12 @@ impl Host {
                 }
             }
             queue.ClearStoredMessages();
+        }
+        #[cfg(test)]
+        if queue2_tests::GPU_VALIDATION.load(Ordering::Relaxed) && let Some(error) = &first_error {
+            // The relay must finish landing this submission before a test can fail.
+            queue2_tests::VALIDATION_ERROR.lock().unwrap_or_else(|e| e.into_inner())
+                .get_or_insert_with(|| error.clone());
         }
         first_error
     }
@@ -9247,6 +9287,191 @@ impl HostList {
 
     fn deferred(&self) -> std::sync::MutexGuard<'_, Deferred> {
         self.deferred.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn builder_upload(&self, upload: crate::memory::BuilderUpload) {
+        self.deferred().builder_uploads.push(upload);
+    }
+
+    /// Numbered raw-address copies already prepared on this list for reads,
+    /// writes to every copy, and the diagnostics for omitted writes.
+    pub(crate) fn raw_copy_counts(&self, n: usize, write_all: bool, narrowed: bool) -> [usize; 3] {
+        let mut deferred = self.deferred();
+        let before = deferred.raw_copies;
+        deferred.raw_copies[0] = n;
+        if write_all { deferred.raw_copies[1] = n; }
+        if narrowed { deferred.raw_copies[2] = n; }
+        before
+    }
+
+    /// Save the exact backing that the builder binds for a size or counter result.
+    pub(crate) fn builder_report(&self, shadow: &std::sync::Arc<crate::shadow::Shadow>, at: u64, len: u64) {
+        let mut d = self.deferred();
+        let after_step = d.copies.len();
+        if let Some(previous) = d
+            .builder_reports
+            .iter()
+            .position(|r| r.address == at && std::sync::Arc::ptr_eq(&r.shadow, shadow))
+        {
+            d.builder_reports.remove(previous);
+        }
+        d.builder_reports.push(BuilderReport {
+            shadow: shadow.clone(),
+            address: at,
+            len,
+            after_step,
+        });
+    }
+
+    /// A size copied in its producing list is available on the GPU before the CPU can read it.
+    pub(crate) fn copy_builder_report(&self, dst: u64, src: u64, len: u64) -> bool {
+        static ENHANCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        self.copy_builder_report_with_barriers(dst, src, len, *ENHANCED.get_or_init(crate::draw::enhanced_barriers))
+    }
+
+    fn copy_builder_report_with_barriers(&self, dst: u64, src: u64, len: u64, enhanced: bool) -> bool {
+        self.copy_builder_report_to(dst, src, len, enhanced, crate::shadow::find)
+    }
+
+    fn copy_builder_report_to(
+        &self, dst: u64, src: u64, len: u64, enhanced: bool,
+        destination: impl FnOnce(u64, u64) -> Option<std::sync::Arc<crate::shadow::Shadow>>,
+    ) -> bool {
+        if len == 0 {
+            return false;
+        }
+        let from = {
+            let d = self.deferred();
+            let Some(report) = d
+                .builder_reports
+                .iter()
+                .rev()
+                .find(|r| r.address <= src && src.saturating_add(len) <= r.address.saturating_add(r.len))
+            else {
+                return false;
+            };
+            let overlaps =
+                |at: usize, n: usize| at < (src + len) as usize && (src as usize) < at.saturating_add(n);
+            if d.copies[report.after_step..].iter().any(|s| match s {
+                Step::Copy(at, _, n) | Step::Run(_, Some((at, _, n))) => overlaps(*at, *n),
+                Step::Run(_, None) => true,
+                _ => false,
+            }) {
+                return false;
+            }
+            report.shadow.clone()
+        };
+        self.flush_barriers();
+        let Some(to) = destination(dst, len) else {
+            self.read_back_builder_report(dst, &from.buffer, from.offset(src), len);
+            return true;
+        };
+        // The destination's title bytes first; then its range is the card's.
+        to.refresh(self, dst, len);
+        to.gpu_writes(self, dst, len);
+        let src_offset = from.offset(src);
+        let dst_offset = to.offset(dst);
+        let alias = from.buffer == to.buffer;
+        let uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        let common = D3D12_RESOURCE_STATE_COMMON;
+        if enhanced && alias && src_offset.abs_diff(dst_offset) >= len
+            && let Ok(l7) = self.list.cast::<ID3D12GraphicsCommandList7>()
+        {
+            self.copy_report_disjoint(&l7, &from.buffer, src_offset, dst_offset, len);
+        } else if alias {
+            // Legacy copy states cover the whole buffer, even for disjoint ranges.
+            let scratch = host().and_then(|h| h.uav_buffer(len))
+                .unwrap_or_else(|| fail(format_args!("no staging buffer for a {len}-byte builder report")));
+            self.copy_report_legacy((&from.buffer, src_offset, uav), (&scratch, 0, common), len);
+            self.copy_report_legacy((&scratch, 0, common), (&to.buffer, dst_offset, uav), len);
+            self.keep(&scratch);
+        } else {
+            // A different destination can itself be the output of an earlier builder dispatch.
+            // State belongs to the resource, even when the two report ranges are disjoint.
+            let dst_state = if self.deferred().builder_reports.iter().any(|r| r.shadow.buffer == to.buffer) {
+                uav
+            } else {
+                common
+            };
+            self.copy_report_legacy((&from.buffer, src_offset, uav), (&to.buffer, dst_offset, dst_state), len);
+        }
+        self.keep(&to.buffer);
+        self.keep(&from.buffer);
+        self.count_write();
+        #[cfg(feature = "diagnostics")]
+        self.note_op(|| format!("copy builder report {src:#x} to {dst:#x} ({len} bytes)"));
+        true
+    }
+
+    fn copy_report_legacy(
+        &self,
+        (from, src, from_state): (&ID3D12Resource, u64, D3D12_RESOURCE_STATES),
+        (to, dst, to_state): (&ID3D12Resource, u64, D3D12_RESOURCE_STATES),
+        len: u64,
+    ) {
+        let read = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        let write = D3D12_RESOURCE_STATE_COPY_DEST;
+        // A dispatch promotes its report to UAV until the submission ends. Restore each
+        // buffer's incoming state so another copy or dispatch sees that same state.
+        // SAFETY: the resources are distinct, live, and contain the two ranges.
+        unsafe {
+            self.list.ResourceBarrier(&[transition(from, from_state, read), transition(to, to_state, write)]);
+            self.list.CopyBufferRegion(to, dst, from, src, len);
+            self.list.ResourceBarrier(&[transition(to, write, to_state), transition(from, read, from_state)]);
+        }
+    }
+
+    /// A title destination without a GPU shadow still receives the report at settlement.
+    fn read_back_builder_report(&self, dst: u64, from: &ID3D12Resource, offset: u64, len: u64) {
+        let buffer = host().and_then(|h| h.read_back_buffer(len))
+            .unwrap_or_else(|| fail(format_args!("out of readback memory for a {len}-byte builder report")));
+        let uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        let read = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        // SAFETY: the producer owns this range. Readback heaps stay in COPY_DEST.
+        unsafe {
+            self.list.ResourceBarrier(&[transition(from, uav, read)]);
+            self.list.CopyBufferRegion(&buffer, 0, from, offset, len);
+            self.list.ResourceBarrier(&[transition(from, read, uav)]);
+        }
+        self.keep(from);
+        self.defer_read_back(buffer, dst as *mut u8, [len as usize, 1, len as usize]);
+        self.count_write();
+    }
+
+    /// A self-copy between disjoint ranges is legal with enhanced barriers. Cross the
+    /// legacy/enhanced boundary in COMMON on both sides of the copy.
+    fn copy_report_disjoint(
+        &self, list: &ID3D12GraphicsCommandList7, buffer: &ID3D12Resource,
+        src: u64, dst: u64, len: u64,
+    ) {
+        let common = D3D12_RESOURCE_STATE_COMMON;
+        let uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        let access = D3D12_BARRIER_ACCESS_COPY_SOURCE | D3D12_BARRIER_ACCESS_COPY_DEST;
+        let barrier = |before, after| D3D12_BUFFER_BARRIER {
+            SyncBefore: D3D12_BARRIER_SYNC_ALL,
+            SyncAfter: D3D12_BARRIER_SYNC_ALL,
+            AccessBefore: before,
+            AccessAfter: after,
+            // SAFETY: borrowed for the Barrier call. The list retains the buffer.
+            pResource: unsafe { std::mem::transmute_copy(buffer) },
+            Offset: 0,
+            Size: u64::MAX,
+        };
+        let apply = |b: D3D12_BUFFER_BARRIER| unsafe {
+            list.Barrier(&[D3D12_BARRIER_GROUP {
+                Type: D3D12_BARRIER_TYPE_BUFFER,
+                NumBarriers: 1,
+                Anonymous: D3D12_BARRIER_GROUP_0 { pBufferBarriers: &b },
+            }]);
+        };
+        // SAFETY: the producer owns the buffer in UAV state and the ranges do not intersect.
+        unsafe {
+            self.list.ResourceBarrier(&[transition(buffer, uav, common)]);
+            apply(barrier(D3D12_BARRIER_ACCESS_COMMON, access));
+            self.list.CopyBufferRegion(buffer, dst, buffer, src, len);
+            apply(barrier(access, D3D12_BARRIER_ACCESS_COMMON));
+            self.list.ResourceBarrier(&[transition(buffer, common, uav)]);
+        }
     }
 
     /// Copies `len` bytes from `src` to `dst` when the list is submitted.
@@ -13002,6 +13227,10 @@ mod title_memory_io {
 mod queue2_tests {
     use super::*;
 
+    pub(super) static GPU_VALIDATION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    pub(super) static VALIDATION_ERROR: Mutex<Option<String>> = Mutex::new(None);
+    static VALIDATION_TEST: Mutex<()> = Mutex::new(());
+
     /// `memory[to] = memory[from] + add`, after `spin` steps.
     const ADD: &str = r#"
 #define RS "RootConstants(num32BitConstants=4, b0), UAV(u0)"
@@ -13018,6 +13247,175 @@ void main() {
     memory.Store(to, memory.Load(from) + add + (h & 0u));
 }
 "#;
+
+
+    #[test]
+    fn relay_settles_after_a_validation_error() {
+        let _test = VALIDATION_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(host) = host() else { return };
+        if !relay() || !GPU_VALIDATION.load(Ordering::Relaxed) { return }
+        let queue = host.messages.as_ref().expect("D3D12 debug queue");
+        let list = host.new_list().unwrap();
+        list.close();
+        // SAFETY: this inserts a diagnostic without issuing an invalid GPU command.
+        unsafe {
+            queue.AddApplicationMessage(D3D12_MESSAGE_SEVERITY_ERROR, windows::core::s!("relay validation test"))
+        }.unwrap();
+        assert_ne!(host.execute_own(&list), 0);
+        let (settled, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            settle_now(WHY_SYNC);
+            let _ = settled.send(());
+        });
+        done.recv_timeout(std::time::Duration::from_secs(10)).expect("relay did not settle");
+        let error = VALIDATION_ERROR.lock().unwrap_or_else(|e| e.into_inner()).take();
+        assert!(error.as_deref().is_some_and(|e| e.contains("relay validation test")), "{error:?}");
+    }
+
+    #[test]
+    fn copies_the_builders_compacted_size_after_its_dispatch() {
+        let enhanced = crate::draw::enhanced_barriers();
+        check_builder_size_copy(enhanced, false);
+        if enhanced { check_builder_size_copy(true, true); }
+    }
+
+    #[test]
+    fn copies_the_builders_compacted_size_with_legacy_barriers() {
+        check_builder_size_copy(false, false);
+        check_builder_size_copy(false, true);
+    }
+
+    fn check_builder_size_copy(enhanced: bool, explicit_uav: bool) {
+        use windows_sys::Win32::System::Memory::{
+            MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
+        };
+        let _test = VALIDATION_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let host = host();
+        if std::env::var_os("VICTORY_D3D12_GBV").is_some() {
+            assert!(GPU_VALIDATION.load(Ordering::Relaxed), "GPU-based validation unavailable");
+            assert!(host.is_some_and(|h| h.messages.is_some()), "no D3D12 debug message queue");
+        }
+        let Some(host) = host else { return };
+        let code = compile(ADD, windows::core::s!("main"), windows::core::s!("cs_5_1")).unwrap();
+        // SAFETY: the shader contains this root signature and accesses only allocated dwords.
+        let (root, pso): (ID3D12RootSignature, ID3D12PipelineState) = unsafe {
+            let root = host.device.CreateRootSignature(0, &code).unwrap();
+            let pso = host
+                .device
+                .CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                    pRootSignature: std::mem::transmute_copy(&root),
+                    CS: D3D12_SHADER_BYTECODE {
+                        pShaderBytecode: code.as_ptr().cast(),
+                        BytecodeLength: code.len(),
+                    },
+                    ..Default::default()
+                })
+                .unwrap();
+            (root, pso)
+        };
+        const SIZE: usize = 65536;
+        let ptr = unsafe {
+            VirtualAlloc(
+                std::ptr::null(),
+                2 * SIZE,
+                MEM_RESERVE | MEM_COMMIT | 0x20_0000,
+                PAGE_READWRITE,
+            )
+        }
+        .cast::<u32>();
+        assert!(!ptr.is_null());
+        let addr = ptr as u64;
+        crate::shadow::register(ptr as usize, addr, SIZE as u64);
+        let other = addr + SIZE as u64;
+        crate::shadow::register(other as usize, other, SIZE as u64);
+        let shadow = crate::shadow::find(addr, SIZE as u64).unwrap();
+        let list = host.new_list().unwrap();
+        unsafe { ptr.write(0x2700) };
+        shadow.refresh(&list, addr, 12);
+        shadow.gpu_writes(&list, addr + 4, 4);
+        unsafe {
+            // Exercise an already-established UAV state as well as implicit promotion.
+            if explicit_uav {
+                list.list.ResourceBarrier(&[transition(
+                    &shadow.buffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                )]);
+            }
+            list.list.SetPipelineState(&pso);
+            list.list.SetComputeRootSignature(&root);
+            list.list
+                .SetComputeRoot32BitConstants(0, 4, [4u32, 0, 0x80, 0].as_ptr().cast(), 0);
+            list.list.SetComputeRootUnorderedAccessView(1, shadow.gpu(addr));
+            list.list.Dispatch(1, 1, 1);
+        }
+        list.builder_report(&shadow, addr + 4, 4);
+        assert!(!list.copy_builder_report_with_barriers(addr + 8, addr, 4, enhanced));
+        assert!(list.copy_builder_report_with_barriers(addr + 8, addr + 4, 4, enhanced));
+        assert!(list.copy_builder_report_with_barriers(other, addr + 4, 4, enhanced));
+        // A later dispatch on this list consumes the copied word as a UAV again.
+        shadow.gpu_writes(&list, addr + 12, 4);
+        unsafe {
+            list.list.SetComputeRoot32BitConstants(0, 4, [12u32, 8, 1, 0].as_ptr().cast(), 0);
+            list.list.Dispatch(1, 1, 1);
+        }
+        // Turn the separate readback destination into a second producer. Copy into
+        // another offset of that UAV, then copy its own result back to the first UAV.
+        let second = crate::shadow::find(other, SIZE as u64).unwrap();
+        assert_ne!(shadow.buffer, second.buffer);
+        second.gpu_writes(&list, other + 4, 4);
+        unsafe {
+            if explicit_uav {
+                list.list.ResourceBarrier(&[transition(
+                    &second.buffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                )]);
+            }
+            list.list.SetComputeRootUnorderedAccessView(1, second.gpu(other));
+            list.list.SetComputeRoot32BitConstants(0, 4, [4u32, 0, 2, 0].as_ptr().cast(), 0);
+            list.list.Dispatch(1, 1, 1);
+        }
+        list.builder_report(&second, other + 4, 4);
+        assert!(list.copy_builder_report_with_barriers(other + 8, addr + 4, 4, enhanced));
+        assert!(list.copy_builder_report_with_barriers(addr + 16, other + 4, 4, enhanced));
+        let mut readback = 0u32;
+        assert!(list.copy_builder_report_to((&raw mut readback) as u64, other + 4, 4, enhanced, |_, _| None));
+        // Overwrite the source after the fallback copy. Readback must retain the earlier size.
+        unsafe {
+            list.list.SetComputeRoot32BitConstants(0, 4, [4u32, 0, 3, 0].as_ptr().cast(), 0);
+            list.list.Dispatch(1, 1, 1);
+        }
+        // Two adjacent builder words overlap the destination by four bytes.
+        shadow.gpu_writes(&list, addr + 24, 8);
+        unsafe {
+            list.list.SetComputeRootUnorderedAccessView(1, shadow.gpu(addr));
+            for (offset, add) in [(24u32, 1), (28, 2)] {
+                list.list.SetComputeRoot32BitConstants(0, 4, [offset, 4, add, 0].as_ptr().cast(), 0);
+                list.list.Dispatch(1, 1, 1);
+            }
+        }
+        list.builder_report(&shadow, addr + 24, 8);
+        assert!(list.copy_builder_report_with_barriers(addr + 28, addr + 24, 8, enhanced));
+        list.close();
+        host.execute(&[&list]);
+        settle_now(WHY_SYNC);
+        let error = VALIDATION_ERROR.lock().unwrap_or_else(|e| e.into_inner()).take();
+        assert!(error.is_none(), "D3D12 validation: {error:?}");
+        assert_eq!(unsafe { ptr.add(2).read_volatile() }, 0x2780);
+        assert_eq!(unsafe { (other as *const u32).read_volatile() }, 0x2780);
+        assert_eq!(unsafe { ptr.add(3).read_volatile() }, 0x2781);
+        assert_eq!(unsafe { ((other + 8) as *const u32).read_volatile() }, 0x2780);
+        assert_eq!(unsafe { ptr.add(4).read_volatile() }, 0x2782);
+        assert_eq!(unsafe { ptr.add(7).read_volatile() }, 0x2781);
+        assert_eq!(unsafe { ptr.add(8).read_volatile() }, 0x2782);
+        assert_eq!(unsafe { ((other + 4) as *const u32).read_volatile() }, 0x2783);
+        assert_eq!(readback, 0x2782);
+        eprintln!("verified compacted-size readback (enhanced: {enhanced}, explicit UAV: {explicit_uav})");
+        crate::shadow::unregister(other as usize, other);
+        drop(list);
+        crate::shadow::unregister(ptr as usize, addr);
+        drop(shadow);
+        unsafe {
+            VirtualFree(ptr.cast(), 0, MEM_RELEASE);
+        }
+    }
 
     #[test]
     fn warp_title_bytes_go_up_and_shader_writes_come_back_whatever_the_queues() {

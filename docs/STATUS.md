@@ -6,7 +6,7 @@ Measured on: Windows 10 22H2, RTX 3060 12 GB, 32 GB RAM. Series S profile (`--co
 
 - The VIctory-based runtime boots, gets through the menus, saves and legal screens, reaches the **lit world** and starts gameplay at about **4 fps** in the prologue on an RTX 3060, now GPU-bound.
 - The **tile-grid overlay is fixed** (rectangle-list pipelines decode right). **Streaming freezes** and the GPU cost remain.
-- **Shadowed areas are too dark.**
+- Shadowed areas were too dark in the RTX 3060 run. In a later test on an RX 7900 XTX, enabling ray tracing restored bounce light in the opening cell.
 - The **intro cutscene is very slow** unless it is skipped.
 - **Not yet verified playable.**
 
@@ -16,9 +16,10 @@ Measured on: Windows 10 22H2, RTX 3060 12 GB, 32 GB RAM. Series S profile (`--co
 - World data streams in through DirectStorage; the open world loads.
 - VIctory-based runtime: the world is drawn with the title's own lighting. Autosave and reload of a checkpoint are reported working by the base (`runtime/victory/README.md`).
 - XCL: world-start GPU crash fixed (the title survives 7+ minutes in the world), pipeline journal and offline build, launcher.
+- On the graphics-compatibility branch, the opening cell has bounced light and local lamp shadows with ray tracing enabled. [Ray-tracing test notes](../runtime/victory/docs/fork-ray-tracing.md)
 
 ## What does not
-- Shadowed areas are too dark: the title's ray-traced bounce light and shadows do not run yet (`runtime/victory/docs/fork-ray-tracing.md` describes the work so far).
+- The back of the inmate shirt sometimes renders black before the lighting pass.
 - About 4 fps in the prologue. The per-frame read waits are cut from about 156 to about 26 ms, so the frame is now GPU-bound. Streaming freezes remain. The intro cutscene is very slow unless skipped.
 - Some HUD text is cut off in captures.
 - Some cards lose the first room's walls and roof with certain switches (`runtime/victory/VICKY.md`).

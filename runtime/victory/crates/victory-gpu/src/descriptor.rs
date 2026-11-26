@@ -58,7 +58,7 @@ pub(crate) struct Heap {
     /// descriptor order when a draw first uses them (decision 0007, step
     /// 3); slots written before wait in `pending`.
     #[cfg(windows)]
-    host: std::sync::OnceLock<Option<host::HostHeap>>,
+    host: std::sync::OnceLock<Option<std::sync::Arc<host::HostHeap>>>,
     #[cfg(windows)]
     pending: std::sync::Mutex<Vec<u32>>,
     /// Changed pages of a placed shader-visible heap. Some titles copy
@@ -84,7 +84,7 @@ impl Heap {
     #[cfg(windows)]
     pub(crate) fn host(&self) -> Option<&host::HostHeap> {
         if let Some(h) = self.host.get() {
-            return h.as_ref();
+            return h.as_deref();
         }
         if self.desc.flags & SHADER_VISIBLE == 0 || !matches!(self.desc.kind, VIEWS_KIND | SAMPLERS)
         {
@@ -100,9 +100,14 @@ impl Heap {
                 for i in pending.drain(..) {
                     h.mirror(i, self.start + u64::from(i) * step, false);
                 }
-                Some(h)
+                Some(std::sync::Arc::new(h))
             })
-            .as_ref()
+            .as_deref()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn hold_host(&self) -> Option<std::sync::Arc<host::HostHeap>> {
+        self.host.get()?.clone()
     }
 
     /// The handle of descriptor `index` of this heap.
@@ -235,7 +240,8 @@ pub(crate) fn sync_heaps() {
         // By address, as the registry holds heaps: the host heap is used
         // from the title's threads at once already (its state is behind
         // locks and atomics).
-        let host_at = std::ptr::from_ref(host) as usize;
+        // The heap itself, not the `Arc` that holds it.
+        let host_at = std::sync::Arc::as_ptr(host) as usize;
         let one_page = |(from, to): (usize, usize), page_bytes: &mut Vec<u8>| -> [u64; 3] {
             // SAFETY: the heap is live while the registry's lock is held.
             let host = unsafe { &*(host_at as *const host::HostHeap) };

@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn stable_matches_play_ps1() {
         let e = stable_env(Path::new("D:/dump"), Path::new("F:/c"));
-        assert_eq!(e.len(), 10 + 9 + 5);
+        assert_eq!(e.len(), 10 + C1.len() + CAND4.len());
         assert_eq!(get(&e, "VICTORY_FRIENDLY").as_deref(), Some("1"));
         assert!(get(&e, "VICTORY_REMAP_LAZY").is_none());
         for (k, v) in [

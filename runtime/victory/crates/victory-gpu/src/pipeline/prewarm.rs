@@ -44,6 +44,9 @@ fn shader(stage: &'static str, container: &[u8]) -> Arc<Shader> {
         container: container.to_vec(),
         translated: OnceLock::new(),
         walks: OnceLock::new(),
+        thread_limited: false,
+        limited_twin: OnceLock::new(),
+        group: OnceLock::new(),
     })
 }
 

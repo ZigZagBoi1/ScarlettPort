@@ -48,6 +48,17 @@ mod legacy;
 
 static CACHE: OnceLock<Cache> = OnceLock::new();
 
+fn append_view_heap_layout(key: &mut Vec<u8>, map: Option<(u32, u32)>) {
+    let [window, slot] = map.map_or([u32::MAX; 2], |(window, slot)| [window, slot]);
+    key.extend_from_slice(&window.to_le_bytes());
+    key.extend_from_slice(&slot.to_le_bytes());
+    if map.is_some() {
+        // On capped heaps, translated table loads address a separate bank of
+        // descriptor words. The previous translation indexed the title bank.
+        key.extend_from_slice(b"descriptor snapshot words v1");
+    }
+}
+
 /// `VICTORY_SHADER_CACHE_KEY=output`: the cache of this file (keyed by settings, entries stamped
 /// with the translator rules they used). Otherwise (the default) the cache as fx-final 26f8afd
 /// has it, keyed by the translator that made each entry (`legacy`), so a cache warmed by a build
@@ -226,10 +237,7 @@ fn build() -> &'static [u8; 32] {
         let mut host = vec![u8::from(victory_shader::resource::rt_miss())];
         host.extend_from_slice(&victory_shader::emit::view_heap_limit().to_le_bytes());
         host.extend_from_slice(&victory_shader::emit::host_max_wave().to_le_bytes());
-        let map = victory_shader::emit::view_heap_map().map_or([u32::MAX; 2], |(w, s)| [w, s]);
-        for word in map {
-            host.extend_from_slice(&word.to_le_bytes());
-        }
+        append_view_heap_layout(&mut host, victory_shader::emit::view_heap_map());
         // (The host marks constant buffer slots (`SLOT_CONSTANTS`): a translation from before the
         // mark would take it for a stride.)
         host.extend_from_slice(b"slot constants");
@@ -334,8 +342,9 @@ pub fn warm(container: &[u8]) -> Result<bool, String> {
     host_shader(container).map(|_| COUNTS[TRANSLATED].load(Ordering::Relaxed) != translated)
 }
 
-/// The translation of a console shader container, from the cache when
-/// there is one.
+pub(crate) use legacy::host_shader_thread_limited;
+
+/// Translate a shader container, reusing a cached translation when possible.
 pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
     if !output_key() {
         return legacy::host_shader(container);
@@ -489,12 +498,20 @@ fn translation_key(build: &[u8; 32], container: &[u8], hash: &str) -> [u8; 32] {
     use victory_shader::emit;
     let off = !emit::deep_skips_allowed(Some(hash)) && emit::wave64_retried(container);
     let key = program_key(build, off);
-    if !emit::activate_rays_cleanup(hash) {
+    // Both ray-node MIMG opcodes carry the same bits apart from bit 18.
+    // A matching data word can only cause an extra cache miss. Scan before
+    // decoding so regular compute and graphics shaders keep their warm entries.
+    let ray_node = container.chunks_exact(4).any(|bytes| {
+        u32::from_le_bytes(bytes.try_into().unwrap()) & 0xfdf8_0001 == 0xf198_0001
+    });
+    let cleanup = emit::activate_rays_cleanup(hash);
+    if !cleanup && !ray_node {
         return key;
     }
     let mut h = blake3::Hasher::new();
     h.update(&key);
-    h.update(b"ActivateRays module cleanup v1");
+    if cleanup { h.update(b"ActivateRays module cleanup v1"); }
+    if ray_node { h.update(b"resident ordered BVH boxes v1"); }
     *h.finalize().as_bytes()
 }
 
@@ -839,6 +856,19 @@ fn decode(bytes: &[u8]) -> Option<HostShader> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn only_capped_heaps_need_new_keys_for_snapshot_words() {
+        let mut plain = Vec::new();
+        append_view_heap_layout(&mut plain, None);
+        assert_eq!(plain, [0xff; 8]);
+
+        let mut capped = Vec::new();
+        append_view_heap_layout(&mut capped, Some((4096, 8192)));
+        let previous = [4096u32.to_le_bytes(), 8192u32.to_le_bytes()].concat();
+        assert!(capped.starts_with(&previous));
+        assert_ne!(capped, previous);
+    }
+
     fn shader() -> HostShader {
         HostShader {
             stage: HwStage::Ps,
@@ -928,6 +958,15 @@ mod tests {
         assert_eq!(translation_key(&build, b"", "39f0e9aeb156a61d"), build);
         let target = translation_key(&build, b"", "39f0e9aeb156a61c");
         assert_eq!(target != build, std::env::var_os("VICTORY_SHADER_OPT").is_none());
+    }
+
+    #[test]
+    fn both_ray_node_opcodes_get_the_updated_box_test() {
+        let build = [42; 32];
+        for word in [0xf198_9f07u32, 0xf19c_9f07] {
+            assert_ne!(translation_key(&build, &word.to_le_bytes(), ""), build);
+        }
+        assert_eq!(translation_key(&build, &0xf198_9f06u32.to_le_bytes(), ""), build);
     }
 
     #[test]

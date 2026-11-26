@@ -1230,22 +1230,6 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 #[cfg(test)]
-mod wave_env_tests {
-    use super::host_max_wave_from_env as f;
-
-    #[test]
-    fn host_max_wave_values() {
-        assert_eq!(f(Some("32".into())), Some(32));
-        assert_eq!(f(Some(" 64 ".into())), Some(64));
-        assert_eq!(f(None), None);
-        assert_eq!(f(Some("lots".into())), None);
-        assert_eq!(f(Some("0".into())), None);
-        assert_eq!(f(Some("-32".into())), None);
-        assert_eq!(f(Some("48".into())), None);
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::has_shader_marker;
 
@@ -1260,5 +1244,21 @@ mod tests {
                 assert!(!has_shader_marker(file.as_slice(), &mut [0; 8]).unwrap());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod wave_env_tests {
+    use super::host_max_wave_from_env as f;
+
+    #[test]
+    fn host_max_wave_values() {
+        assert_eq!(f(Some("32".into())), Some(32));
+        assert_eq!(f(Some(" 64 ".into())), Some(64));
+        assert_eq!(f(None), None);
+        assert_eq!(f(Some("lots".into())), None);
+        assert_eq!(f(Some("0".into())), None);
+        assert_eq!(f(Some("-32".into())), None);
+        assert_eq!(f(Some("48".into())), None);
     }
 }

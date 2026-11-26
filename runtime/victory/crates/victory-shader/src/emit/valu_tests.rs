@@ -1421,8 +1421,8 @@ fn lower_heap_cs(words: &[u32], root: RootType, heap: (u32, Option<(u32, u32)>))
 /// up (the translation changes with the window and the map's slot, which
 /// the shader cache key holds), and nothing else changes: no user data,
 /// root views or root parameters of its own, so the host's root signatures
-/// stay as they were. A table's index is the host's already: a table is
-/// translated the same with and without a map.
+/// stay as they were. A copied table already has a host index. Its
+/// descriptor words depend only on where the dynamic slots begin.
 #[test]
 fn only_views_from_the_resource_heap_are_looked_up_in_the_heap_map() {
     const LIMIT: u32 = 999_999;
@@ -1439,7 +1439,10 @@ fn only_views_from_the_resource_heap_are_looked_up_in_the_heap_map() {
         (&mapped.root_cbvs, &mapped.root_srvs, &mapped.root_uavs)
     );
     let table = |map| lower_store_cs(RootType::Table, (LIMIT, map));
-    assert_eq!(table(None).dxil, table(Some((131_072, 737_854))).dxil);
+    let mapped_table = table(Some((131_072, 737_854)));
+    assert!(mapped_table.root_srvs.contains(&super::SLOT_WORDS));
+    assert_ne!(table(None).dxil, mapped_table.dxil);
+    assert_eq!(mapped_table.dxil, table(Some((65_536, 737_854))).dxil);
 }
 
 /// On the hardware GPU and WARP, a bindless store at a title index below

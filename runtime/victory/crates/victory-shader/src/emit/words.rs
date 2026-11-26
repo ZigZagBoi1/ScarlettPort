@@ -11,6 +11,18 @@
 /// Dwords per slot: the console's 32-byte descriptor slot.
 pub const WORDS: u32 = 8;
 
+/// Temporary descriptor-table entries reserved by the host.
+pub const SNAPSHOT_SLOTS: u32 = 1 << 18;
+
+/// A capped heap reuses physical slot numbers that are valid bindless title
+/// indices. Keep its copied tables past the title's descriptor words.
+pub fn table_slot(slot: u32, map_slot: Option<u32>) -> u32 {
+    match map_slot {
+        Some(map) if slot > map => super::SLOT_STRIDES_COUNT + (slot - map - 1),
+        _ => slot,
+    }
+}
+
 /// GFX10 image resource types (`SQ_RSRC_IMG_*`, T# dword 3 bits 28-31).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageType {

@@ -80,7 +80,7 @@ Measured on an RTX 3060 (Series S profile, the title's own upscaler):
 
 - **Speed:** about 4 fps while walking and turning in the world, with steady pacing (95th-percentile frame about 270 ms). That is far from 30 fps. The GPU profiler (`VICTORY_GPU_PROFILE`) measures about 93-111 ms of GPU time per frame, spread over about 1,100 pipelines, so no single pass is the one to fix. The intro cutscene is very slow unless it is skipped.
 - **Pipeline compile freezes:** on a first run, moving into new areas freezes while pipelines compile. The shader prewarm and the pipeline cache shorten this on later runs.
-- **Hair renders too bright; shadowed areas are too dark.** The screen lighting passes are fixed (their workers are on by default), but the title's ray-traced lighting and shadows do not run yet (ray tracing is off); the ray-tracing work so far is described in [`runtime/victory/docs/fork-ray-tracing.md`](runtime/victory/docs/fork-ray-tracing.md).
+- **Shadowed areas are too dark, and hair renders incorrectly.** With ray tracing enabled, the title's probes and distant-shadow pass now hit geometry in the opening cell. [Ray-tracing test notes](runtime/victory/docs/fork-ray-tracing.md)
 - **Not verified playable:** nobody has played a session end to end.
 
 Details: [`docs/STATUS.md`](docs/STATUS.md). Plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).
@@ -236,7 +236,7 @@ Every task is sized for **one person + one AI coding agent**. Pick one, comment 
 
 ### Rendering
 
-- [ ] **#1 Light in shadow.** Ray-traced bounce light and shadows do not run yet, so shadowed areas are too dark. See `runtime/victory/docs/fork-ray-tracing.md`.
+- [ ] **#1 Light in shadow.** The opening cell has bounce light with ray tracing enabled. Other interiors still need testing. See `runtime/victory/docs/fork-ray-tracing.md`.
 - [ ] **#2 Missing walls and roofs.** Some cards lose the first room's walls and roof with certain switches; find the cause (see `runtime/victory/VICKY.md`).
 - [ ] **#3 Faster wave64 on NVIDIA.** 64-lane programs run as two 32-lane halves. Profile them and cut the overhead.
 - [ ] **#9 `VICTORY_SHADER_OPT` in game.** The safe mask removes 51% of instructions offline; its in-game test is pending. One of the other clean-up passes loses walls in game, and an offline differential found nothing. Run the safe mask in game, then find which pass loses walls and why. `runtime/victory/crates/victory-shader/src/emit/mod.rs` (`shader_opt`), `emit/bitcode.rs`.

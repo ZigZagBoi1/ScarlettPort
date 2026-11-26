@@ -114,7 +114,7 @@ struct List {
     /// Ours, after the console layout: memory handed out by
     /// [`allocate_upload`], kept until the list is reset; the host list the
     /// calls record into (decision 0007), and the draw state the title set.
-    uploads: std::sync::Mutex<Vec<Vec<u8>>>,
+    uploads: std::sync::Mutex<Vec<UploadBlock>>,
     #[cfg(windows)]
     host: Option<crate::host::HostList>,
     #[cfg(windows)]
@@ -283,7 +283,7 @@ fn host_list_holding<'a>(this: This) -> Option<&'a crate::host::HostList> {
 #[cfg(windows)]
 pub(crate) struct Detached {
     host: crate::host::HostList,
-    _uploads: Vec<Vec<u8>>,
+    _uploads: Vec<UploadBlock>,
     _state: crate::draw::State,
 }
 
@@ -1230,10 +1230,11 @@ extern "system" fn copy_buffer_region(
         && let Some(to) = buffer_range(dst, dst_offset, len)
         && let Some(from) = buffer_range(src, src_offset, len)
     {
-        if crate::native::gpumem::copy_on_card(list, to as u64, from as u64, len) {
-            return;
+        if !list.copy_builder_report(to as u64, from as u64, len)
+            && !crate::native::gpumem::copy_on_card(list, to as u64, from as u64, len)
+        {
+            list.defer_copy(to, from, len as usize);
         }
-        list.defer_copy(to, from, len as usize);
     }
     #[cfg(not(windows))]
     let _ = (this, dst, dst_offset, src, src_offset, len);
@@ -1788,17 +1789,34 @@ extern "system" fn driver_hint(_: This, _feature: u64, _value: u64) -> u64 {
     0
 }
 
-/// `DispatchX(x, y, z, flags)`: a dispatch with console flags, which the
-/// host has no use for (the ray-tracing builder dispatches this way).
-extern "system" fn dispatch_x(this: This, x: u32, y: u32, z: u32, _flags: u32) {
+/// `DispatchX(x, y, z, flags)`: a dispatch with the console's dispatch
+/// initiator bits (`COMPUTE_DISPATCH_INITIATOR`). The ray-tracing structure
+/// builder dispatches this way, its rehydration of pre-built structures with
+/// [`THREAD_DIMENSIONS`]; the wave32 bit (0x8000) and the others mean nothing
+/// to the host.
+extern "system" fn dispatch_x(this: This, x: u32, y: u32, z: u32, flags: u32) {
     #[cfg(windows)]
-    state::dispatch(this, x, y, z);
+    if flags & THREAD_DIMENSIONS != 0 {
+        state::dispatch_threads(this, x, y, z);
+    } else {
+        state::dispatch(this, x, y, z);
+    }
     #[cfg(not(windows))]
     {
-        let _ = (this, x, y, z);
+        let _ = (this, x, y, z, flags);
         count_dispatch();
     }
 }
+
+/// The dispatch initiator's `USE_THREAD_DIMENSIONS`: `x`, `y` and `z` count
+/// threads, not groups. The last group along a dimension is cut short and
+/// no thread past the count is launched. Taken for group counts, the
+/// builder's box rehydration (one node per thread, group `g` writing its 64
+/// nodes at `g` times 8 KiB) ran 64 times its groups and wrote megabytes of
+/// empty nodes past each structure it rebuilt in place, over the title's
+/// objects that share those pages (run rt-int1: the title died one frame
+/// later on child pointers of all ones and infinite bounds).
+const THREAD_DIMENSIONS: u32 = 0x20;
 
 /// `BeginQuery`/`EndQuery(heap, type, index)`: queries are answered when
 /// resolved.
@@ -1879,6 +1897,69 @@ extern "system" fn reset_x(this: This, allocator: This, pipeline: This, _flags: 
     reset(this, allocator, pipeline)
 }
 
+struct UploadBlock {
+    start: usize,
+    len: usize,
+    used: usize,
+    #[cfg(not(windows))]
+    _storage: Vec<u8>,
+}
+
+impl UploadBlock {
+    fn new(bytes: usize) -> Option<Self> {
+        let len = bytes.checked_next_multiple_of(64 << 10)?;
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Memory::*;
+            use windows_sys::Win32::System::Threading::GetCurrentProcess;
+            // The title puts these pointers in GPU records as well as in root
+            // descriptors. Keep the entire allocation in the raw-address directory.
+            let limit = ((victory_shader::emit::MEMORY_PAGES as usize - 1) << 16) - 1;
+            let mut range = MEM_ADDRESS_REQUIREMENTS {
+                LowestStartingAddress: (1usize << 32) as *mut _,
+                HighestEndingAddress: limit as *mut _,
+                Alignment: 0,
+            };
+            let mut param = MEM_EXTENDED_PARAMETER::default();
+            param.Anonymous1._bitfield = MemExtendedParameterAddressRequirements as u64;
+            param.Anonymous2.Pointer = (&raw mut range).cast();
+            // SAFETY: both parameter structures live for this call. Drop releases
+            // this reservation after the last submission using the list.
+            let start = unsafe {
+                VirtualAlloc2(GetCurrentProcess(), std::ptr::null(), len,
+                    MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE, &mut param, 1)
+            } as usize;
+            (start != 0).then_some(Self { start, len, used: 0 })
+        }
+        #[cfg(not(windows))]
+        {
+            let mut storage = Vec::new();
+            storage.try_reserve_exact(len).ok()?;
+            storage.resize(len, 0);
+            Some(Self { start: storage.as_mut_ptr() as usize, len, used: 0, _storage: storage })
+        }
+    }
+
+    fn take(&mut self, size: usize, align: usize) -> Option<*mut u8> {
+        let at = self.start.checked_add(self.used)?.checked_next_multiple_of(align)?;
+        let end = (at - self.start).checked_add(size)?;
+        if end > self.len { return None; }
+        self.used = end;
+        Some(at as *mut u8)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for UploadBlock {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Memory::{VirtualFree, MEM_RELEASE};
+        if self.start != 0 {
+            // SAFETY: start is the base of this block's live reservation.
+            unsafe { VirtualFree(self.start as *mut _, 0, MEM_RELEASE) };
+        }
+    }
+}
+
 /// Newer lists' 0x4a0 `(size, alignment) -> pointer`: memory the list
 /// owns until it is reset, which the CPU writes and the GPU reads at the
 /// same address; null on failure. The title's BVH builder puts
@@ -1886,20 +1967,24 @@ extern "system" fn reset_x(this: This, allocator: This, pipeline: This, _flags: 
 /// `E_NOTIMPL` as a pointer).
 extern "system" fn allocate_upload(this: This, size: u64, alignment: u64) -> *mut u8 {
     let align = usize::try_from(alignment).unwrap_or(0).max(16);
-    let Some(len) = usize::try_from(size).ok().and_then(|s| s.checked_add(align)) else {
+    let Ok(size) = usize::try_from(size) else {
         return std::ptr::null_mut();
     };
     if this.is_null() || !align.is_power_of_two() {
         return std::ptr::null_mut();
     }
-    let mut block = vec![0u8; len];
-    let start = block.as_mut_ptr();
-    // SAFETY: the offset is below `align`, so `size` bytes fit after it.
-    let at = unsafe { start.add(start.align_offset(align)) };
     // SAFETY: the title passes one of our lists.
     let uploads = unsafe { &(*this.cast::<List>()).uploads };
-    // Moving the vector keeps its heap block where it is.
-    uploads.lock().unwrap_or_else(|e| e.into_inner()).push(block);
+    let mut uploads = uploads.lock().unwrap_or_else(|e| e.into_inner());
+    let size = size.max(1);
+    if let Some(at) = uploads.last_mut().and_then(|block| block.take(size, align)) {
+        return at;
+    }
+    let Some(mut block) = size.checked_add(align - 1).and_then(UploadBlock::new) else {
+        return std::ptr::null_mut();
+    };
+    let at = block.take(size, align).unwrap();
+    uploads.push(block);
     at
 }
 
@@ -2060,6 +2145,11 @@ mod state {
     pub(super) extern "system" fn dispatch(this: This, x: u32, y: u32, z: u32) {
         super::count_dispatch();
         with_state_quiet(this, |list, s| s.dispatch(list, x, y, z));
+    }
+    /// A dispatch of `x` by `y` by `z` threads ([`super::THREAD_DIMENSIONS`]).
+    pub(super) fn dispatch_threads(this: This, x: u32, y: u32, z: u32) {
+        super::count_dispatch();
+        with_state_quiet(this, |list, s| s.dispatch_threads(list, [x, y, z]));
     }
     /// `DispatchMesh(x, y, z)` (the PC method of List6); the title's mesh
     /// programs take `x` groups only.
@@ -2803,6 +2893,8 @@ mod tests {
         // List-owned upload memory: aligned, writable, gone at reset.
         let p = allocate_upload(list, 40, 0x100);
         assert!(!p.is_null() && (p as usize).is_multiple_of(0x100));
+        #[cfg(windows)]
+        assert!((p as usize >> 16) < victory_shader::emit::MEMORY_PAGES as usize - 1);
         // SAFETY: 40 bytes were handed out.
         unsafe { p.write_bytes(0xab, 40) };
         assert!(allocate_upload(list, 8, 0x30).is_null(), "not a power of two");

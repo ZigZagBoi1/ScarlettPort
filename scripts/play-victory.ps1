@@ -1,7 +1,7 @@
 # Launches a title on the VIctory-based runtime from your own dump (you need your own legally
 # obtained copy; nothing is included in this repository).
 # Usage: .\scripts\play-victory.ps1 -Game "D:\path\to\dump" [-AutoInput] [-Console series-s|series-x]
-#          [-NoOwnUpscaler] [-KeepWatchdog] [-FastBoot] [-SaveSlot name] [-Precompile] [-SkipPrecompile]
+#          [-NoOwnUpscaler] [-KeepWatchdog] [-FastBoot] [-RayTracing] [-SaveSlot name] [-Precompile] [-SkipPrecompile]
 #
 # Environment it sets (you can also set these by hand before running the exe):
 #   VICTORY_GAME_DIR       the dump folder
@@ -32,6 +32,8 @@ param(
     [switch]$KeepWatchdog,
     # Testing only: VICTORY_FAST_BOOT=1.
     [switch]$FastBoot,
+    # Run the title's ray-traced lighting passes with its software BVH traversal.
+    [switch]$RayTracing,
     # Save slot name (VICTORY_SAVE_SLOT).
     [string]$SaveSlot = '',
     # Run `victory precompile-graphics` even if it already ran once.
@@ -66,6 +68,7 @@ $env:VICTORY_MEM_SUBPAGE = '1'; $env:VICTORY_COPY_NOQUERY = '1'; $env:VICTORY_CA
 $env:VICTORY_FRIENDLY = '1'
 $env:VICTORY_PIPELINE_WAIT_MS = '0'
 if ($FastBoot) { $env:VICTORY_FAST_BOOT = '1' }
+if ($RayTracing) { $env:VICTORY_RAYTRACING = '1' }
 if ($SaveSlot) { $env:VICTORY_SAVE_SLOT = $SaveSlot }
 # Write button names here ("A", "DOWN DOWN A") to press them while the game runs.
 $env:VICTORY_PRESS_FILE = Join-Path $root 'press.txt'

@@ -286,6 +286,10 @@ struct Lower<'a> {
     clane: Option<V>,
     /// The first exchange dword of this thread's console wave ([`Self::exchange_pair`]).
     pair: Option<V>,
+    /// Lanes launched by the guest in a partial group. All host lanes still reach group barriers.
+    launched: Option<V>,
+    /// The block before a predicated guest load, where its wave-wide operands are evaluated.
+    load_head: Option<usize>,
     /// A console wave64 program in host waves of 32: the LDS dword counting the console threads
     /// handed to host waves (`wave_base`), and the base made in the entry block.
     halves: Option<u32>,
@@ -1148,6 +1152,22 @@ thread_local! {
     static LOCAL_WAVES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// See [`with_local_waves_any`].
     static LOCAL_ANY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// See [`with_thread_limits`].
+    static THREAD_LIMITS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with compute programs lowered for dispatches by thread counts
+/// (`super::translate_thread_limited`). The host counts determine the guest launch mask.
+pub(super) fn with_thread_limits<R>(f: impl FnOnce() -> R) -> R {
+    let was = THREAD_LIMITS.replace(true);
+    let r = f();
+    THREAD_LIMITS.set(was);
+    r
+}
+
+/// Whether compute programs are lowered for dispatches by thread counts ([`with_thread_limits`]).
+pub(super) fn thread_limits() -> bool {
+    THREAD_LIMITS.get()
 }
 
 /// As [`with_local_waves`], with every other use of a lane mask as a number
@@ -1911,6 +1931,8 @@ impl<'a> Lower<'a> {
             exchange,
             clane: None,
             pair: None,
+            launched: None,
+            load_head: None,
             halves,
             wave_base: None,
             // rule-region: begin feature:wave64-lds
@@ -2194,7 +2216,7 @@ impl<'a> Lower<'a> {
                     .masks
                     .get(&mask)
                     .ok_or("a wave reduction's untracked mask")?;
-                let on = self.boolean(m, c)?;
+                let on = self.launched_bit(m, c)?;
                 let x = self.i32_of(src)?;
                 let id = self.s.m.i32(ident);
                 return Ok(self.s.m.select(c, on, x, id));
@@ -2224,7 +2246,7 @@ impl<'a> Lower<'a> {
             .masks
             .get(&mask)
             .ok_or("a wave reduction's untracked mask")?;
-        let on = self.boolean(m, c)?;
+        let on = self.launched_bit(m, c)?;
         if let Some((lo, hi)) = op.double_halves(src) {
             return match prefix {
                 Some(_) => Err("a wave prefix of an operation other than a sum"),
@@ -2478,6 +2500,14 @@ impl<'a> Lower<'a> {
                 self.s.m.new_block()
             });
         }
+        // Establish the launch mask before the guest program uses EXEC.
+        let limited = (thread_limits() && matches!(self.x.native.io, StageIo::Cs(_))).then(|| {
+            let body = self.s.m.new_block();
+            if let Some(&first) = order.first() {
+                self.block[first] = Some(body);
+            }
+            body
+        });
         // Loop headers count iterations (`LOOP_LIMIT`).
         for &b in &order {
             let header = p.blocks[b]
@@ -2496,6 +2526,9 @@ impl<'a> Lower<'a> {
         if let Some(mesh) = self.s.mesh {
             self.mesh_prologue(mesh).map_err(|w| unsupported(0, w))?;
             self.block[order[0]] = Some(self.cur);
+        }
+        if let Some(body) = limited {
+            self.thread_limit_prologue(body).map_err(|w| unsupported(0, w))?;
         }
         for &b in &order {
             self.cur = self.block[b].expect("reachable");
@@ -2664,15 +2697,7 @@ impl<'a> Lower<'a> {
             // host's value can be.
             Input::FrontFace => (13, 0),
             Input::ThreadIdInGroup(c) => return self.thread_id(c),
-            Input::GroupId(c) => {
-                let id = self.compute_id("groupId.i32", 94, c);
-                if !self.one_dimensional() {
-                    return id;
-                }
-                let Val::I32(id) = id else { unreachable!() };
-                let base = self.host_word(RootType::Other(super::shader::USER_GROUP_BASE), 0, 0);
-                return Val::I32(self.s.m.bin(self.s.entry, Bin::Add, id, base));
-            }
+            Input::GroupId(c) => return self.group_id(c),
             Input::GroupInfo => return Val::Missing("the thread-group info SGPR"),
             Input::MeshGroup => {
                 let Val::I32(g) = self.compute_id("groupId.i32", 94, 0) else {
@@ -2735,6 +2760,20 @@ impl<'a> Lower<'a> {
             }
         };
         self.load_input(id, col)
+    }
+
+    /// Component `c` of the console's group id: in x, counted from the group the host starts
+    /// this dispatch at (`shader.rs` `USER_GROUP_BASE`): the host runs a dispatch of more
+    /// groups than it allows as several.
+    fn group_id(&mut self, c: u8) -> Val {
+        let id = self.compute_id("groupId.i32", 94, c);
+        if c != 0 || !self.one_dimensional() {
+            return id;
+        }
+        let Val::I32(g) = id else { unreachable!() };
+        use super::shader::USER_GROUP_BASE;
+        let base = self.host_word(RootType::Other(USER_GROUP_BASE), 0, 0);
+        Val::I32(self.s.m.bin(self.s.entry, Bin::Add, g, base))
     }
 
     /// A component of a compute thread or group id, read in the entry block.
@@ -3243,6 +3282,12 @@ impl<'a> Lower<'a> {
     /// (and drops writes) through the null view at the first slot, and its
     /// number is left for the host, for lanes that run (`guard`).
     fn memory(&mut self, lo: V, hi: V, guard: Option<V>) -> (V, V) {
+        let (handle, byte, _) = self.memory_page(lo, hi, guard);
+        (handle, byte)
+    }
+
+    /// As `memory`, also giving whether this page's directory entry has no copy.
+    fn memory_page(&mut self, lo: V, hi: V, guard: Option<V>) -> (V, V, V) {
         use super::shader::{MEMORY_FAULTS, MEMORY_PAGES, SLOT_FAULTS, SLOT_MEMORY, USER_MEMORY_BASE};
         let c = self.cur;
         let (i32t, res) = (self.s.t.i32, self.s.t.res_ret);
@@ -3276,17 +3321,18 @@ impl<'a> Lower<'a> {
         // A page without a copy: its number, at a place by the number, or
         // at the sink for lanes that do not run and pages that have one.
         let zero = k(self, 0);
-        let mut missing = self.s.m.cmp(c, pred::EQ, copy, zero);
-        if let Some(g) = guard {
-            missing = self.s.m.bin(c, Bin::And, missing, g);
-        }
+        let missing = self.s.m.cmp(c, pred::EQ, copy, zero);
+        let fault = match guard {
+            Some(g) => self.s.m.bin(c, Bin::And, missing, g),
+            None => missing,
+        };
         let places = k(self, MEMORY_FAULTS - 1);
         let place = self.s.m.bin(c, Bin::URem, page, places);
         let one = k(self, 1);
         let place = self.s.m.bin(c, Bin::Add, place, one);
         let k2 = k(self, 2);
         let place = self.s.m.bin(c, Bin::Shl, place, k2);
-        let place = self.s.m.select(c, missing, place, zero);
+        let place = self.s.m.select(c, fault, place, zero);
         let faults = self.s.root_uav_handle(SLOT_FAULTS);
         let void = self.s.t.void;
         let mask = self.s.m.i8(1);
@@ -3304,7 +3350,7 @@ impl<'a> Lower<'a> {
         let k64k = k(self, 0xFFFF);
         let within = self.s.m.bin(c, Bin::And, lo, k64k);
         let byte = self.s.m.bin(c, Bin::Add, start, within);
-        (h, byte)
+        (h, byte, missing)
     }
 
     /// Transfer up to four consecutive dwords in title memory. The directory
@@ -3667,13 +3713,13 @@ impl<'a> Lower<'a> {
                 let at = match self.def_block.get(&lo) {
                     // Program inputs (EXEC on entry).
                     None => self.s.entry,
-                    Some(&b) if b == self.cur_ir => self.cur,
+                    Some(&b) if b == self.cur_ir => self.load_head.unwrap_or(self.cur),
                     Some(&b) => self.tail[b].ok_or("a lane mask written after its use")?,
                 };
                 if !self.balloting.insert(lo) {
                     return Err("a lane mask whose lanes depend on its own value");
                 }
-                let bit = self.boolean(m, at);
+                let bit = self.launched_bit(m, at);
                 self.balloting.remove(&lo);
                 let bit = bit?;
                 let i32t = self.s.t.i32;
@@ -4634,10 +4680,10 @@ impl<'a> Lower<'a> {
         let made = self.def_block.get(&scc).copied();
         let at = match made {
             None => self.s.entry,
-            Some(b) if b == self.cur_ir => self.cur,
+            Some(b) if b == self.cur_ir => self.load_head.unwrap_or(self.cur),
             Some(b) => self.tail[b].ok_or("a lane mask written after its use")?,
         };
-        let bit = self.boolean(m, at)?;
+        let bit = self.launched_bit(m, at)?;
         let (i1t, i32t) = (self.s.t.i1, self.s.t.i32);
         let some = self.s.op(at, "waveAnyTrue", Attr::NoUnwind, i1t, 113, &[bit]);
         self.s.flags |= flags::WAVE_OPS;
@@ -4648,6 +4694,7 @@ impl<'a> Lower<'a> {
             // Every lane that runs there has the same bit (a compare of values all lanes
             // share, ANDed with EXEC): the lanes of this host wave answer for the console's.
             if let Some(b) = made
+                && self.launched.is_none()
                 && self.same_bit_where(m, b)
             {
                 return Ok(some);
@@ -4657,7 +4704,7 @@ impl<'a> Lower<'a> {
         }
         // (`opt::UNIFORM`) every lane, all of them there, has the same bit: each half's
         // answer is the console wave's
-        if super::shader_opt() & super::bitcode::opt::UNIFORM != 0
+        if self.launched.is_none() && super::shader_opt() & super::bitcode::opt::UNIFORM != 0
             && let Some(b) = made
             && self.same_bit_where(m, b)
         {
@@ -4707,6 +4754,12 @@ impl<'a> Lower<'a> {
             // the lanes here, and "every lane's bit is clear" is true of the others anyway.
             let c = self.cur;
             let mine = self.boolean(when, c)?;
+            let mine = if let Some(live) = self.launched {
+                let neutral = self.s.m.bool(!any);
+                self.s.m.select(c, live, mine, neutral)
+            } else {
+                mine
+            };
             let i1t = self.s.t.i1;
             self.s.flags |= flags::WAVE_OPS;
             let (name, code) = if any { ("waveAnyTrue", 113) } else { ("waveAllTrue", 114) };
@@ -4721,7 +4774,7 @@ impl<'a> Lower<'a> {
         }
         let c = self.cur;
         let mine = self.boolean(when, c)?;
-        if super::shader_opt() & super::bitcode::opt::UNIFORM != 0 && self.same_bit_where(when, b) {
+        if self.launched.is_none() && super::shader_opt() & super::bitcode::opt::UNIFORM != 0 && self.same_bit_where(when, b) {
             // (`opt::UNIFORM`) every lane runs here and has the same bit: this host wave's
             // answer is the console wave's
             let i1t = self.s.t.i1;
@@ -4739,6 +4792,10 @@ impl<'a> Lower<'a> {
             self.s.m.bin(c, Bin::Xor, mine, t)
         };
         let (i1t, i32t) = (self.s.t.i1, self.s.t.i32);
+        let set = match self.launched {
+            Some(live) => self.s.m.bin(c, Bin::And, live, set),
+            None => set,
+        };
         let some = self.s.op(c, "waveAnyTrue", Attr::NoUnwind, i1t, 113, &[set]);
         self.s.flags |= flags::WAVE_OPS;
         let some = self.s.m.cast(c, Cast::ZExt, some, i32t);
@@ -4813,10 +4870,18 @@ impl<'a> Lower<'a> {
         inst.write(pick(reg)?)
     }
 
+    fn launched_bit(&mut self, b: Bool, at: usize) -> Result<V, Why> {
+        let bit = self.boolean(b, at)?;
+        Ok(match self.launched {
+            Some(live) => self.s.m.bin(at, Bin::And, live, bit),
+            None => bit,
+        })
+    }
+
     fn guard(&mut self, b: usize, i: usize) -> Result<Option<V>, Why> {
         match self.x.st.guards[b][i] {
-            None => Ok(None),
-            Some(g) => Ok(Some(self.boolean(g, self.cur)?)),
+            None => Ok(self.launched),
+            Some(g) => Ok(Some(self.launched_bit(g, self.cur)?)),
         }
     }
 
@@ -5043,6 +5108,50 @@ impl<'a> Lower<'a> {
             }
             _ => self.s.m.bin(e, Bin::UDiv, f, xy),
         })
+    }
+
+    /// Build the guest launch mask before lowering EXEC and memory operations. A clipped
+    /// host lane still participates in the barriers used by LDS and paired-wave exchanges.
+    fn thread_limit_prologue(&mut self, body: usize) -> Result<(), Why> {
+        use super::shader::USER_THREAD_LIMIT;
+        let StageIo::Cs(cs) = self.x.native.io else {
+            return Err("thread counts outside compute");
+        };
+        let e = self.s.entry;
+        let mut live: Option<V> = None;
+        // (a dimension whose groups are one thread wide is never cut short: its count is its
+        // groups' and no word is asked for it, which keeps the user data of the structure
+        // builder's programs, whose root signatures are close to the host's 64 dwords, one
+        // dword longer at most)
+        for d in (0..3u8).filter(|&d| cs.threads[usize::from(d)] > 1) {
+            let limit = self.host_word(RootType::Other(USER_THREAD_LIMIT), 0, u32::from(d));
+            let Val::I32(group) = self.group_id(d) else {
+                return Err("a group id");
+            };
+            let Val::I32(thread) = self.thread_id(d) else {
+                return Err("a thread id");
+            };
+            let size = self.s.m.i32(cs.threads[usize::from(d)]);
+            let first = self.s.m.bin(e, Bin::Mul, group, size);
+            let id = self.s.m.bin(e, Bin::Add, first, thread);
+            let inside = self.s.m.cmp(e, pred::IULT, id, limit);
+            live = Some(match live {
+                Some(l) => self.s.m.bin(e, Bin::And, l, inside),
+                None => inside,
+            });
+        }
+        let Some(live) = live else {
+            // (groups of one thread: none is ever cut short)
+            self.s.m.terminate(e, Term::Br(body));
+            self.s.entry = body;
+            self.cur = body;
+            return Ok(());
+        };
+        self.launched = Some(live);
+        self.s.m.terminate(e, Term::Br(body));
+        self.s.entry = body;
+        self.cur = body;
+        Ok(())
     }
 
     /// Mesh: the counts and the primitives no lane exports. The console's
@@ -5751,6 +5860,12 @@ impl<'a> Lower<'a> {
         }
         // (also before: some arms return early)
         self.lds_since |= touches;
+        // Unlike stores, reads from root buffers and LDS do not normally branch on EXEC.
+        // An unlaunched thread may have an out-of-bounds address. Keep the barrier above
+        // outside this branch and merge only the loaded register words.
+        let vector_load = touches == 1 && !matches!(inst.fields, Fields::Smem { .. }) && !name.starts_with("image_bvh");
+        let load = if vector_load { self.begin_guarded(self.launched) } else { None };
+        self.load_head = load.map(|(head, _)| head);
         let r = match &inst.fields {
             Fields::Sop { .. } => self.sop(inst),
             Fields::Sopp { .. } if name == "s_barrier" && self.no_barrier.contains(&b) => Ok(()),
@@ -5804,6 +5919,19 @@ impl<'a> Lower<'a> {
             Fields::Flat { .. } if name.starts_with("global_") => self.flat(inst, b, i),
             Fields::Flat { .. } => Err("flat memory"),
         };
+        self.load_head = None;
+        if let Some((head, join)) = load {
+            let tail = self.cur;
+            self.end_guarded(load, &[]);
+            let zero = self.s.m.i32(0);
+            for &(_, reg) in &inst.writes {
+                if let Some(Val::I32(word)) = self.vals.get_mut(&reg) {
+                    let phi = self.s.m.phi(join, self.s.t.i32);
+                    self.s.m.set_phi(phi, vec![(*word, tail), (zero, head)]);
+                    *word = phi;
+                }
+            }
+        }
         self.lds_since |= touches;
         match r {
             Ok(()) => Ok(()),
@@ -7799,12 +7927,13 @@ impl<'a> Lower<'a> {
     /// current block.
     fn table_word(&mut self, load: Site, k: u32) -> Result<V, Why> {
         use super::shader::{SLOT_STRIDES_COUNT, SLOT_WORDS};
-        use super::words::WORDS;
+        use super::words::{SNAPSHOT_SLOTS, WORDS};
         let a = *self
             .scalar
             .get(&load)
             .ok_or("an untracked descriptor load")?;
-        match self.x.native.layout.get(a.param).map(|p| p.root) {
+        let root = self.x.native.layout.get(a.param).map(|p| p.root);
+        match root {
             Some(RootType::Table | RootType::ResourceHeap) => {}
             _ => return Err("a descriptor outside the view heap read as data"),
         }
@@ -7833,8 +7962,19 @@ impl<'a> Lower<'a> {
         let c = self.cur;
         let five = self.s.m.i32(5);
         let slot = self.s.m.bin(c, Bin::LShr, addr, five);
-        // Inside the table whatever the index: a root view has no bounds.
-        let last = self.s.m.i32(SLOT_STRIDES_COUNT - 1);
+        // Bindless operands retain the title index. A copied root table on a
+        // capped GPU uses a separate row even if its physical slot overlaps it.
+        let (slot, rows) = match (root, super::shader::view_heap_map()) {
+            (Some(RootType::Table), Some((_, map))) => {
+                let limit = self.s.m.i32(map);
+                let fresh = self.s.m.cmp(c, pred::IUGT, slot, limit);
+                let bias = self.s.m.i32(SLOT_STRIDES_COUNT - map - 1);
+                let moved = self.s.m.bin(c, Bin::Add, slot, bias);
+                (self.s.m.select(c, fresh, moved, slot), SLOT_STRIDES_COUNT + SNAPSHOT_SLOTS)
+            }
+            _ => (slot, SLOT_STRIDES_COUNT),
+        };
+        let last = self.s.m.i32(rows - 1);
         let i32t = self.s.t.i32;
         let slot = self.s.op(c, "binary.i32", Attr::ReadNone, i32t, 40, &[slot, last]);
         self.s.m.tag(slot, Tag::Clamp);
@@ -9061,7 +9201,9 @@ impl<'a> Lower<'a> {
                         return Err("a first-lane read where not every lane runs");
                     }
                     let c = self.cur;
-                    if guard.is_none() && super::shader_opt() & super::bitcode::opt::FIRST != 0 {
+                    if guard.is_none()
+                        && super::shader_opt() & super::bitcode::opt::FIRST != 0
+                    {
                         // Every lane is in EXEC: the console's first lane is
                         // lane 0, which the lower half of every console wave
                         // has. No half needs to ask the other whether it has

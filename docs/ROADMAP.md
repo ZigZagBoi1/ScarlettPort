@@ -4,10 +4,9 @@ Current state is in [STATUS.md](STATUS.md): the lit world at about 4 fps while w
 
 ## 1. Light in shadow
 
-The title's ray-traced bounce light and shadows do not run yet, so anything the sun does not reach directly is too dark. The base has started this: its structure-builder programs translate, title memory can be read by address from shaders, and the ray/box and ray/triangle tests are emulated. See `runtime/victory/docs/fork-ray-tracing.md`.
+Verified in the opening cell on the Series S profile and a Radeon RX 7900 XTX. Ray-traced bounce light brightens the wall and the papers by the bunk. The table casts a shadow under the fluorescent lamps. The launcher's ray-tracing option and `-RayTracing` in `scripts/play-victory.ps1` enable the builder and traversal. [Measurements and hardware](../runtime/victory/docs/fork-ray-tracing.md)
 
-- **Off** (current default): ray queries return no hit.
-- **On**: map the console's ray-tracing structures to DXR or keep the emulated traversal, and make it fast enough to use.
+The back of the inmate shirt can still render black. A capture traced that color to the material buffer before lighting. Other interiors and GPU models still need coverage.
 
 ## 2. Frame time
 

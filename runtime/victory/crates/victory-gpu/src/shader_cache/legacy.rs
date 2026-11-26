@@ -128,10 +128,7 @@ fn with_host_settings(base: [u8; 32], facts: &HostFacts) -> [u8; 32] {
     bytes.extend_from_slice(&facts.view_limit.to_le_bytes());
     // (victory-amd) the host's widest wave, which picks how wave64 programs are made.
     bytes.extend_from_slice(&facts.max_wave.to_le_bytes());
-    let map = facts.view_map.map_or([u32::MAX; 2], |(w, s)| [w, s]);
-    for word in map {
-        bytes.extend_from_slice(&word.to_le_bytes());
-    }
+    super::append_view_heap_layout(&mut bytes, facts.view_map);
     // (`VICTORY_F3_VIEW_FIX=1` changes the translation of typed buffer accesses; named only
     // when on, so the key of a run without it is the one of fx-final)
     if facts.f3_view_fix {
@@ -261,6 +258,19 @@ pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
     }
 }
 
+// A partial group has a different root layout and must have its own cache key.
+pub(crate) fn host_shader_thread_limited(container: &[u8]) -> Result<HostShader, String> {
+    use victory_shader::emit;
+    let hash = blake3::hash(container).to_hex()[..16].to_owned();
+    let translate = |c: &[u8]| emit::for_program(&hash, || emit::translate_thread_limited(c)).map_err(|e| e.to_string());
+    let Some(cache) = CACHE.get().or_else(|| super::CACHE.get()) else { return translate(container) };
+    let mut key = blake3::Hasher::new();
+    key.update(&super::translation_key(build(), container, &hash));
+    key.update(b"partial thread group v1");
+    key.update(victory_shader::SOURCE_HASH.as_bytes());
+    cached(cache, key.finalize().as_bytes(), container, translate)
+}
+
 /// The stand-ins of `victory_shader::emit::stand_in`, each opt-in:
 /// `VICTORY_AMBIENT_STUB=1` (the diffuse illumination's last pass writes
 /// `VICTORY_AMBIENT_STUB_VALUE`, 0.1 by default) and
@@ -377,8 +387,8 @@ pub(crate) fn is_cached_by_runs(container: &[u8]) -> bool {
 /// Whether `cache` holds the translation of `container` made in one of `contexts`, each at the
 /// key [`host_shader`] stores under (the program's own when it is kept out of deep skips).
 fn has_entry_in(cache: &Cache, contexts: &[[u8; 32]], container: &[u8]) -> bool {
-    let hash = blake3::hash(container).to_hex()[..16].to_owned();
-    contexts.iter().any(|c| has_entry(cache, &super::translation_key(c, container, &hash), container))
+    let hash = blake3::hash(container).to_hex();
+    contexts.iter().any(|c| has_entry(cache, &super::translation_key(c, container, &hash[..16]), container))
 }
 
 /// Whether `cache` holds the translation of `container` made in context `build`.
@@ -817,6 +827,7 @@ mod tests {
         assert!(victory_shader::SOURCE_HASH.bytes().all(|b| b.is_ascii_hexdigit()));
         // and, unless the executable is asked for, the key is made of it
         if std::env::var_os("VICTORY_SHADER_CACHE_KEY").is_none() {
+            let actual = build(); // Probes the host heap before reading its settings.
             let expected = with_host_settings(key(
                 &[&CACHE_SCHEMA_VERSION.to_le_bytes()[..], FINAL_SOURCE_HASH.as_bytes()].concat(),
                 victory_shader::emit::loop_limit(),
@@ -824,7 +835,7 @@ mod tests {
                 &all_switches(),
                 victory_shader::emit::shader_opt(),
             ), &HostFacts::now());
-            assert_eq!(build(), &expected);
+            assert_eq!(actual, &expected);
         }
     }
 

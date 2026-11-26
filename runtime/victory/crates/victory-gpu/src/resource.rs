@@ -4403,41 +4403,13 @@ mod tests {
         };
         let readback = buffer(D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
         // The colour target the draws cover: 4x4, 8 bits a texel.
-        let target = {
-            let heap = D3D12_HEAP_PROPERTIES {
-                Type: D3D12_HEAP_TYPE_DEFAULT,
-                ..Default::default()
-            };
-            let desc = D3D12_RESOURCE_DESC {
-                Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
-                Width: 4,
-                Height: 4,
-                DepthOrArraySize: 1,
-                MipLevels: 1,
-                Format: DXGI_FORMAT(61),
-                SampleDesc: DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                Flags: D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
-                ..Default::default()
-            };
-            let mut made: Option<ID3D12Resource> = None;
-            // SAFETY: plain creation of a texture.
-            unsafe {
-                host.device
-                    .CreateCommittedResource(
-                        &heap,
-                        D3D12_HEAP_FLAG_NONE,
-                        &desc,
-                        D3D12_RESOURCE_STATE_RENDER_TARGET,
-                        None,
-                        &mut made,
-                    )
-                    .unwrap();
-            }
-            made.unwrap()
-        };
+        let mut title_target = null;
+        let colour_desc = ResourceDesc { flags: 1, ..texture(4, 4, 61, 1) };
+        assert_eq!(
+            create_committed(null, &PROPERTIES, 0, &colour_desc, 4, null.cast(), &RESOURCE_IIDS[0], &mut title_target),
+            S_OK
+        );
+        let target = host_resource(title_target).unwrap();
         let rows_of = |format: i32| D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
             Offset: 0,
             Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
@@ -4557,16 +4529,25 @@ float4 lit() : SV_Target { return 1.0; }
         };
         let state = host_copy(depth).unwrap().state.load(Relaxed);
         let state = D3D12_RESOURCE_STATES(state as i32);
-        let colour = host.rtv(Some(&target), None);
-        let depth_view = host.dsv(
-            host_depth,
-            Some(&D3D12_DEPTH_STENCIL_VIEW_DESC {
-                Format: DXGI_FORMAT(45),
-                ViewDimension: D3D12_DSV_DIMENSION_TEXTURE2D,
-                ..Default::default()
-            }),
-        );
+        let colour = host.rtv(Some(target), None);
+        let first = host.new_list().unwrap();
+        let mut colour_slot = [0u64; 16];
+        let mut depth_slot = [0u64; 16];
+        let colour_handle = colour_slot.as_mut_ptr() as u64;
+        let depth_handle = depth_slot.as_mut_ptr() as u64;
+        crate::descriptor::create_rtv(null, title_target, &[61, 4, 0, 0, 0, 0], colour_handle);
+        crate::descriptor::create_dsv(null, depth, &[45, 3, 0, 0, 0, 0], depth_handle);
+        let mut bindings = crate::draw::State::default();
+        bindings.set_targets(&first, &[colour_handle], depth_handle);
+        first.close();
+        // The title can reuse both descriptor slots after OMSetRenderTargets.
+        // The resumed draws must still cover the original target and test its depth.
+        crate::descriptor::create_rtv(null, null, &[61, 4, 0, 0, 0, 0], colour_handle);
+        depth_slot.fill(0);
         let back = host.new_list().unwrap();
+        bindings.replay(&back);
+        // Pipeline selection on the resumed list uses the captured RTV and DSV formats.
+        assert_eq!(*bindings.target_formats(), [61, 0, 0, 0, 0, 0, 0, 0, 45]);
         // SAFETY: an open list and live resources and views.
         unsafe {
             let l = &back.list;
@@ -4576,7 +4557,6 @@ float4 lit() : SV_Target { return 1.0; }
             l.ClearRenderTargetView(colour, &[0.0; 4], None);
             l.SetGraphicsRootSignature(&signature);
             l.SetPipelineState(&pipeline);
-            l.OMSetRenderTargets(1, Some(&colour), false, Some(&depth_view));
             l.RSSetViewports(&[D3D12_VIEWPORT {
                 TopLeftX: 0.0,
                 TopLeftY: 0.0,
@@ -4597,8 +4577,8 @@ float4 lit() : SV_Target { return 1.0; }
                 l.SetGraphicsRoot32BitConstant(0, class, 0);
                 l.DrawInstanced(3, 1, 0, 0);
             }
-            l.ResourceBarrier(&[moved(&target, drawn, source)]);
-            let (to, from) = (rows(&readback, rows_of(61)), whole(&target));
+            l.ResourceBarrier(&[moved(target, drawn, source)]);
+            let (to, from) = (rows(&readback, rows_of(61)), whole(target));
             l.CopyTextureRegion(&to, 0, 0, 0, &from, None);
         }
         back.close();
@@ -4623,6 +4603,8 @@ float4 lit() : SV_Target { return 1.0; }
             let drawn = matches!(class, 65 | 129);
             assert_eq!(covered, drawn, "texel {i}, class {class}");
         }
+        drop(bindings);
+        assert_eq!(slot::<Release>(title_target, 0x10)(title_target), 0);
     }
 
     #[test]

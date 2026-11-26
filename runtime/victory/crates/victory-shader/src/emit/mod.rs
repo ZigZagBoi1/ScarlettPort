@@ -118,6 +118,8 @@ mod valu_tests;
 mod waterfall_tests;
 #[cfg(all(test, windows))]
 mod wave64_tests;
+#[cfg(all(test, windows))]
+mod dispatch_tests;
 // rule-region: begin feature:wave64-lds
 #[cfg(all(test, windows))]
 mod wave64_lds_tests;
@@ -142,7 +144,7 @@ pub use per_program::activate_rays_cleanup;
 pub use rect::rect_list_gs;
 pub use shader::{
     MEMORY_FAULTS, MEMORY_PAGES, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_ADDRESSES, SLOT_CONSTANTS, SLOT_FAULTS, SLOT_MEMORY,
-    SLOT_STRIDES, SLOT_STRIDES_COUNT, SLOT_STRIDES_DWORDS, SLOT_WORDS, USER_DATA_SPACE, USER_GROUP_BASE, USER_MEMORY_BASE,
+    SLOT_STRIDES, SLOT_STRIDES_COUNT, SLOT_STRIDES_DWORDS, SLOT_WORDS, USER_DATA_SPACE, USER_GROUP_BASE, USER_THREAD_LIMIT, USER_MEMORY_BASE,
     USER_VIEW_ADDRESS, USER_VIEW_BIAS, set_view_heap_limit, set_view_heap_map, view_heap_limit, view_heap_map,
 };
 
@@ -375,6 +377,14 @@ pub fn translate(container: &[u8]) -> Result<HostShader, ShaderError> {
     translate_code(container, None)
 }
 
+/// [`translate`] of a compute program for dispatches by thread counts whose last group is
+/// cut short (the console's `DispatchX` with `USE_THREAD_DIMENSIONS`): the host runs whole
+/// groups. The launch mask ([`USER_THREAD_LIMIT`]) gates guest writes and wave votes.
+/// All host lanes can still take part in group synchronization.
+pub fn translate_thread_limited(container: &[u8]) -> Result<HostShader, ShaderError> {
+    lower::with_thread_limits(|| translate(container))
+}
+
 /// [`translate`] with `code` in place of the program's own when given.
 fn translate_code(container: &[u8], code: Option<Vec<u8>>) -> Result<HostShader, ShaderError> {
     let c = Container::parse(container)?;
@@ -575,7 +585,7 @@ pub fn emit(
                         }
                     }
                 }
-                if strict {
+                if strict || lower::thread_limits() {
                     break;
                 }
             }
@@ -601,7 +611,7 @@ pub fn emit(
                 }
             }
         }
-        if local_on && !exact_only {
+        if local_on && !exact_only && !lower::thread_limits() {
             // Last: every mask and lane read per host wave.
             if !strict {
                 for (name, f) in &forms {

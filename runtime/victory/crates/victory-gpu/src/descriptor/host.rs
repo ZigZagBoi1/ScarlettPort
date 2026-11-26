@@ -17,7 +17,7 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 use super::slot_map::SlotMap;
 use super::{VIEW_TAG, View, view_at};
 use crate::host::host;
-use victory_shader::emit::words::{ImageType, Shape, WORDS, console_words};
+use victory_shader::emit::words::{ImageType, Shape, SNAPSHOT_SLOTS, WORDS, console_words, table_slot};
 
 pub(crate) struct HostHeap {
     pub(crate) heap: ID3D12DescriptorHeap,
@@ -89,6 +89,7 @@ pub(crate) struct HostHeap {
     /// an upload buffer of `SLOT_STRIDES_COUNT` slots of eight dwords, its
     /// GPU address and its mapping.
     words: Option<(ID3D12Resource, u64, usize)>,
+    words_map_slot: Option<u32>,
     /// Title slots holding buffer views. Such a view gets its host slot
     /// (and its memory a host copy) only when something reads it: a draw
     /// through a table, or [`HostHeap::buffer_slots`] for shaders that pick
@@ -1064,6 +1065,9 @@ fn view_shape(view: Option<&View>) -> Shape {
     let Some(view) = view else {
         return Shape::None;
     };
+    if let Some(address) = acceleration_structure(view) {
+        return Shape::Buffer { address, stride: 0, records: 0, format: 0 };
+    }
     let (unordered, words) = match view {
         &View::Constant(address, size) => {
             return Shape::Buffer {
@@ -1265,6 +1269,37 @@ fn texture_shape(words: Option<[u32; 10]>, resource: &[u32; 14], unordered: bool
 mod words_tests {
     use super::*;
 
+    #[test]
+    fn acceleration_structure_addresses_survive_a_table_snapshot() {
+        let address = 0x9_5b42_0800u64;
+        let mut words = [0u32; 10];
+        words[1] = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE.0 as u32;
+        words[4] = address as u32;
+        words[5] = (address >> 32) as u32;
+        let view = View::Shader(0, Some(words));
+        assert_eq!(acceleration_structure(&view), Some(address));
+        assert_eq!(console_words(&view_shape(Some(&view)))[..2], words[4..6]);
+
+        TEST_MAP.set(Some((16, 24)));
+        let heap = HostHeap::new(false, 64);
+        TEST_MAP.set(None);
+        let Some(heap) = heap else { return };
+        let slot = heap.dynamic(1).expect("one fresh view");
+        let (_, _, data) = heap.words.as_ref().expect("descriptor words");
+        let original = (slot * WORDS) as usize;
+        let first = (table_slot(slot, heap.words_map_slot) * WORDS) as usize;
+        assert_ne!(first, original);
+        heap.write_words(slot, Some(&view), false);
+        // SAFETY: two dwords of a slot allocated by this test. No list uses it.
+        let read = || unsafe { std::slice::from_raw_parts((*data as *const u32).add(first), 2).to_vec() };
+        heap.make_at(slot, &view);
+        assert_eq!(read(), words[4..6]);
+        heap.make_null(slot);
+        assert_eq!(read(), [0, 0]);
+        // SAFETY: the title slot and both of its dwords are in the mapping.
+        assert_eq!(unsafe { std::slice::from_raw_parts((*data as *const u32).add(original), 2) }, &words[4..6]);
+    }
+
     /// A `D3D12_RESOURCE_DESC` as dwords: a 2D texture of `w` x `h`,
     /// `layers` layers and `mips` levels.
     fn texture(w: u32, h: u32, layers: u32, mips: u32) -> [u32; 14] {
@@ -1446,7 +1481,7 @@ pub(crate) fn probe_view_limit() {
 /// still holds its own; a draw refused its table read slots never made
 /// for it, and the card stopped within frames). 2^18 leaves 737,000; a
 /// table past them is made afresh in these slots like any other.
-pub(crate) const DYNAMIC: u32 = 1 << 18;
+pub(crate) const DYNAMIC: u32 = SNAPSHOT_SLOTS;
 
 // The heap map leaves the fork's dynamic slots and guard slot in place.
 const _: () = assert!(MAP_SLOT + 1 + DYNAMIC == PORTABLE_VIEWS - 1);
@@ -1616,9 +1651,12 @@ impl HostHeap {
             Some(l) => (l.pool, l.dynamic_first(), title_count),
             None => (0, count, count),
         };
+        let words_map_slot = heap_map().map(|(_, slot)| slot);
         let words = (!sampler)
             .then(|| {
-                let bytes = u64::from(victory_shader::emit::SLOT_STRIDES_COUNT) * u64::from(WORDS) * 4;
+                let rows = victory_shader::emit::SLOT_STRIDES_COUNT
+                    + if words_map_slot.is_some() { SNAPSHOT_SLOTS } else { 0 };
+                let bytes = u64::from(rows) * u64::from(WORDS) * 4;
                 let (buffer, data) = host.upload_buffer(bytes)?;
                 // SAFETY: the buffer's whole mapping; a live buffer.
                 let gpu = unsafe {
@@ -1655,6 +1693,7 @@ impl HostHeap {
             too_long: std::sync::atomic::AtomicU32::new(u32::MAX),
             strides,
             words,
+            words_map_slot,
             buffers: Mutex::default(),
             changed: Mutex::default(),
             textures: Mutex::default(),
@@ -2638,35 +2677,8 @@ impl HostHeap {
                 textures.remove(slot);
             }
         }
-        if let Some((_, _, data)) = &self.words
-            && index < victory_shader::emit::SLOT_STRIDES_COUNT
-        {
-            let at = (index * WORDS) as usize;
-            for (k, w) in console_words(&view_shape(view)).into_iter().enumerate() {
-                // SAFETY: inside the mapping; shaders read it while we write
-                // (whole dwords).
-                unsafe { (*data as *mut u32).add(at + k).write_volatile(w) };
-            }
-        }
-        let stride = view.and_then(view_stride);
-        if let Some((_, _, data)) = &self.strides
-            && index < victory_shader::emit::SLOT_STRIDES_COUNT
-        {
-            // SAFETY: inside the mapping; shaders read it while we write (a
-            // dword, either value is one the slot had).
-            unsafe { (*data as *mut u32).add(index as usize).write_volatile(slot_entry(view)) };
-            // The title address of the buffer view, after the strides
-            // (`victory_shader::emit::SLOT_ADDRESSES`): low dword, then high.
-            let address = view
-                .and_then(buffer_range)
-                .map_or(0, |range| range.0);
-            // SAFETY: as above, two dwords inside the mapping.
-            unsafe {
-                let at = (*data as *mut u32).add((victory_shader::emit::SLOT_ADDRESSES + 2 * index) as usize);
-                at.write_volatile(address as u32);
-                at.add(1).write_volatile((address >> 32) as u32);
-            }
-        }
+        self.write_words(index, view, false);
+        let stride = self.buffer_metadata(index, view);
         let mut buffers = self.buffers.lock().unwrap_or_else(|e| e.into_inner());
         let was = if stride.is_some() {
             buffers.insert(index);
@@ -2701,9 +2713,49 @@ impl HostHeap {
         }
     }
 
+    fn write_words(&self, index: u32, view: Option<&View>, snapshot: bool) {
+        if let Some((_, _, data)) = &self.words && index < victory_shader::emit::SLOT_STRIDES_COUNT {
+            let row = if snapshot {
+                table_slot(index, self.words_map_slot)
+            } else {
+                index
+            };
+            let at = (row * WORDS) as usize;
+            for (k, w) in console_words(&view_shape(view)).into_iter().enumerate() {
+                // SAFETY: inside the mapping; shaders read it while we write
+                // (whole dwords).
+                unsafe { (*data as *mut u32).add(at + k).write_volatile(w) };
+            }
+        }
+    }
+
+    fn buffer_metadata(&self, index: u32, view: Option<&View>) -> Option<u32> {
+        let stride = view.and_then(view_stride);
+        if let Some((_, _, data)) = &self.strides
+            && index < victory_shader::emit::SLOT_STRIDES_COUNT
+        {
+            // SAFETY: inside the mapping; shaders read it while we write (a
+            // dword, either value is one the slot had).
+            unsafe { (*data as *mut u32).add(index as usize).write_volatile(slot_entry(view)) };
+            // The title address of the buffer view, after the strides
+            // (`victory_shader::emit::SLOT_ADDRESSES`): low dword, then high.
+            let address = view
+                .and_then(buffer_range)
+                .map_or(0, |range| range.0);
+            // SAFETY: as above, two dwords inside the mapping.
+            unsafe {
+                let at = (*data as *mut u32).add((victory_shader::emit::SLOT_ADDRESSES + 2 * index) as usize);
+                at.write_volatile(address as u32);
+                at.add(1).write_volatile((address >> 32) as u32);
+            }
+        }
+        stride
+    }
+
     /// Makes slot `index` (a dynamic one) from `view`; a null view if the
     /// host cannot.
     pub(crate) fn make_at(&self, index: u32, view: &View) {
+        self.write_words(index, Some(view), true);
         let kept = make(view, self.cpu(index));
         if kept.is_none() {
             null_for(view, self.cpu(index));
@@ -2713,6 +2765,9 @@ impl HostHeap {
 
     /// Makes slot `index` read nothing: a null view, or a plain sampler.
     pub(crate) fn make_null(&self, index: u32) {
+        if index >= self.dynamic_first {
+            self.write_words(index, None, true);
+        }
         if self.sampler {
             self.null_sampler(index);
         } else {
@@ -2841,7 +2896,8 @@ impl HostHeap {
 
     /// Makes slot `index` (a dynamic one) a constant buffer view of host
     /// memory (the list's own, which it holds).
-    pub(crate) fn constant_at(&self, index: u32, gpu: u64, size: u32) {
+    pub(crate) fn constant_at(&self, index: u32, address: u64, gpu: u64, size: u32) {
+        self.write_words(index, Some(&View::Constant(address, size)), true);
         self.keep(index, None);
         let Some(host) = host() else { return };
         let desc = D3D12_CONSTANT_BUFFER_VIEW_DESC {
@@ -3283,6 +3339,18 @@ pub(crate) fn buffer_range(view: &View) -> Option<(u64, u64)> {
         base + buffer.FirstElement * element,
         u64::from(buffer.NumElements) * element,
     ))
+}
+
+/// An acceleration-structure SRV carries the GPU address in the view itself.
+/// Its resource argument is null. Traversal shaders use its address words.
+pub(crate) fn acceleration_structure(view: &View) -> Option<u64> {
+    let View::Shader(_, Some(words)) = view else { return None };
+    let desc = srv_desc(words);
+    if desc.ViewDimension != D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE {
+        return None;
+    }
+    // SAFETY: the dimension selects this member of the SRV union.
+    Some(unsafe { desc.Anonymous.RaytracingAccelerationStructure.Location })
 }
 
 /// The title memory the host slot of buffer view `view` is made on
@@ -3898,18 +3966,14 @@ fn buffer_uav(
     Some(Some(shadow.buffer.clone()))
 }
 
-/// Whether the host can make a shader (or unordered access) view of
-/// `texture` in `format` (none: the texture's own). The console allows any
-/// view; the host refuses (and removes the device for) views without the
-/// resource's permission, of typed depth, and in another format than a
-/// typed resource's. A view of a typed texture in another format of its
-/// family takes the texture's format.
-/// shortcut: such a view (sRGB of UNORM, say) reads without its
-/// conversion; cast with castable formats if colors come out wrong.
-fn fits(texture: &ID3D12Resource, mut format: Option<&mut DXGI_FORMAT>, unordered: bool) -> bool {
+/// Checks the texture's flags and chooses a compatible format for its SRV or UAV.
+fn fits(
+    d: D3D12_RESOURCE_DESC,
+    mut format: Option<&mut DXGI_FORMAT>,
+    unordered: bool,
+    casts_fully_typed: bool,
+) -> bool {
     use crate::resource::{DEPTH_FORMATS, family};
-    // SAFETY: a live resource.
-    let d = unsafe { texture.GetDesc() };
     let allowed = if unordered {
         d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 != 0
     } else {
@@ -3971,10 +4035,18 @@ fn fits(texture: &ID3D12Resource, mut format: Option<&mut DXGI_FORMAT>, unordere
     }
     if let Some(format) = format
         && !typeless
+        && view != own
+        && (unordered || !casts_fully_typed || !srgb_pair(own, view))
     {
         *format = d.Format;
     }
     true
+}
+
+fn srgb_pair(own: u32, view: u32) -> bool {
+    let pair = (own.max(view), own.min(view));
+    crate::resource::SRGB.contains(&pair)
+        || matches!(pair, (72, 71) | (75, 74) | (78, 77) | (99, 98)) // BC1, BC2, BC3, BC7
 }
 
 /// Whether the host stores to typed unordered views of `format`.
@@ -4135,7 +4207,14 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
                     }
                 }
                 let mut desc = desc.as_ref().map(srv_desc);
-                if !fits(texture, desc.as_mut().map(|d| &mut d.Format), false) {
+                // SAFETY: the texture is live for this view creation.
+                let resource_desc = unsafe { texture.GetDesc() };
+                if !fits(
+                    resource_desc,
+                    desc.as_mut().map(|d| &mut d.Format),
+                    false,
+                    host.casts_fully_typed_formats,
+                ) {
                     return None;
                 }
                 // Levels on demand (`crate::tiles`): a texture made level by
@@ -4222,7 +4301,14 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
                 }
                 None => texture,
             };
-            if !fits(texture, desc.as_mut().map(|d| &mut d.Format), true) {
+            // SAFETY: the texture or its depth twin is live.
+            let resource_desc = unsafe { texture.GetDesc() };
+            if !fits(
+                resource_desc,
+                desc.as_mut().map(|d| &mut d.Format),
+                true,
+                host.casts_fully_typed_formats,
+            ) {
                 return None;
             }
             // SAFETY: a live texture and a slot of our heap.
@@ -4320,12 +4406,13 @@ fn same_placed_texture(a: &View, b: &View) -> bool {
 /// null view and were dropped, so the lighting read zeros.
 pub(crate) fn write_views() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_WRITE_VIEWS").is_some_and(|v| v == "1"))
+    *ON.get_or_init(|| std::env::var_os("VICTORY_WRITE_VIEWS")
+        .map_or_else(crate::pipeline::builder_requested, |v| v == "1"))
 }
 
 /// The resource description (the host's 14 words) of the texture a placed
 /// unordered view writes: the title's, with unordered access allowed and no
-/// depth, and R9G9B9E5 (67) as R32_UINT (41): the same 4-byte texels, which
+/// depth, and R9G9B9E5 as R32_UINT: the same 4-byte texels, which
 /// the host can write. The texture the title reads through its own R9G9B9E5
 /// view keeps its description: `resource::alias_of` finds this one by
 /// address and size and copies its texels there before a draw reads them.
@@ -4336,10 +4423,16 @@ fn written_description(resource: &[u32; 14]) -> [u32; 14] {
     const DEPTH: u32 = 0x2;
     let mut r = *resource;
     r[FLAGS] = (r[FLAGS] | UNORDERED) & !DEPTH;
-    if r[FORMAT] == 67 {
-        r[FORMAT] = 41;
-    }
+    r[FORMAT] = writable_format(r[FORMAT]);
     r
+}
+
+fn writable_format(format: u32) -> u32 {
+    if format == DXGI_FORMAT_R9G9B9E5_SHAREDEXP.0 as u32 {
+        DXGI_FORMAT_R32_UINT.0 as u32
+    } else {
+        format
+    }
 }
 
 /// A shader view of a texture the title placed in memory itself, as a view
@@ -4362,9 +4455,7 @@ pub(crate) fn placed_texture(view: &View) -> Option<View> {
     let texture = crate::resource::texture_at(address, &written_description(resource))?;
     let mut words: [u32; 10] = desc[..10].try_into().ok()?;
     // The view names the format it writes: R9G9B9E5 is R32_UINT here too.
-    if words[0] == 67 {
-        words[0] = 41;
-    }
+    words[0] = writable_format(words[0]);
     once!(
         format = resource[8],
         address,
@@ -4618,6 +4709,30 @@ fn null_view(at: D3D12_CPU_DESCRIPTOR_HANDLE) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_texture_views_keep_the_requested_colour_space() {
+        let format = |own, requested, unordered, casts| {
+            let resource = D3D12_RESOURCE_DESC {
+                Format: DXGI_FORMAT(own),
+                Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                ..Default::default()
+            };
+            let mut view = DXGI_FORMAT(requested);
+            fits(resource, Some(&mut view), unordered, casts).then_some(view.0)
+        };
+        for (linear, srgb) in [
+            (28, 29), (87, 91), (88, 93), (71, 72), (74, 75), (77, 78), (98, 99),
+        ] {
+            assert_eq!(format(linear, srgb, false, true), Some(srgb));
+            assert_eq!(format(srgb, linear, false, true), Some(linear));
+            assert_eq!(format(linear, srgb, false, false), Some(linear));
+        }
+        assert_eq!(format(28, 29, true, true), Some(28)); // UAVs stay linear
+        assert_eq!(format(27, 29, false, false), Some(29)); // typeless RGBA8
+        assert_eq!(format(28, 31, false, true), Some(28)); // same family, SNORM
+        assert_eq!(format(28, 91, false, true), None); // BGRA view of RGBA
+    }
 
     /// A float3 view off a 12-byte element becomes a one-channel view of
     /// the same dwords: element i, channel k at dword 3 * i + k.
