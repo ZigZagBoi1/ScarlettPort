@@ -1,8 +1,9 @@
 //! The title's precompiled pipelines (`scarlett_game::pso_cache`) as the
 //! runtime would name them: a decoded record's state as the
 //! [`GraphicsState`] a stream with the same fields gives, so that its
-//! `describe()` text, and the title pipeline key made from it and the
-//! shaders (`make::Pending::new`), can be set beside those of the pipelines
+//! `key_text()` (which the library name hashes too), and the title
+//! pipeline key made from it and the shaders (`make::Pending::new`), can
+//! be set beside those of the pipelines
 //! a run wrote down (`known`), and written into the book (`seed`) for
 //! `scarlett warm` / `prepare` to make. The keys depend on the adapter:
 //! target formats go through `resource::target_format`, which asks the host
@@ -108,12 +109,16 @@ pub(super) fn state_of(d: &GraphicsDesc) -> GraphicsState {
     g
 }
 
-/// A graphics state as text: whole (`describe()`, what the title pipeline
-/// key and the library name hash) and field by field (to say where two
-/// differ).
+/// A graphics state as text: whole (`describe()`, as given, and
+/// `key_text()`, what the title pipeline key and the library name hash)
+/// and field by field (to say where two differ).
 #[derive(Debug, Clone, PartialEq)]
 pub struct StateText {
     pub describe: String,
+    /// `describe()` with the blend D3D12 does not read at its defaults.
+    pub key: String,
+    /// The blend state the host pipeline is made with.
+    pub made: String,
     pub fields: Vec<(String, String)>,
     /// What the state does ([`semantic_of`]).
     pub semantic: String,
@@ -233,6 +238,8 @@ fn text_of(g: &GraphicsState) -> StateText {
     put("samples".into(), format!("{:?}", g.samples));
     StateText {
         describe: g.describe(),
+        key: g.key_text(),
+        made: format!("{:?}", g.made_blend()),
         semantic: semantic_of(g),
         fields: f,
     }
@@ -308,43 +315,30 @@ fn semantic_of(g: &GraphicsState) -> String {
 /// A decoded record's state as the runtime would describe it.
 pub fn state_text(d: &GraphicsDesc) -> StateText {
     let mut g = state_of(d);
-    title_convention(&mut g);
+    unread_at_defaults(&mut g);
     text_of(&g)
 }
 
-/// The blend of targets D3D12 ignores, filled as most of the title's
-/// streams fill it: the register image holds the driver's copy of target
-/// 0's blend in every target and a write mask of 0 for targets past the
-/// count; the title's descriptions mostly have D3D12's defaults there
-/// (checked against a book of 83,562 pipelines on 2026-11-26: this rule
-/// took the book's graphics pipelines with an identical record from 4,618
-/// to 15,391, and those of them in the early list from 521 to 923; the rest
-/// of the title's streams fill these fields in ways the
-/// record does not tell, e.g. masks of 0, or blending on target 0 without
-/// targets).
-fn title_convention(g: &mut GraphicsState) {
-    let default = GraphicsState::default().blend.RenderTarget[0];
-    let n = (g.targets.NumRenderTargets as usize).min(8);
-    let independent = g.blend.IndependentBlendEnable.as_bool();
-    for (i, t) in g.blend.RenderTarget.iter_mut().enumerate() {
-        let unused = if independent { i >= n } else { i > 0 };
-        if unused {
-            *t = default;
-        }
-    }
+/// The blend D3D12 does not read at D3D12's defaults (`host::read_blend`),
+/// as the host pipeline is made: the register image holds the driver's
+/// copy of target 0's blend in every target and a write mask of 0 for
+/// targets past the count, where the title's streams mostly have D3D12's
+/// defaults and sometimes other values.
+fn unread_at_defaults(g: &mut GraphicsState) {
+    g.blend = super::host::read_blend(&g.blend, &g.targets);
 }
 
 /// The key the runtime gives a title pipeline (`make::Pending::new`): each
 /// shader's stage and logged hash (the first 16 hex digits of its
 /// container's BLAKE3), in the order the title gave them, then the
-/// graphics state's text (none for compute and plain descriptions).
-pub fn title_key(shaders: &[(&str, [u8; 32])], describe: Option<&str>) -> String {
+/// graphics state's `key_text()` (none for compute and plain descriptions).
+pub fn title_key(shaders: &[(&str, [u8; 32])], state: Option<&str>) -> String {
     let mut key = blake3::Hasher::new();
     for (stage, hash) in shaders {
         key.update(stage.as_bytes());
         key.update(blake3::Hash::from_bytes(*hash).to_hex()[..16].as_bytes());
     }
-    key.update(describe.unwrap_or_default().as_bytes());
+    key.update(state.unwrap_or_default().as_bytes());
     key.finalize().to_hex()[..32].to_owned()
 }
 
@@ -395,10 +389,10 @@ pub fn seed(dir: &Path, seeds: &[Seed<'_>]) -> std::io::Result<Seeded> {
             .collect();
         let state = s.state.map(|d| {
             let mut g = state_of(d);
-            title_convention(&mut g);
+            unread_at_defaults(&mut g);
             g
         });
-        let key = title_key(&hashed, state.as_ref().map(|g| g.describe()).as_deref());
+        let key = title_key(&hashed, state.as_ref().map(|g| g.key_text()).as_deref());
         let mut id = [0u8; 16];
         for (at, b) in id.iter_mut().enumerate() {
             *b = u8::from_str_radix(&key[2 * at..2 * at + 2], 16).unwrap_or(0);
@@ -671,8 +665,11 @@ mod tests {
         assert_eq!(field("blend.rt1.BlendEnable"), "BOOL(1)");
         assert_eq!(field("blend.rt2.BlendEnable"), "BOOL(0)");
         assert_eq!(field("blend.rt2.RenderTargetWriteMask"), "15");
-        // What the state does is the same either way.
+        // What the state does is the same either way, and so is the key: a
+        // stream with the register image's copy has the record's key.
         assert_eq!(s.semantic, semantic_of(&state_of(&d)));
+        assert_ne!(s.describe, state_of(&d).describe());
+        assert_eq!(s.key, state_of(&d).key_text());
         d.independent_blend = false;
         let s = state_text(&d);
         let field = |f: &str| {
@@ -684,6 +681,8 @@ mod tests {
         };
         assert_eq!(field("blend.rt0.BlendEnable"), "BOOL(1)");
         assert_eq!(field("blend.rt1.BlendEnable"), "BOOL(0)");
+        assert_ne!(s.describe, state_of(&d).describe());
+        assert_eq!(s.key, state_of(&d).key_text());
     }
 
     #[test]
@@ -725,10 +724,7 @@ mod tests {
             ("vertex", *blake3::hash(&vs).as_bytes()),
             ("pixel", *blake3::hash(&ps).as_bytes()),
         ];
-        assert_eq!(
-            first.keys[0],
-            title_key(&hashed, Some(&state_text(&d).describe))
-        );
+        assert_eq!(first.keys[0], title_key(&hashed, Some(&state_text(&d).key)));
         // Seeding again adds nothing; a torn end is cut off first.
         let path = dir.path().join(super::super::known::PIPELINES);
         let mut bytes = std::fs::read(&path).unwrap();

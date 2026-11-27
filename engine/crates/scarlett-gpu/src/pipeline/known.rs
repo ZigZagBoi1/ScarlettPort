@@ -550,6 +550,165 @@ impl GraphicsState {
 mod tests {
     use super::*;
 
+    /// A state with `count` targets (none past two) and blending on the
+    /// first; the second has another description unless `same`, and those
+    /// D3D12 does not read are the register image's copy of the first with
+    /// a write mask of 0.
+    fn blended(independent: bool, count: u32, same: bool) -> GraphicsState {
+        let mut g = GraphicsState {
+            depth_format: DXGI_FORMAT_D32_FLOAT,
+            ..Default::default()
+        };
+        g.names = vec![CString::new("POSITION").unwrap()];
+        g.inputs = vec![D3D12_INPUT_ELEMENT_DESC {
+            SemanticName: PCSTR(g.names[0].as_ptr().cast()),
+            Format: DXGI_FORMAT_R32G32B32_FLOAT,
+            ..Default::default()
+        }];
+        g.topology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        g.targets.NumRenderTargets = count;
+        let formats = [DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT];
+        for (at, f) in formats.into_iter().enumerate().take(count as usize) {
+            g.targets.RTFormats[at] = f;
+        }
+        g.blend.IndependentBlendEnable = independent.into();
+        let first = &mut g.blend.RenderTarget[0];
+        first.BlendEnable = true.into();
+        first.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+        first.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        let first = *first;
+        for (i, t) in g.blend.RenderTarget.iter_mut().enumerate().skip(1) {
+            *t = D3D12_RENDER_TARGET_BLEND_DESC {
+                RenderTargetWriteMask: 0,
+                ..first
+            };
+            if i == 1 && same && count > 1 {
+                *t = first;
+            } else if i == 1 && independent && count > 1 {
+                *t = D3D12_RENDER_TARGET_BLEND_DESC {
+                    RenderTargetWriteMask: 3,
+                    ..GraphicsState::default().blend.RenderTarget[1]
+                };
+            }
+        }
+        g
+    }
+
+    /// `make()`'s state with its `k`th number (in `numbers!` order) changed,
+    /// or `None` past the last.
+    fn bumped(make: &dyn Fn() -> GraphicsState, k: usize) -> Option<GraphicsState> {
+        let mut g = make();
+        let mut at = 0;
+        macro_rules! bump {
+            ($x:expr) => {{
+                if at == k {
+                    $x = (($x as u32) ^ 1) as _;
+                }
+                at += 1;
+            }};
+        }
+        numbers!(g, bump);
+        (k < at).then_some(g)
+    }
+
+    /// Two states that differ only in the blend D3D12 does not read have one
+    /// title pipeline key and library name, and the host is given one blend
+    /// state for them; a change of any other number, or of what is not a
+    /// number, gives another key. Each change still shows in `describe()`.
+    #[test]
+    fn the_key_leaves_out_only_the_blend_d3d12_does_not_read() {
+        // Numbers 2 + 10 i to 11 + 10 i are target i's blend; 1 is
+        // independent blending.
+        let targets = |from: usize| move |k: usize| (2 + 10 * from..82).contains(&k);
+        let and_independent = |from: usize| move |k: usize| k == 1 || targets(from)(k);
+        type Case = (
+            &'static str,
+            Box<dyn Fn() -> GraphicsState>,
+            Box<dyn Fn(usize) -> bool>,
+        );
+        let cases: [Case; 5] = [
+            (
+                "independent, two targets",
+                Box::new(|| blended(true, 2, false)),
+                Box::new(targets(2)),
+            ),
+            (
+                "one description, two targets",
+                Box::new(|| blended(false, 2, false)),
+                Box::new(targets(1)),
+            ),
+            (
+                "independent, both alike",
+                Box::new(|| blended(true, 2, true)),
+                Box::new(and_independent(2)),
+            ),
+            (
+                "independent, no targets",
+                Box::new(|| blended(true, 0, false)),
+                Box::new(and_independent(0)),
+            ),
+            (
+                "one description, no targets",
+                Box::new(|| blended(false, 0, false)),
+                Box::new(and_independent(0)),
+            ),
+        ];
+        for (name, make, ignored) in &cases {
+            let base = make();
+            let mut k = 0;
+            while let Some(g) = bumped(make.as_ref(), k) {
+                assert_ne!(
+                    g.describe(),
+                    base.describe(),
+                    "{name}: number {k} is not in describe()"
+                );
+                assert_eq!(
+                    g.key_text() == base.key_text(),
+                    ignored(k),
+                    "{name}: number {k}"
+                );
+                if ignored(k) {
+                    assert_eq!(g.made_blend(), base.made_blend(), "{name}: number {k}");
+                }
+                k += 1;
+            }
+            assert!(k > 100, "{name}: {k} numbers");
+            // All that D3D12 does not read at D3D12's defaults at once.
+            let mut plain = make();
+            let default = GraphicsState::default().blend.RenderTarget[0];
+            for (i, t) in plain.blend.RenderTarget.iter_mut().enumerate() {
+                if ignored(2 + 10 * i) {
+                    *t = default;
+                }
+            }
+            if ignored(1) {
+                plain.blend.IndependentBlendEnable = false.into();
+            }
+            assert_ne!(plain.describe(), base.describe(), "{name}");
+            assert_eq!(plain.key_text(), base.key_text(), "{name}");
+        }
+        let changes: [fn(&mut GraphicsState); 6] = [
+            |g| g.rasterizer.DepthBiasClamp = 0.5,
+            |g| g.rasterizer.SlopeScaledDepthBias = 2.0,
+            |g| g.depth_bounds = true,
+            |g| {
+                g.names[0] = CString::new("NORMAL").unwrap();
+                g.inputs[0].SemanticName = PCSTR(g.names[0].as_ptr().cast());
+            },
+            |g| g.inputs[0].AlignedByteOffset = 12,
+            |g| {
+                g.inputs.clear();
+                g.names.clear();
+            },
+        ];
+        let base = blended(true, 2, false);
+        for (n, change) in changes.iter().enumerate() {
+            let mut g = blended(true, 2, false);
+            change(&mut g);
+            assert_ne!(g.key_text(), base.key_text(), "change {n}");
+        }
+    }
+
     #[test]
     fn a_state_comes_back_as_it_was() {
         let mut g = GraphicsState { sample_mask: 7, depth_bounds: true, ..Default::default() };

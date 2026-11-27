@@ -53,10 +53,7 @@ impl Record {
     }
 
     fn key(&self) -> String {
-        pre::title_key(
-            &self.shaders,
-            self.state.as_ref().map(|s| s.describe.as_str()),
-        )
+        pre::title_key(&self.shaders, self.state.as_ref().map(|s| s.key.as_str()))
     }
 }
 
@@ -600,7 +597,8 @@ fn compare(book: &Path, records: &[Record], out: &Path) -> Result<()> {
             continue;
         }
         let describe = p.state.as_ref().map(|s| s.describe.as_str());
-        if pre::title_key(&p.shaders, describe) == p.key {
+        let key_text = p.state.as_ref().map(|s| s.key.as_str());
+        if pre::title_key(&p.shaders, key_text) == p.key {
             count("book keys the key function gives again (self-check)");
         }
         let stages: Vec<&str> = p.shaders.iter().map(|s| s.0).collect();
@@ -664,13 +662,25 @@ fn compare(book: &Path, records: &[Record], out: &Path) -> Result<()> {
                     .map(|f| format!("{f}={}/{}", value(state(c), f), value(theirs, f)))
                     .collect::<Vec<_>>()
             };
-            if let Some(&c) = candidates
-                .iter()
-                .find(|&&c| state(c).describe == theirs.describe)
-            {
+            if let Some(&c) = candidates.iter().find(|&&c| state(c).key == theirs.key) {
                 matched_records.insert(base(&records[c]));
                 if records[c].key() == p.key {
                     count(&format!("{kind}: identical, record key equals book key"));
+                }
+                // The library names both by the key text: those whose
+                // describe() differs were named apart before it did.
+                if state(c).describe != theirs.describe {
+                    let early = if used.contains(&p.key) {
+                        "early list, "
+                    } else {
+                        ""
+                    };
+                    count(&format!("{early}{kind}: identical, other describe()"));
+                    if state(c).made == theirs.made {
+                        count(&format!(
+                            "{early}{kind}: identical, other describe(), same host blend"
+                        ));
+                    }
                 }
                 ("identical", records[c].name.clone(), Vec::new())
             } else if let Some(&c) = candidates
@@ -680,7 +690,7 @@ fn compare(book: &Path, records: &[Record], out: &Path) -> Result<()> {
                 same_records.insert(base(&records[c]));
                 let shown = tally(&mut fields, &mut patterns, c);
                 (
-                    "same pipeline, other describe()",
+                    "same pipeline, other key text",
                     records[c].name.clone(),
                     shown,
                 )
@@ -751,10 +761,10 @@ fn compare(book: &Path, records: &[Record], out: &Path) -> Result<()> {
     };
     top(
         fields,
-        "same pipeline, other describe(): fields that differ (N as *):",
+        "same pipeline, other key text: fields that differ (N as *):",
         30,
     );
-    top(patterns, "same pipeline, other describe(): field sets:", 15);
+    top(patterns, "same pipeline, other key text: field sets:", 15);
     top(
         other_fields,
         "same shaders, another pipeline: fields that differ from the nearest record:",

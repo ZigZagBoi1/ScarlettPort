@@ -150,6 +150,39 @@ fn host_blend(blend: &D3D12_BLEND_DESC, targets: &D3D12_RT_FORMAT_ARRAY) -> D3D1
     host
 }
 
+/// `blend` as D3D12 reads it, the rest at D3D12's defaults: without
+/// independent blending only the first description ("If set to FALSE,
+/// only the RenderTarget[0] members are used; RenderTarget[1..7] are
+/// ignored", `D3D12_BLEND_DESC`), and none past the count (there is no
+/// render target there). Independent blending counts as off where every
+/// target up to the count has the first's description: it then makes no
+/// difference. Title streams fill what D3D12 ignores in several ways (the
+/// register image of a precompiled record has the first's blend in every
+/// target, with masks of 0 past the count), so the host pipeline, its name
+/// in the library and the title pipeline key all take this blend: states
+/// that differ only there make one host pipeline.
+pub(super) fn read_blend(
+    blend: &D3D12_BLEND_DESC,
+    targets: &D3D12_RT_FORMAT_ARRAY,
+) -> D3D12_BLEND_DESC {
+    let count = (targets.NumRenderTargets as usize).min(8);
+    let mut read = *blend;
+    if read.RenderTarget[..count]
+        .iter()
+        .all(|t| *t == read.RenderTarget[0])
+    {
+        read.IndependentBlendEnable = false.into();
+    }
+    let per_target = read.IndependentBlendEnable.as_bool();
+    let default = GraphicsState::default().blend.RenderTarget[0];
+    for (i, t) in read.RenderTarget.iter_mut().enumerate() {
+        if i >= count || i > 0 && !per_target {
+            *t = default;
+        }
+    }
+    read
+}
+
 impl GraphicsState {
     /// Whether the draws are a pass over the screen: no vertex input, no
     /// depth or stencil, a target. Such passes fill tables once; their shaders
@@ -244,9 +277,65 @@ impl GraphicsState {
         }
     }
 
-    /// Everything the state holds, as text: part of a pipeline's name in
-    /// the library and of the key a title pipeline is started early by.
+    /// Everything the state holds, as text, the blend as the title gave it.
     pub(crate) fn describe(&self) -> String {
+        self.text(&self.blend)
+    }
+
+    /// The state as the host pipeline is made from it, as text: what the
+    /// title pipeline key (the one a title pipeline is started early and
+    /// written down by) and the pipeline's name in the library hash.
+    /// `describe()` with the blend D3D12 reads ([`read_blend`]), so that
+    /// states that differ only in what it does not read have one key and
+    /// one library entry.
+    pub(crate) fn key_text(&self) -> String {
+        self.text(&read_blend(&self.blend, &self.targets))
+    }
+
+    /// The blend state the host pipeline is made with: the blend D3D12
+    /// reads ([`read_blend`]), as the host takes it ([`host_blend`]).
+    pub(super) fn made_blend(&self) -> D3D12_BLEND_DESC {
+        host_blend(&read_blend(&self.blend, &self.targets), &self.targets)
+    }
+
+    /// The host description of a graphics pipeline of the state: `vs` and
+    /// `ps` under `root`, without a geometry stage. It points into the
+    /// state (its input elements) and borrows `root`.
+    fn host_desc(
+        &self,
+        root: &ID3D12RootSignature,
+        vs: D3D12_SHADER_BYTECODE,
+        ps: D3D12_SHADER_BYTECODE,
+    ) -> D3D12_GRAPHICS_PIPELINE_STATE_DESC {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC {
+            // SAFETY: a borrowed pointer the description never releases.
+            pRootSignature: unsafe { std::mem::transmute_copy(root) },
+            VS: vs,
+            PS: ps,
+            BlendState: self.made_blend(),
+            SampleMask: self.sample_mask,
+            RasterizerState: self.rasterizer,
+            DepthStencilState: self.depth,
+            InputLayout: D3D12_INPUT_LAYOUT_DESC {
+                pInputElementDescs: self.inputs.as_ptr(),
+                NumElements: self.inputs.len() as u32,
+            },
+            IBStripCutValue: self.strip_cut,
+            // The console's rectangle and quad types draw as triangles on
+            // the host (see `draw`).
+            PrimitiveTopologyType: match self.topology.0 {
+                RECTANGLES | QUADS => D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
+                _ => self.topology,
+            },
+            NumRenderTargets: self.targets.NumRenderTargets,
+            RTVFormats: self.targets.RTFormats,
+            DSVFormat: self.depth_format,
+            SampleDesc: self.samples,
+            ..Default::default()
+        }
+    }
+
+    fn text(&self, blend: &D3D12_BLEND_DESC) -> String {
         let inputs: Vec<String> = self
             .inputs
             .iter()
@@ -264,8 +353,7 @@ impl GraphicsState {
             ""
         };
         format!(
-            "{:?} {} {:?} {:?}{bounds} {inputs:?} {} {} {:?} {} {:?}",
-            self.blend,
+            "{blend:?} {} {:?} {:?}{bounds} {inputs:?} {} {} {:?} {} {:?}",
             self.sample_mask,
             self.rasterizer,
             self.depth,
@@ -710,7 +798,7 @@ impl HostPipeline {
         } else {
             false
         };
-        let state = g.describe();
+        let state = g.key_text();
         if mesh.is_some() {
             // "triangles": the stream names its topology since it did not
             // load from the library without one (see `mesh_pipeline`); a
@@ -759,38 +847,13 @@ impl HostPipeline {
                 Err(e) => tracing::warn!(error = %e, ?shaders, "no rectangle geometry stage"),
             }
         }
-        let mut desc = D3D12_GRAPHICS_PIPELINE_STATE_DESC {
-            // SAFETY: a borrowed pointer the description never releases.
-            pRootSignature: unsafe { std::mem::transmute_copy(&root) },
-            VS: code(0),
-            PS: code(1),
-            GS: rect_gs.as_ref().map_or(D3D12_SHADER_BYTECODE::default(), |gs| {
-                D3D12_SHADER_BYTECODE {
-                    pShaderBytecode: gs.as_ptr().cast(),
-                    BytecodeLength: gs.len(),
-                }
-            }),
-            BlendState: host_blend(&g.blend, &g.targets),
-            SampleMask: g.sample_mask,
-            RasterizerState: g.rasterizer,
-            DepthStencilState: g.depth,
-            InputLayout: D3D12_INPUT_LAYOUT_DESC {
-                pInputElementDescs: g.inputs.as_ptr(),
-                NumElements: g.inputs.len() as u32,
-            },
-            IBStripCutValue: g.strip_cut,
-            // The console's rectangle and quad types draw as triangles on
-            // the host (see `draw`).
-            PrimitiveTopologyType: match g.topology.0 {
-                RECTANGLES | QUADS => D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
-                _ => g.topology,
-            },
-            NumRenderTargets: g.targets.NumRenderTargets,
-            RTVFormats: g.targets.RTFormats,
-            DSVFormat: g.depth_format,
-            SampleDesc: g.samples,
-            ..Default::default()
-        };
+        let mut desc = g.host_desc(&root, code(0), code(1));
+        if let Some(gs) = &rect_gs {
+            desc.GS = D3D12_SHADER_BYTECODE {
+                pShaderBytecode: gs.as_ptr().cast(),
+                BytecodeLength: gs.len(),
+            };
+        }
         // A pipeline with the geometry stage has a name of its own in the
         // library; the others keep theirs.
         let name = |gs: Option<&Vec<u8>>| match gs {
@@ -1029,7 +1092,7 @@ fn mesh_pipeline(
             root: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE, root.as_raw()),
             ms: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS, ms),
             ps: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS, ps),
-            blend: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND, host_blend(&g.blend, &g.targets)),
+            blend: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND, g.made_blend()),
             mask: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK, g.sample_mask),
             raster: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER, g.rasterizer),
             depth,
@@ -1048,7 +1111,7 @@ fn mesh_pipeline(
             root: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE, root.as_raw()),
             ms: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS, ms),
             ps: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS, ps),
-            blend: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND, host_blend(&g.blend, &g.targets)),
+            blend: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND, g.made_blend()),
             mask: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK, g.sample_mask),
             raster: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER, g.rasterizer),
             depth: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL1, g.depth1()),
@@ -1358,6 +1421,118 @@ mod tests {
         let mut t = targets(&[DXGI_FORMAT_R8G8B8A8_UNORM]);
         t.RTFormats[1] = DXGI_FORMAT_R8_UINT;
         assert_eq!(host_blend(&blending(false), &t), blending(false));
+    }
+
+    /// Two states that differ only in the blend D3D12 does not read give
+    /// the host one description: through the runtime's own descriptions
+    /// (`host_desc`, `mesh_pipeline`), the second state's pipeline loads
+    /// from the library entry made for the first. With the debug layer
+    /// (`SCARLETT_D3D12_DEBUG=1` in a diagnostics build) it has nothing to
+    /// say about them, and does about one D3D12 refuses.
+    #[test]
+    fn unread_blend_makes_one_library_entry() {
+        let Some(host) = host() else {
+            return; // no host GPU here
+        };
+        let Some(dxc) = dxc() else {
+            eprintln!("no PC dxc.exe; skipped");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let vs = compile(&dxc, dir.path(), VS, "vs_6_5");
+        let ps = compile(&dxc, dir.path(), PS, "ps_6_5");
+        let (root, root_blob) = root_signature(&host.device, &[], &[], false).unwrap();
+        // Blending on two targets alike: as one description, or as the
+        // register image's copy in every target with masks of 0 past them.
+        let state = |copy: bool, bounds: bool| {
+            let mut g = GraphicsState::default();
+            g.depth.DepthEnable = false.into();
+            g.depth_bounds = bounds;
+            g.depth_format = DXGI_FORMAT_D32_FLOAT;
+            g.topology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            g.targets = targets(&[DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT]);
+            g.blend = blending(copy);
+            if copy {
+                for t in &mut g.blend.RenderTarget[2..] {
+                    t.RenderTargetWriteMask = 0;
+                }
+            }
+            g
+        };
+        let (a, b) = (state(true, false), state(false, false));
+        assert_ne!(a.describe(), b.describe());
+        assert_eq!(a.key_text(), b.key_text());
+        let debug =
+            cfg!(feature = "diagnostics") && std::env::var_os("SCARLETT_D3D12_DEBUG").is_some();
+        if debug {
+            let mut refused = b.host_desc(&root, code(&vs), code(&ps));
+            refused.BlendState.RenderTarget[0].LogicOpEnable = true.into();
+            // SAFETY: the description points at live data.
+            let made = unsafe {
+                host.device
+                    .CreateGraphicsPipelineState::<ID3D12PipelineState>(&refused)
+            };
+            assert!(made.is_err());
+            assert!(host.log_messages().is_some(), "the debug layer is not on");
+        }
+        type Make<'a> =
+            dyn Fn(&GraphicsState, &str) -> windows::core::Result<ID3D12PipelineState> + 'a;
+        let loads_again = |what: &str, make: &Make, a: &GraphicsState, b: &GraphicsState| {
+            let name = |g: &GraphicsState| {
+                super::super::library::name(what, &root_blob, &[&vs, &ps], &g.key_text())
+            };
+            assert_eq!(name(a), name(b));
+            make(a, &name(a)).expect("made");
+            let loaded = super::super::library::LOADED.load(Ordering::Relaxed);
+            make(b, &name(b)).expect("made for the other state");
+            assert!(
+                super::super::library::LOADED.load(Ordering::Relaxed) > loaded,
+                "{what}: the other state's pipeline was compiled again instead of loaded from the library"
+            );
+        };
+        let graphics = |g: &GraphicsState, name: &str| {
+            let d = g.host_desc(&root, code(&vs), code(&ps));
+            super::super::library::pipeline(
+                name,
+                // SAFETY: the description points at live data.
+                |library, name| unsafe { library.LoadGraphicsPipeline(name, &d) },
+                // SAFETY: as above.
+                || unsafe { host.device.CreateGraphicsPipelineState(&d) },
+            )
+        };
+        loads_again("unread blend test", &graphics, &a, &b);
+        if host.depth_bounds() {
+            let bounds = |g: &GraphicsState, name: &str| {
+                let d = g.host_desc(&root, code(&vs), code(&ps));
+                graphics_depth_bounds_pipeline(&host.device, &root, &d, g.depth1(), name)
+            };
+            let (a, b) = (state(true, true), state(false, true));
+            loads_again("unread blend bounds test", &bounds, &a, &b);
+        }
+        if host.mesh_shaders() {
+            let ms = compile(&dxc, dir.path(), MS, "ms_6_5");
+            let mesh = |g: &GraphicsState, name: &str| {
+                mesh_pipeline(
+                    &host.device,
+                    &root,
+                    code(&ms),
+                    code(&ps),
+                    g,
+                    g.depth_bounds,
+                    name,
+                )
+            };
+            loads_again("unread blend mesh test", &mesh, &a, &b);
+            if host.depth_bounds() {
+                let (a, b) = (state(true, true), state(false, true));
+                loads_again("unread blend mesh bounds test", &mesh, &a, &b);
+            }
+        } else {
+            eprintln!("no host mesh shader support; mesh part skipped");
+        }
+        if debug {
+            assert_eq!(host.log_messages(), None);
+        }
     }
 
     const VS: &str = "float4 main(uint i : SV_VertexID) : SV_Position {
