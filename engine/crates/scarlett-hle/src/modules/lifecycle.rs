@@ -237,6 +237,21 @@ fn hook(hwnd: HWND) {
         let title = wm::GetWindowLongPtrW(hwnd, wm::GWLP_WNDPROC);
         wm::SetPropW(hwnd, TITLE_PROC, title as *mut c_void);
         wm::SetWindowLongPtrW(hwnd, wm::GWLP_WNDPROC, window_proc as *const () as isize);
+        // The launcher's display mode (`XCL_WINDOW_MODE`): borderless or
+        // fullscreen (no exclusive mode here) start the first top-level
+        // window with a title bar (not a hidden helper) as F11 would.
+        static STARTED: AtomicBool = AtomicBool::new(false);
+        let style = wm::GetWindowLongW(hwnd, wm::GWL_STYLE) as u32;
+        if wm::GetParent(hwnd).is_null()
+            && style & wm::WS_CAPTION == wm::WS_CAPTION
+            && matches!(
+                std::env::var("XCL_WINDOW_MODE").as_deref(),
+                Ok("borderless" | "fullscreen")
+            )
+            && !STARTED.swap(true, Ordering::Relaxed)
+        {
+            toggle_fullscreen(hwnd);
+        }
     }
 }
 
