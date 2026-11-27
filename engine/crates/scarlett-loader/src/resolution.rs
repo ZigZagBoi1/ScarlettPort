@@ -31,6 +31,14 @@
 //!   pointed at a constant in its padding (as pull request #53 did).
 //! - **Upscaler.** `SCARLETT_UPSCALER=<kind>` makes the picker return
 //!   `kind` (pull request #53): 6 the title's own, 7 FidelityFX.
+//! - **FidelityFX jitter phases.** FidelityFX's per-frame method takes its
+//!   frame counter (+0x108 of its state) modulo the jitter phase count
+//!   (+0x10c) at +0x28f03e8. The count comes from the upscaler DLL's query
+//!   (+0x28ef2d1, from the render and display widths), which gives 0 while
+//!   those are still 0, before the title has set its resolution: a divide
+//!   by zero on the loading screen with FidelityFX on (#323). The `div` is
+//!   made a call to a guard in the unused tail of `.text` (+0x5f40970, past
+//!   its virtual size) that leaves the remainder 0 when the count is 0.
 
 /// What became of a site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +206,32 @@ pub const PICKER: Site = Site {
     ],
 };
 
+/// FidelityFX's per-frame method, +0x28f03e6: `xor edx, edx ; div dword
+/// [rdi+10Ch]` (frame counter modulo the jitter phase count).
+pub const PHASE_DIV: Site = Site {
+    at: 0x28f03e6,
+    what: "FidelityFX's jitter phase index",
+    bytes: &[0x31, 0xd2, 0xf7, 0xb7, 0x0c, 0x01, 0x00, 0x00],
+};
+
+/// Where the guard goes: after the end of `.text` (its virtual size ends at
+/// +0x5f40966), in the section's last page. The file has 0xcc padding
+/// there; mapped, it may read as zeros.
+pub const PHASE_GUARD_AT: usize = 0x5f40970;
+
+/// `xor edx, edx ; cmp dword [rdi+10Ch], 0 ; je ret ; div dword [rdi+10Ch] ; ret`.
+pub const PHASE_GUARD: [u8; 18] = [
+    0x31, 0xd2, 0x83, 0xbf, 0x0c, 0x01, 0x00, 0x00, 0x00, 0x74, 0x06, 0xf7, 0xb7, 0x0c, 0x01, 0x00, 0x00, 0xc3,
+];
+
+/// What goes at [`PHASE_DIV`]: `call` the guard, then a 3-byte `nop`.
+pub fn phase_div_code() -> Vec<u8> {
+    let mut c = vec![0xe8];
+    c.extend(rel(PHASE_GUARD_AT, PHASE_DIV.at + 5));
+    c.extend([0x0f, 0x1f, 0x00]);
+    c
+}
+
 /// `rel32` from the end of an instruction at image offset `next` to `to`.
 fn rel(to: usize, next: usize) -> [u8; 4] {
     ((to as i64 - next as i64) as i32).to_le_bytes()
@@ -274,9 +308,6 @@ pub unsafe fn matches(base: usize, size: usize, site: &Site) -> Patched {
 /// The image stays mapped and no thread runs its code yet.
 #[cfg(windows)]
 pub unsafe fn write(base: usize, size: usize, site: &Site, code: &[u8]) -> Patched {
-    use windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache;
-    use windows_sys::Win32::System::Memory::{PAGE_EXECUTE_READWRITE, VirtualProtect};
-    use windows_sys::Win32::System::Threading::GetCurrentProcess;
     if code.len() > site.bytes.len() {
         return Patched::Failed("replacement longer than the bytes compared");
     }
@@ -285,7 +316,45 @@ pub unsafe fn write(base: usize, size: usize, site: &Site, code: &[u8]) -> Patch
     if found != Patched::Done {
         return found;
     }
-    let at = base + site.at;
+    // SAFETY: the caller's promise; inside the image (checked by `matches`).
+    unsafe { write_bytes(base + site.at, code) }
+}
+
+/// Puts the FidelityFX jitter phase guard in place ([`PHASE_DIV`]).
+///
+/// # Safety
+/// As [`write`].
+#[cfg(windows)]
+pub unsafe fn guard_phase_div(base: usize, size: usize) -> Patched {
+    if PHASE_GUARD_AT + PHASE_GUARD.len() > size {
+        return Patched::Failed("outside the image");
+    }
+    // SAFETY: inside the mapped image (checked above).
+    let cave = unsafe { std::slice::from_raw_parts((base + PHASE_GUARD_AT) as *const u8, PHASE_GUARD.len()) };
+    if cave != PHASE_GUARD && !cave.iter().all(|&b| b == 0) && !cave.iter().all(|&b| b == 0xcc) {
+        return Patched::Differs;
+    }
+    // SAFETY: the caller's promise.
+    let found = unsafe { matches(base, size, &PHASE_DIV) };
+    if found != Patched::Done {
+        return found;
+    }
+    // SAFETY: the caller's promise; the guard first, so the call never lands on padding.
+    match unsafe { write_bytes(base + PHASE_GUARD_AT, &PHASE_GUARD) } {
+        Patched::Done => unsafe { write(base, size, &PHASE_DIV, &phase_div_code()) },
+        other => other,
+    }
+}
+
+/// Writes `code` at `at` (made writable for it and put back).
+///
+/// # Safety
+/// `at..at + code.len()` is inside the mapped image and no thread runs it.
+#[cfg(windows)]
+unsafe fn write_bytes(at: usize, code: &[u8]) -> Patched {
+    use windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache;
+    use windows_sys::Win32::System::Memory::{PAGE_EXECUTE_READWRITE, VirtualProtect};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
     let mut old = 0;
     // SAFETY: inside the image (checked); made writable for this and put
     // back; nothing runs it yet.
@@ -321,6 +390,16 @@ pub unsafe fn apply_asked(base: usize, size: usize) {
         Some(kind) => asked.push((&PICKER, picker_code(kind), format!("returns {kind}, {why}"))),
         None => tracing::info!(why, "upscaler picker left alone"),
     }
+    // Not a switch: without it FidelityFX divides by zero before the title
+    // sets its resolution (#323); harmless with the title's own upscaler.
+    // SAFETY: the caller's promise.
+    let guard = unsafe { guard_phase_div(base, size) };
+    let offset = format!("{:#x}", PHASE_DIV.at);
+    match guard {
+        Patched::Done => tracing::info!(site = %offset, what = PHASE_DIV.what, "resolution: guarded against a jitter phase count of 0"),
+        other => tracing::warn!(site = %offset, what = PHASE_DIV.what, ?other, "resolution: not guarded (another build?)"),
+    }
+    println!("resolution: {} guarded at title+{offset}: {guard:?}", PHASE_DIV.what);
     for (site, code, value) in asked {
         // SAFETY: the caller's promise.
         let done = unsafe { write(base, size, site, &code) };
@@ -337,6 +416,21 @@ pub unsafe fn apply_asked(base: usize, size: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_phase_guard_is_called_in_place_of_the_div() {
+        let c = phase_div_code();
+        assert_eq!(c.len(), PHASE_DIV.bytes.len());
+        let target = (PHASE_DIV.at + 5) as i64 + i64::from(i32::from_le_bytes(c[1..5].try_into().unwrap()));
+        assert_eq!((c[0], target), (0xe8, PHASE_GUARD_AT as i64));
+        // The guard does what the two replaced instructions did, then returns.
+        assert_eq!(PHASE_GUARD[..2], PHASE_DIV.bytes[..2], "xor edx, edx");
+        assert_eq!(PHASE_GUARD[11..17], PHASE_DIV.bytes[2..], "the same div");
+        assert_eq!(PHASE_GUARD[2..9], [0x83, 0xbf, 0x0c, 0x01, 0x00, 0x00, 0x00], "cmp of the divisor with 0");
+        assert_eq!((PHASE_GUARD[9], 11 + PHASE_GUARD[10] as usize), (0x74, 17), "je to the ret");
+        assert_eq!(PHASE_GUARD[17], 0xc3);
+        assert_eq!(PHASE_GUARD_AT % 16, 0);
+    }
 
     #[test]
     fn switches_parse() {
