@@ -876,6 +876,28 @@ fn dropped(pipeline: usize) {
 /// Dispatches run on the host so far.
 static DISPATCHED: AtomicU64 = AtomicU64::new(0);
 
+/// Dispatches dropped by `SCARLETT_BVH_INPUT_SKIP`.
+static BVH_INPUT_SKIPPED: AtomicU64 = AtomicU64::new(0);
+
+/// At a present: every 256th, how many dispatches a frame
+/// `SCARLETT_BVH_INPUT_SKIP` dropped since, if any.
+pub(crate) fn bvh_input_report() {
+    static FRAMES: AtomicU64 = AtomicU64::new(0);
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    if !(FRAMES.fetch_add(1, Ordering::Relaxed) + 1).is_multiple_of(256) {
+        return;
+    }
+    let now = BVH_INPUT_SKIPPED.load(Ordering::Relaxed);
+    let n = now - LAST.swap(now, Ordering::Relaxed);
+    if n > 0 {
+        tracing::info!(
+            target: "scarlett_gpu::host",
+            "SCARLETT_BVH_INPUT_SKIP: {:.1} dispatches a frame of the structure builder's input programs dropped (the builder is off)",
+            n as f64 / 256.0
+        );
+    }
+}
+
 pub(crate) fn dispatched() -> u64 {
     DISPATCHED.load(Ordering::Relaxed)
 }
@@ -1706,6 +1728,10 @@ impl State {
         }
         // `SCARLETT_GPU_PROFILE`: a stamp where the pipeline changes.
         crate::gpuprof::draw(l, &p.pso, || crate::gpuprof::name(p));
+        #[cfg(feature = "diagnostics")]
+        if crate::skinlog::readers_on() {
+            self.skin_readers(p, compute);
+        }
         for stage in &p.stages {
             let t = stage.translated();
             STORES.set(t.stores);
@@ -3189,6 +3215,15 @@ impl State {
             once!("a dispatch with a graphics pipeline");
             return;
         }
+        if crate::pipeline::bvh_input_skipped(self.pipeline as This) {
+            BVH_INPUT_SKIPPED.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        #[cfg(feature = "diagnostics")]
+        if crate::skinlog::skip(|| p.stages.first().map(|s| s.shader.hash.clone()).unwrap_or_default()) {
+            DROPPED.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         if !self.bind(list, p, true) {
             DROPPED.fetch_add(1, Ordering::Relaxed);
             // A stage of the structure builder that cannot be bound is a
@@ -3254,6 +3289,10 @@ impl State {
                 unsafe { list.list.SetComputeRoot32BitConstant(param, threads[0], word) };
             }
         }
+        #[cfg(feature = "diagnostics")]
+        if crate::skinlog::on() {
+            self.skin_note(list, p, [x, y, z]);
+        }
         // SAFETY: an open list with everything set.
         unsafe { list.list.Dispatch(x, y, z) };
         self.buffers_written();
@@ -3265,6 +3304,109 @@ impl State {
             self.host_pipeline = 0;
             self.host_roots[1] = 0;
         }
+    }
+
+    #[cfg(feature = "diagnostics")]
+    /// `crate::skinlog::named` for every buffer a draw or dispatch names.
+    fn skin_readers(&self, p: &HostPipeline, compute: bool) {
+        let name = || crate::gpuprof::name(p);
+        for stage in &p.stages {
+            let t = stage.translated();
+            for u in &t.used {
+                if let (RootType::Table, Some(Root::Table(table))) = (u.root, self.roots_ref(compute).get(usize::from(u.slot))) {
+                    let handle = table + u64::from(u.table_offset_dwords) * 4;
+                    let range = match crate::descriptor::view(handle) {
+                        Some(View::Constant(a, n)) => Some((a, u64::from(n))),
+                        Some(v) => crate::descriptor::host::buffer_range(&v),
+                        None => None,
+                    };
+                    if let Some((a, n)) = range {
+                        crate::skinlog::named(&name, a, n, &format!("{:?}", u.kind));
+                    }
+                }
+            }
+            for (k, set) in [("root cbv", &stage.root_cbvs), ("root srv", &stage.root_srvs), ("root uav", &stage.root_uavs)] {
+                for &(slot, _) in set.iter() {
+                    if let Some(Root::View(a)) = self.roots_ref(compute).get(usize::from(slot)) {
+                        crate::skinlog::named(&name, *a, 1, k);
+                    }
+                }
+            }
+        }
+        if !compute {
+            for v in &self.vertex {
+                if v.address != 0 {
+                    crate::skinlog::named(&name, v.address, u64::from(v.size), "vertices");
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "diagnostics")]
+    /// `crate::skinlog`: the dispatch's line, if its program is logged.
+    fn skin_note(&self, list: &HostList, p: &HostPipeline, groups: [u32; 3]) {
+        use std::fmt::Write;
+        let Some(stage) = p.stages.first() else { return };
+        let hash = stage.shader.hash.clone();
+        if !crate::skinlog::wants(&hash) {
+            return;
+        }
+        let t = stage.translated();
+        let mut line = format!("{:#x}	{hash}	{}x{}x{}", list as *const _ as usize, groups[0], groups[1], groups[2]);
+        // Root constants and user data words, as the program reads them.
+        let mut words: Vec<u32> = Vec::new();
+        for r in self.roots_ref(true) {
+            if let Root::Constants(c) = r {
+                words.extend_from_slice(c);
+            }
+        }
+        for u in &t.host.user_data {
+            words.push(self.user_value(true, u.slot, u.root, u.dword));
+        }
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let h = blake3::hash(&bytes);
+        let _ = write!(line, "	c{:016x}", u64::from_le_bytes(h.as_bytes()[..8].try_into().unwrap_or_default()));
+        let _ = write!(line, "	w");
+        for w in words.iter().take(48) {
+            let _ = write!(line, "{w:x},");
+        }
+        for u in &t.used {
+            let kind = match u.kind {
+                ResourceType::Srv => 'S',
+                ResourceType::Uav => 'U',
+                ResourceType::Cbv => 'C',
+                _ => continue,
+            };
+            let range = match (u.root, self.roots_ref(true).get(usize::from(u.slot))) {
+                (RootType::Table, Some(Root::Table(table))) => {
+                    let handle = table + u64::from(u.table_offset_dwords) * 4;
+                    match crate::descriptor::view(handle) {
+                        Some(View::Constant(a, n)) => Some((a, u64::from(n))),
+                        Some(v) => crate::descriptor::host::buffer_range(&v),
+                        None => None,
+                    }
+                }
+                _ => None,
+            };
+            match range {
+                Some((a, n)) => {
+                    let c = if kind == 'U' { "-".to_string() } else { crate::skinlog::content(a, n) };
+                    let _ = write!(line, "	{kind}{}+{}:{a:x}/{n:x}#{c}", u.slot, u.table_offset_dwords);
+                }
+                None => {
+                    let _ = write!(line, "	{kind}{}+{}:tex", u.slot, u.table_offset_dwords);
+                }
+            }
+        }
+        for (k, set) in [('c', &stage.root_cbvs), ('s', &stage.root_srvs), ('u', &stage.root_uavs)] {
+            for &(slot, _) in set.iter() {
+                if let Some(Root::View(a)) = self.roots_ref(true).get(usize::from(slot)) {
+                    let c = if k == 'u' { "-".to_string() } else { crate::skinlog::content(*a, 4096) };
+                    let _ = write!(line, "	R{k}{slot}:{a:x}#{c}");
+                }
+            }
+        }
+        crate::skinlog::write(&line);
     }
 
     /// The stand-in for the indirect light after a dispatch of `p`

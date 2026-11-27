@@ -23,6 +23,8 @@ mod capture;
 mod compose;
 #[cfg(windows)]
 mod gpuprof;
+#[cfg(all(windows, feature = "diagnostics"))]
+mod skinlog;
 #[cfg(windows)]
 mod frametl;
 pub mod console;

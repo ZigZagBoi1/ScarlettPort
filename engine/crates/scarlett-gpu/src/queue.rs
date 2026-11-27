@@ -1025,6 +1025,8 @@ extern "system" fn present(
         );
         // (Its line of `frames.csv` is written by our thread as it shows it.)
         called.end();
+        #[cfg(windows)]
+        crate::draw::bvh_input_report();
         #[cfg(feature = "diagnostics")]
         frame_ends();
         return S_OK;
@@ -1077,6 +1079,8 @@ extern "system" fn present(
     #[cfg(not(windows))]
     let _ = (planes, plane_parameters);
     called.end();
+    #[cfg(windows)]
+    crate::draw::bvh_input_report();
     #[cfg(all(windows, feature = "diagnostics"))]
     frame_ends();
     S_OK
@@ -1085,6 +1089,7 @@ extern "system" fn present(
 /// Diagnostics: the title's present is over.
 #[cfg(all(windows, feature = "diagnostics"))]
 fn frame_ends() {
+    crate::skinlog::frame();
     crate::timeline::presented();
     crate::faultbook::frame();
     crate::ab::presented(|switch, was, will| {

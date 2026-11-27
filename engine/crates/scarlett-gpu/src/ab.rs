@@ -55,14 +55,15 @@ struct Phase {
     draws: u64,
 }
 
-/// The frames' mean, median and nine tenths.
-fn summary(frames: &mut [f32]) -> (f32, f32, f32) {
+/// The frames' mean, median, nine tenths, 95th and 99th percentiles.
+fn summary(frames: &mut [f32]) -> (f32, f32, f32, f32, f32) {
     if frames.is_empty() {
-        return (0.0, 0.0, 0.0);
+        return (0.0, 0.0, 0.0, 0.0, 0.0);
     }
     let mean = frames.iter().sum::<f32>() / frames.len() as f32;
     frames.sort_by(f32::total_cmp);
-    (mean, frames[frames.len() / 2], frames[frames.len() * 9 / 10])
+    let at = |q: usize| frames[(frames.len() * q / 100).min(frames.len() - 1)];
+    (mean, frames[frames.len() / 2], at(90), at(95), at(99))
 }
 
 /// The title's present ends on this thread. `change`: called when another
@@ -100,10 +101,7 @@ pub(crate) fn presented(change: impl Fn(&str, bool, bool)) {
     }
     let bits = |number: u64| (number % (1 << asked.switches.len())) as u32;
     let (was, will) = (bits(p.number), bits(number));
-    let (mean, median, most) = summary(&mut p.frames);
-    // (Sorted by `summary`.)
-    let pct = |q: f32| p.frames.get(((p.frames.len() as f32 * q) as usize).min(p.frames.len().saturating_sub(1))).copied().unwrap_or(0.0);
-    let (p95, p99) = (pct(0.95), pct(0.99));
+    let (mean, median, most, p95, p99) = summary(&mut p.frames);
     let on: Vec<&str> = asked.switches.iter().enumerate().filter(|(n, _)| was >> n & 1 != 0).map(|(_, s)| s.as_str()).collect();
     tracing::info!(
         "A/B phase {} bits {was} on [{}]: {} frames, mean {mean:.1} ms, median {median:.1}, p90 {most:.1}, p95 {p95:.1}, p99 {p99:.1}, {:.0} draws a frame",
@@ -131,8 +129,8 @@ mod tests {
         assert!(parse("10").is_none());
         assert!(parse("x,SCARLETT_A").is_none());
         assert!(parse("0,SCARLETT_A").is_none());
-        assert_eq!(summary(&mut [30.0, 10.0, 20.0]), (20.0, 20.0, 30.0));
-        assert_eq!(summary(&mut []), (0.0, 0.0, 0.0));
+        assert_eq!(summary(&mut [30.0, 10.0, 20.0]), (20.0, 20.0, 30.0, 30.0, 30.0));
+        assert_eq!(summary(&mut []), (0.0, 0.0, 0.0, 0.0, 0.0));
         assert_eq!(pick("SCARLETT_NONE_SUCH"), None);
     }
 }
