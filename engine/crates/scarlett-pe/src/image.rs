@@ -44,6 +44,30 @@ pub struct SectionInfo {
     pub characteristics: u32,
 }
 
+impl SectionInfo {
+    /// Bytes of raw data the loader maps: `SizeOfRawData`, cut to
+    /// `VirtualSize` when that is set.
+    pub fn backed_size(&self) -> u32 {
+        match self.virtual_size {
+            0 => self.file_size,
+            vs => vs.min(self.file_size),
+        }
+    }
+
+    /// End of the mapped raw data in the file (0 for none), or `None` on overflow.
+    pub fn raw_end_needed(&self) -> Option<u64> {
+        match self.backed_size() {
+            0 => Some(0),
+            n => u64::from(self.file_offset).checked_add(u64::from(n)),
+        }
+    }
+
+    /// End of the raw data as the header declares it, or `None` on overflow.
+    pub fn raw_end_declared(&self) -> Option<u64> {
+        u64::from(self.file_offset).checked_add(u64::from(self.file_size))
+    }
+}
+
 /// One imported DLL and the functions taken from it.
 #[derive(Debug, Clone)]
 pub struct ImportModule {
@@ -155,27 +179,25 @@ impl ImageInfo {
             })
             .collect();
 
-        // Validate section raw-data boundaries before accepting
-        // the PE image.
+        // Validate section raw-data boundaries before accepting the PE
+        // image. Only the part of the raw data that is mapped has to be in
+        // the file: the loader copies min(VirtualSize, SizeOfRawData) bytes,
+        // and linkers round SizeOfRawData of the last section up to
+        // FileAlignment even when the file ends sooner (#290, #306).
         for section in &sections {
-            if section.file_size == 0 {
-                continue;
-            }
-
-            let start = u64::from(section.file_offset);
-            let size = u64::from(section.file_size);
-
-            let Some(end) = start.checked_add(size) else {
+            let Some(end) = section.raw_end_needed() else {
                 return Err(PeError::Malformed(format!(
                     "section '{}' has invalid raw-data bounds",
                     section.name
                 )));
             };
-
             if end > data.len() as u64 {
                 return Err(PeError::Malformed(format!(
-                    "section '{}' extends beyond file bounds",
-                    section.name
+                    "section '{}' needs the file to be at least {end} bytes, but it is {} bytes: \
+                     the file is incomplete (an unfinished copy or download, or a cloud \
+                     placeholder). Run Verify, which should report this file as damaged",
+                    section.name,
+                    data.len()
                 )));
             }
         }
@@ -235,10 +257,7 @@ impl ImageInfo {
             let delta = rva.checked_sub(s.rva)?;
             // Raw data may be padded past the virtual size; that padding is
             // not part of the section in memory.
-            let backed = match s.virtual_size {
-                0 => s.file_size,
-                vs => vs.min(s.file_size),
-            };
+            let backed = s.backed_size();
             // Header values are untrusted: an offset near 4 GiB overflows.
             (delta < backed).then(|| s.file_offset.checked_add(delta))?
         })
@@ -484,6 +503,39 @@ mod tests {
         assert_eq!(info.rva_to_file_offset(rva), None);
     }
 
+    /// File offset of section `index`'s header.
+    fn section_header(data: &[u8], index: usize) -> usize {
+        let fh = layout::file_header_offset(data).unwrap();
+        let opt_size = u16::from_le_bytes([data[fh + 16], data[fh + 17]]) as usize;
+        layout::optional_header_offset(data).unwrap() + opt_size + index * 40
+    }
+
+    #[test]
+    fn raw_data_rounded_past_the_end_of_the_file_is_accepted() {
+        // The last section's SizeOfRawData rounded past EOF while its
+        // VirtualSize fits: the loader maps only VirtualSize bytes (#290).
+        let mut data = own_image();
+        let info = ImageInfo::parse(&data).unwrap();
+        let (index, last) = info
+            .sections
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, s)| s.file_offset)
+            .unwrap();
+        let header = section_header(&data, index);
+        let vs = last.virtual_size.min(last.file_size);
+        data[header + 8..header + 12].copy_from_slice(&vs.to_le_bytes());
+        let rounded = last.file_size + 0x10000;
+        data[header + 16..header + 20].copy_from_slice(&rounded.to_le_bytes());
+        let parsed = ImageInfo::parse(&data).unwrap();
+        assert_eq!(parsed.sections[index].file_size, rounded);
+
+        // Cutting into the mapped bytes is still refused, plainly.
+        data.truncate(last.file_offset as usize + vs as usize - 1);
+        let e = ImageInfo::parse(&data).unwrap_err().to_string();
+        assert!(e.contains("incomplete") && e.contains("Verify"), "{e}");
+    }
+
     #[test]
     fn rejects_garbage_without_panicking() {
         assert!(ImageInfo::parse(b"").is_err());
@@ -562,8 +614,13 @@ mod tests {
         // Declare 4096 bytes of raw section data.
         // The actual file contains only 1024 bytes.
         data[sec + 16..sec + 20].copy_from_slice(&0x1000u32.to_le_bytes());
-
-        // Investigate whether the parser rejects this malformed image.
+        // Only VirtualSize bytes are mapped, and those are in the file.
+        assert!(
+            ImageInfo::parse(&data).is_ok(),
+            "rounded raw size alone is fine"
+        );
+        // Mapping all 4096 needs bytes the file does not have.
+        data[sec + 8..sec + 12].copy_from_slice(&0x1000u32.to_le_bytes());
         assert!(
             ImageInfo::parse(&data).is_err(),
             "section extends beyond physical file bounds"

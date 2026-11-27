@@ -44,6 +44,24 @@ impl PreparedImage {
 pub fn prepare(original: &[u8]) -> Result<PreparedImage, PrepareError> {
     let info = ImageInfo::parse(original)?;
     let mut bytes = original.to_vec();
+    // A last section whose SizeOfRawData was rounded past the end of the
+    // file (only its VirtualSize bytes are mapped, which the parser checked
+    // are there): the Windows loader wants the declared raw data present, so
+    // the copy is padded with the zeros it would map anyway.
+    let declared_end = info
+        .sections
+        .iter()
+        .filter(|s| s.file_size != 0)
+        .filter_map(|s| s.raw_end_declared())
+        .max()
+        .unwrap_or(0);
+    if let Ok(end) = usize::try_from(declared_end)
+        && end > bytes.len()
+        // FileAlignment rounding is at most 64 KiB; never trust more.
+        && end - bytes.len() <= 1 << 20
+    {
+        bytes.resize(end, 0);
+    }
 
     let fh = layout::file_header_offset(&bytes).ok_or(PrepareError::Patch("no file header"))?;
     let opt =
