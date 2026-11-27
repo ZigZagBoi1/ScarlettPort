@@ -4,6 +4,7 @@
 //! is defined in docs/asset-policy.md.
 
 pub mod pso_cache;
+pub mod pso_state;
 pub mod sgd5;
 
 /// A specific build of the title executable we know how to run.

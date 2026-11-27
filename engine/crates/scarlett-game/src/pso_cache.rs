@@ -22,7 +22,8 @@
 //! source: the first six dwords are two VOP3 instructions whose operands
 //! spell the container's `HASH` digest ([`code_shader_hash`]); the
 //! metadata block ends with the same digest (entry 0x43,
-//! [`meta_shader_hash`]). The state blocks are not decoded here.
+//! [`meta_shader_hash`]). The state blocks are decoded by
+//! [`crate::pso_state`].
 //!
 //! (Ported from ScarlettPort before the 0.4.6 engine swap, `pso_cache.rs`
 //! at 424fc91^, with zlib-rs in place of miniz_oxide.)
