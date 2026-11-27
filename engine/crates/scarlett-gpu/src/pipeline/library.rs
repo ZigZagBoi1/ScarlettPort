@@ -567,9 +567,13 @@ pub(crate) fn name(kind: &str, root: &[u8], code: &[&[u8]], state: &str) -> Stri
 
 /// The pipeline named `name`: loaded from the library by `load` if it is
 /// there with the same description, else made by `create` and stored.
+/// A name the library already holds with a description that differs (an
+/// entry an earlier build stored: entries are never replaced) can never
+/// be stored again, so such a pipeline is stored and looked up under
+/// [`second_name`] as well.
 pub(crate) fn pipeline(
     name: &str,
-    load: impl FnOnce(&ID3D12PipelineLibrary1, PCWSTR) -> windows::core::Result<ID3D12PipelineState>,
+    load: impl Fn(&ID3D12PipelineLibrary1, PCWSTR) -> windows::core::Result<ID3D12PipelineState>,
     create: impl FnOnce() -> windows::core::Result<ID3D12PipelineState>,
 ) -> windows::core::Result<ID3D12PipelineState> {
     let wide = HSTRING::from(name);
@@ -582,7 +586,10 @@ pub(crate) fn pipeline(
         let _all = one_call();
         let _one = same_name(name);
         let _call = call("load", name);
-        load(&library.library, PCWSTR(wide.as_ptr()))
+        load(&library.library, PCWSTR(wide.as_ptr())).or_else(|first| {
+            let second = HSTRING::from(second_name(name));
+            load(&library.library, PCWSTR(second.as_ptr())).map_err(|_| first)
+        })
     };
     // The load read the library's file (see `trim`).
     LOADED_AT.store(crate::host::now_ms(), Ordering::Relaxed);
@@ -604,22 +611,101 @@ pub(crate) fn pipeline(
         create()?
     };
     MADE.fetch_add(1, Ordering::Relaxed);
+    let stored = {
+        let _all = one_call();
+        let _stores = library.saving.read().unwrap_or_else(|e| e.into_inner());
+        let _call = call("store", name);
+        // SAFETY: a live pipeline; a name already stored (a description that
+        // differs) is refused, which leaves the library as it was.
+        let stored = unsafe { library.library.StorePipeline(PCWSTR(wide.as_ptr()), &pso) };
+        match &stored {
+            Err(e) if e.code() == windows::Win32::Foundation::E_INVALIDARG => {
+                let second = HSTRING::from(second_name(name));
+                // SAFETY: as above.
+                let again = unsafe { library.library.StorePipeline(PCWSTR(second.as_ptr()), &pso) };
+                if again.is_ok() {
+                    library.added.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            _ => {}
+        }
+        stored
+    };
+    if stored.is_ok() {
+        library.added.fetch_add(1, Ordering::Relaxed);
+    }
+    let why = why_made(&refused, &stored);
+    if matches!(why, Why::Differs) {
+        DIFFERED.fetch_add(1, Ordering::Relaxed);
+        let label = LABEL.with(|l| l.borrow().clone());
+        tracing::warn!(
+            pipeline = %label,
+            name,
+            "pipeline library: this name is stored with a description that differs; made again and stored under a second name"
+        );
+    }
     crate::host::trail(|| {
         let label = LABEL.with(|l| l.borrow().clone());
         format!(
-            "pipeline library: made {label} in {:.1} ms (the library did not load it: {refused})",
-            began.elapsed().as_secs_f64() * 1e3
+            "pipeline library: made {label} in {:.1} ms ({})",
+            began.elapsed().as_secs_f64() * 1e3,
+            why.text(&refused, &stored)
         )
     });
-    let _all = one_call();
-    let _stores = library.saving.read().unwrap_or_else(|e| e.into_inner());
-    let _call = call("store", name);
-    // SAFETY: a live pipeline; a name already stored (a description that
-    // differs) is refused, which leaves the library as it was.
-    if unsafe { library.library.StorePipeline(PCWSTR(wide.as_ptr()), &pso) }.is_ok() {
-        library.added.fetch_add(1, Ordering::Relaxed);
-    }
     Ok(pso)
+}
+
+/// The name a pipeline is also stored under when its own name is taken by
+/// a description that differs.
+fn second_name(name: &str) -> String {
+    format!("{name}+")
+}
+
+/// Pipelines whose name was in the library with a description that differs
+/// from the one asked for: the library refused them although it holds them.
+pub(crate) static DIFFERED: AtomicU64 = AtomicU64::new(0);
+
+/// Why a pipeline was made rather than loaded. A load answers E_INVALIDARG
+/// both when the name is not in the library and when the description
+/// differs from the stored one (the documented meanings); the store that
+/// follows tells them apart, since it answers E_INVALIDARG only for a name
+/// that is already there.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Why {
+    /// Not in the library yet: the first time this pipeline is made.
+    New,
+    /// In the library under this name, stored with another description.
+    Differs,
+    /// The load failed for another reason.
+    Other,
+}
+
+pub(crate) fn why_made(load: &windows::core::Error, store: &windows::core::Result<()>) -> Why {
+    use windows::Win32::Foundation::E_INVALIDARG;
+    if load.code() != E_INVALIDARG {
+        return Why::Other;
+    }
+    match store {
+        Ok(()) => Why::New,
+        Err(e) if e.code() == E_INVALIDARG => Why::Differs,
+        Err(_) => Why::Other,
+    }
+}
+
+impl Why {
+    fn text(&self, load: &windows::core::Error, store: &windows::core::Result<()>) -> String {
+        let kept = match store {
+            Ok(()) => "stored for the next start".to_owned(),
+            Err(e) => format!("not stored: {e}"),
+        };
+        match self {
+            Why::New => format!("not in the library yet; {kept}"),
+            Why::Differs => format!(
+                "the library holds this name with a description that differs from this one, so it refused it ({load}); stored under a second name for the next start"
+            ),
+            Why::Other => format!("the library did not load it: {load}; {kept}"),
+        }
+    }
 }
 
 /// Writes the library and the early list if pipelines were added since the
@@ -703,6 +789,7 @@ pub(crate) fn save(now: bool) {
             early = used.len(),
             made = MADE.load(Ordering::Relaxed),
             loaded = LOADED.load(Ordering::Relaxed),
+            differed = DIFFERED.load(Ordering::Relaxed),
             started_early = EARLY.load(Ordering::Relaxed),
             "host pipeline library saved"
         ),
@@ -1030,5 +1117,313 @@ mod tests {
         let final_bytes = std::fs::read(&target).unwrap();
         assert_eq!(final_bytes.len(), 4096);
         assert!(final_bytes.iter().all(|&b| b == final_bytes[0]));
+    }
+}
+
+#[cfg(test)]
+mod loads {
+    //! Each kind of pipeline the host makes (graphics, compute, a mesh
+    //! stream) is stored, then loaded with the very description it is made
+    //! with, from the live library and from one made again from its saved
+    //! bytes; a name not in the library and a description that differs are
+    //! told apart as `pipeline` tells them apart. Skipped without an adapter
+    //! (mesh: without a mesh-shader adapter or dxc).
+    use super::{Why, second_name, why_made};
+    use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
+    use windows::Win32::Graphics::Direct3D::{D3D_FEATURE_LEVEL_12_0, ID3DBlob};
+    use windows::Win32::Graphics::Direct3D12::*;
+    use windows::Win32::Graphics::Dxgi::Common::*;
+    use windows::core::{HSTRING, Interface, PCSTR, PCWSTR, s};
+
+    const GRAPHICS: &str = r#"
+#define RS "RootFlags(0), RootConstants(num32BitConstants=4, b0)"
+cbuffer C : register(b0) { float4 tint; };
+[RootSignature(RS)] float4 vs(uint i : SV_VertexID) : SV_Position { return float4(i & 1, i >> 1, 0, 1); }
+[RootSignature(RS)] float4 ps() : SV_Target { return tint; }
+"#;
+    const COMPUTE: &str = r#"
+RWByteAddressBuffer o : register(u0);
+[RootSignature("UAV(u0)")] [numthreads(64, 1, 1)] void cs(uint i : SV_DispatchThreadID) { o.Store(i * 4, i); }
+[RootSignature("UAV(u0)")] [numthreads(64, 1, 1)] void cs2(uint i : SV_DispatchThreadID) { o.Store(i * 4, i * 2); }
+"#;
+    const MESH: &str = r#"
+#define RS "RootConstants(num32BitConstants=4, b0)"
+cbuffer C : register(b0) { float4 tint; };
+struct V { float4 at : SV_Position; };
+[RootSignature(RS)] [outputtopology("triangle")] [numthreads(1, 1, 1)]
+void ms(out vertices V v[3], out indices uint3 t[1]) {
+    SetMeshOutputCounts(3, 1);
+    v[0].at = float4(0, 0, 0, 1); v[1].at = float4(1, 0, 0, 1); v[2].at = float4(0, 1, 0, 1);
+    t[0] = uint3(0, 1, 2);
+}
+[RootSignature(RS)] float4 ps(V v) : SV_Target { return tint; }
+"#;
+
+    fn fxc(source: &str, entry: PCSTR, target: PCSTR) -> Vec<u8> {
+        let (mut code, mut errors): (Option<ID3DBlob>, Option<ID3DBlob>) = (None, None);
+        // SAFETY: the source outlives the call.
+        let made = unsafe {
+            D3DCompile(
+                source.as_ptr().cast(),
+                source.len(),
+                None,
+                None,
+                None,
+                entry,
+                target,
+                0,
+                0,
+                &mut code,
+                Some(&mut errors),
+            )
+        };
+        made.unwrap();
+        let code = code.unwrap();
+        // SAFETY: the blob's own pointer and size.
+        unsafe {
+            std::slice::from_raw_parts(code.GetBufferPointer().cast::<u8>(), code.GetBufferSize())
+                .to_vec()
+        }
+    }
+
+    fn dxc(source: &str, entry: &str, target: &str) -> Option<Vec<u8>> {
+        let exe = std::fs::read_dir("C:/Program Files (x86)/Windows Kits/10/bin")
+            .ok()?
+            .flatten()
+            .map(|e| e.path().join("x64/dxc.exe"))
+            .filter(|p| p.exists())
+            .max()?;
+        let dir = tempfile::tempdir().ok()?;
+        let (from, to) = (dir.path().join("a.hlsl"), dir.path().join("a.dxil"));
+        std::fs::write(&from, source).ok()?;
+        let out = std::process::Command::new(exe)
+            .args(["-T", target, "-E", entry, "-Fo"])
+            .arg(&to)
+            .arg(&from)
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| std::fs::read(to).ok())
+            .flatten()
+    }
+
+    fn code(b: &[u8]) -> D3D12_SHADER_BYTECODE {
+        D3D12_SHADER_BYTECODE {
+            pShaderBytecode: b.as_ptr().cast(),
+            BytecodeLength: b.len(),
+        }
+    }
+
+    fn library(device: &ID3D12Device, bytes: &[u8]) -> ID3D12PipelineLibrary1 {
+        // SAFETY: the bytes outlive the library (the callers keep them).
+        unsafe {
+            device
+                .cast::<ID3D12Device1>()
+                .unwrap()
+                .CreatePipelineLibrary::<ID3D12PipelineLibrary>(bytes)
+                .unwrap()
+                .cast()
+                .unwrap()
+        }
+    }
+
+    fn saved(library: &ID3D12PipelineLibrary1) -> Vec<u8> {
+        // SAFETY: a buffer of the size asked for.
+        unsafe {
+            let mut bytes = vec![0u8; library.GetSerializedSize()];
+            library.Serialize(&mut bytes).unwrap();
+            bytes
+        }
+    }
+
+    type Load<'a> = dyn Fn(&ID3D12PipelineLibrary1, PCWSTR, bool) -> windows::core::Result<ID3D12PipelineState>
+        + 'a;
+
+    /// `load(library, name, other)` loads with the description used to make
+    /// the pipeline, or with one that differs (`other`).
+    fn check(
+        kind: &str,
+        device: &ID3D12Device,
+        make: impl Fn(bool) -> ID3D12PipelineState,
+        load: &Load,
+    ) {
+        let name = HSTRING::from(kind);
+        let name = PCWSTR(name.as_ptr());
+        let live = library(device, &[]);
+        let pso = make(false);
+        let missing = load(&live, name, false).expect_err("a name not in the library loads");
+        // SAFETY: a live pipeline.
+        let stored = unsafe { live.StorePipeline(name, &pso) };
+        assert_eq!(why_made(&missing, &stored), Why::New, "{kind}");
+        load(&live, name, false).unwrap_or_else(|e| panic!("{kind}: stored, then refused: {e}"));
+        let bytes = saved(&live);
+        let again = library(device, &bytes);
+        load(&again, name, false).unwrap_or_else(|e| panic!("{kind}: saved, then refused: {e}"));
+        let differs = load(&again, name, true).expect_err("another description loads");
+        // SAFETY: as above.
+        let stored = unsafe { again.StorePipeline(name, &make(false)) };
+        assert_eq!(why_made(&differs, &stored), Why::Differs, "{kind}");
+        // The other description under the second name, as `pipeline` keeps it.
+        let second = HSTRING::from(second_name(kind));
+        let second = PCWSTR(second.as_ptr());
+        // SAFETY: as above.
+        unsafe { again.StorePipeline(second, &make(true)) }.unwrap();
+        let bytes2 = saved(&again);
+        let third = library(device, &bytes2);
+        load(&third, name, false).unwrap_or_else(|e| panic!("{kind}: first name refused: {e}"));
+        load(&third, second, true).unwrap_or_else(|e| panic!("{kind}: second name refused: {e}"));
+        drop((third, again));
+        drop((bytes, bytes2));
+    }
+
+    #[test]
+    fn each_kind_stores_and_loads() {
+        let mut device: Option<ID3D12Device> = None;
+        // SAFETY: plain creation.
+        if unsafe {
+            windows::Win32::Graphics::Direct3D12::D3D12CreateDevice(
+                None,
+                D3D_FEATURE_LEVEL_12_0,
+                &mut device,
+            )
+        }
+        .is_err()
+        {
+            eprintln!("no adapter: skipped");
+            return;
+        }
+        let device = device.unwrap();
+        // SAFETY: creation from compiled code carrying its root signature.
+        unsafe {
+            let (vs, ps) = (
+                fxc(GRAPHICS, s!("vs"), s!("vs_5_1")),
+                fxc(GRAPHICS, s!("ps"), s!("ps_5_1")),
+            );
+            let root: ID3D12RootSignature = device.CreateRootSignature(0, &vs).unwrap();
+            let graphics = |other: bool| {
+                let mut d = D3D12_GRAPHICS_PIPELINE_STATE_DESC {
+                    pRootSignature: std::mem::transmute_copy(&root),
+                    VS: code(&vs),
+                    PS: code(&ps),
+                    SampleMask: u32::MAX,
+                    RasterizerState: D3D12_RASTERIZER_DESC {
+                        FillMode: D3D12_FILL_MODE_SOLID,
+                        CullMode: D3D12_CULL_MODE_NONE,
+                        ..Default::default()
+                    },
+                    PrimitiveTopologyType: D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
+                    NumRenderTargets: 1,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    ..Default::default()
+                };
+                d.BlendState.RenderTarget[0].RenderTargetWriteMask = 0xf;
+                d.RTVFormats[0] = if other {
+                    DXGI_FORMAT_R16G16B16A16_FLOAT
+                } else {
+                    DXGI_FORMAT_R8G8B8A8_UNORM
+                };
+                d
+            };
+            check(
+                "graphics",
+                &device,
+                |o| {
+                    device
+                        .CreateGraphicsPipelineState(&graphics(o))
+                        .unwrap()
+                },
+                &|l, n, o| l.LoadGraphicsPipeline(n, &graphics(o)),
+            );
+
+            let cs = fxc(COMPUTE, s!("cs"), s!("cs_5_1"));
+            let cs2 = fxc(COMPUTE, s!("cs2"), s!("cs_5_1"));
+            let croot: ID3D12RootSignature = device.CreateRootSignature(0, &cs).unwrap();
+            let compute = |other: bool| D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                pRootSignature: std::mem::transmute_copy(&croot),
+                CS: code(if other { &cs2 } else { &cs }),
+                ..Default::default()
+            };
+            check(
+                "compute",
+                &device,
+                |o| device.CreateComputePipelineState(&compute(o)).unwrap(),
+                &|l, n, o| l.LoadComputePipeline(n, &compute(o)),
+            );
+
+            let mut o7 = D3D12_FEATURE_DATA_D3D12_OPTIONS7::default();
+            let size = size_of::<D3D12_FEATURE_DATA_D3D12_OPTIONS7>() as u32;
+            let tier = device
+                .CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, (&raw mut o7).cast(), size)
+                .is_ok()
+                && o7.MeshShaderTier != D3D12_MESH_SHADER_TIER_NOT_SUPPORTED;
+            let mesh = (dxc(MESH, "ms", "ms_6_5"), dxc(MESH, "ps", "ps_6_5"));
+            let (true, (Some(ms), Some(mps))) = (tier, mesh) else {
+                eprintln!("mesh: skipped (no mesh shaders or no dxc)");
+                return;
+            };
+            #[repr(C, align(8))]
+            struct Sub<T>(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE, T);
+            #[repr(C)]
+            struct Stream {
+                root: Sub<*mut std::ffi::c_void>,
+                ms: Sub<D3D12_SHADER_BYTECODE>,
+                ps: Sub<D3D12_SHADER_BYTECODE>,
+                raster: Sub<D3D12_RASTERIZER_DESC>,
+                targets: Sub<D3D12_RT_FORMAT_ARRAY>,
+            }
+            let mroot: ID3D12RootSignature = device.CreateRootSignature(0, &ms).unwrap();
+            let stream = |other: bool| {
+                let mut formats = D3D12_RT_FORMAT_ARRAY {
+                    NumRenderTargets: 1,
+                    ..Default::default()
+                };
+                formats.RTFormats[0] = if other {
+                    DXGI_FORMAT_R16G16B16A16_FLOAT
+                } else {
+                    DXGI_FORMAT_R8G8B8A8_UNORM
+                };
+                Stream {
+                    root: Sub(
+                        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE,
+                        mroot.as_raw(),
+                    ),
+                    ms: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS, code(&ms)),
+                    ps: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS, code(&mps)),
+                    raster: Sub(
+                        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER,
+                        D3D12_RASTERIZER_DESC {
+                            FillMode: D3D12_FILL_MODE_SOLID,
+                            CullMode: D3D12_CULL_MODE_NONE,
+                            ..Default::default()
+                        },
+                    ),
+                    targets: Sub(
+                        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS,
+                        formats,
+                    ),
+                }
+            };
+            let desc = |s: &mut Stream| D3D12_PIPELINE_STATE_STREAM_DESC {
+                SizeInBytes: size_of::<Stream>(),
+                pPipelineStateSubobjectStream: std::ptr::from_mut(s).cast(),
+            };
+            let device2 = device.cast::<ID3D12Device2>().unwrap();
+            check(
+                "mesh",
+                &device,
+                |o| {
+                    let mut s = stream(o);
+                    device2.CreatePipelineState(&desc(&mut s)).unwrap()
+                },
+                &|l, n, o| {
+                    let mut s = stream(o);
+                    l.LoadPipeline(n, &desc(&mut s))
+                },
+            );
+        }
     }
 }
