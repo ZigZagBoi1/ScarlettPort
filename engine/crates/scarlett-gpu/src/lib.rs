@@ -49,6 +49,8 @@ pub mod frame;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod book;
 #[cfg(windows)]
+mod external;
+#[cfg(windows)]
 mod host;
 #[cfg(windows)]
 mod indirect;
@@ -75,6 +77,8 @@ pub mod replay;
 mod residency;
 pub mod resource;
 pub mod root;
+#[cfg(windows)]
+pub mod streamline;
 #[cfg(windows)]
 mod safecopy;
 #[cfg(windows)]
