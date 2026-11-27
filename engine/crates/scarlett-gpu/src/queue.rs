@@ -942,24 +942,27 @@ extern "system" fn present(
     if frame.is_power_of_two() {
         let (draws, dispatches) = crate::list::take_counts();
         #[cfg(windows)]
-        let (drawn, dispatched) = {
+        let (drawn, dispatched, in_order) = {
             static DRAWN: AtomicU64 = AtomicU64::new(0);
             static DISPATCHED: AtomicU64 = AtomicU64::new(0);
+            static IN_ORDER: AtomicU64 = AtomicU64::new(0);
             let since = |last: &AtomicU64, now: u64| now - last.swap(now, Ordering::Relaxed);
             (
                 since(&DRAWN, crate::draw::drawn()),
                 since(&DISPATCHED, crate::draw::dispatched()),
+                since(&IN_ORDER, crate::draw::IN_ORDER_ALONE.load(Ordering::Relaxed)),
             )
         };
         #[cfg(not(windows))]
-        let (drawn, dispatched) = (0, 0);
+        let (drawn, dispatched, in_order) = (0, 0, 0);
         tracing::info!(
             frame,
             draws,
             drawn,
             dispatches,
             dispatched,
-            "frame presented (since the last line: draws and dispatches, and those run on the host)"
+            in_order,
+            "frame presented (since the last line: draws and dispatches, those run on the host, and indirect              executions clamped alone because their arguments were written after their batch or window,              SCARLETT_INDIRECT_ORDER)"
         );
         #[cfg(windows)]
         if frame >= 256 {

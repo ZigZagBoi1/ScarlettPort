@@ -289,7 +289,33 @@ struct Window {
     base: u64,
     records: u32,
     scratch: ID3D12Resource,
+    /// The list's shader write mark when it was clamped
+    /// (`HostList::shader_write_mark`, [`in_order`]).
+    opened: u64,
 }
+
+/// Whether an indirect execution whose arguments shaders of its list were
+/// declared to write after the open batch or window was clamped, or whose
+/// arguments or count the card reads in place, is clamped alone, right
+/// before it runs (`SCARLETT_INDIRECT_ORDER`, on by default; `=0`: from the
+/// batch or window as any other). The idea is avatarmanz's
+/// (`VIctory-7900XTX`, 631400f5 and 15c3d0ea), for his renderer's memory
+/// read in place; here the writes are the ones declared on host copies too.
+///
+/// A batch or a window clamps records ahead: in the pass recorded where it
+/// was opened, before the commands between it and the execution that reads
+/// them. A window is not ended by dispatches, and a batch only by what is
+/// known to store to buffers, so records the title's culling writes in
+/// between were read before they were written: the execution drew an
+/// earlier frame's records, or none, and trees and far objects went for a
+/// moment and came back (issue 96). Memory read in place is not declared
+/// written at all, so its executions are always clamped alone.
+fn in_order() -> bool {
+    crate::toggled!("SCARLETT_INDIRECT_ORDER")
+}
+
+/// Indirect executions clamped alone for [`in_order`] since the start.
+pub(crate) static IN_ORDER_ALONE: AtomicU64 = AtomicU64::new(0);
 
 /// The most records clamped in one pass ([`windows`]).
 const WINDOW_MOST: u64 = 64;
@@ -384,6 +410,8 @@ struct Batch {
     /// Dispatches since, which may have written arguments
     /// (`SCARLETT_INDIRECT_BATCH=2`).
     wrote: bool,
+    /// The list's shader write mark when it was opened ([`in_order`]).
+    opened: u64,
 }
 
 /// The host copies arguments were read from last: what a batch opens with,
@@ -4201,11 +4229,12 @@ impl State {
             return Some((b.scratch.clone(), at));
         }
         self.batch = None;
+        let opened = list.shader_write_mark();
         let (mut table, scratch) = crate::indirect::open_batch(list, (id, &args.buffer), &argument_copies(args))?;
         self.host_pipeline = 0;
         self.host_roots[1] = 0;
         let at = table.place(id, offset, kind)?;
-        self.batch = Some(Batch { table, scratch: scratch.clone(), wrote: false });
+        self.batch = Some(Batch { table, scratch: scratch.clone(), wrote: false, opened });
         Some((scratch, at))
     }
 
@@ -4300,8 +4329,22 @@ impl State {
             why("mesh draws are switched off (SCARLETT_MESH_TEST=skip)");
             return false;
         }
+        // Arguments written since the open batch or window was clamped, or
+        // read in place: clamped alone, right before they run (`in_order`).
+        let alone = in_order() && {
+            let since = |opened: u64| list.shader_written_since(&args, arguments, len, opened);
+            args.in_place()
+                || counter.as_ref().is_some_and(|(s, _)| s.in_place())
+                || self.batch.as_ref().is_some_and(|b| since(b.opened))
+                || self.window.as_ref().is_some_and(|w| since(w.opened))
+        };
+        if alone {
+            self.batch = None;
+            self.window = None;
+            IN_ORDER_ALONE.fetch_add(1, Ordering::Relaxed);
+        }
         // One record without a count: clamped in a batch (`batches`).
-        let batch = if batches() > 0 && max == 1 && count.is_none() {
+        let batch = if !alone && batches() > 0 && max == 1 && count.is_none() {
             args.refresh(list, arguments, len);
             self.batched(list, &args, arguments, kind)
         } else {
@@ -4317,6 +4360,7 @@ impl State {
         const WINDOW_USE: usize = usize::MAX - 0x77;
         let offset = args.offset(arguments);
         let windowed = windows()
+            && !alone
             && kind != DISPATCH
             && max == 1
             && count.is_none()
@@ -4367,6 +4411,7 @@ impl State {
                 let count_arg = counter.as_ref().map(|(s, at)| (&s.buffer, s.offset(*at)));
                 // More than the record asked for: a window clamped ahead,
                 // whose unfilled slots must not spend the list's budget.
+                let opened = list.shader_write_mark();
                 let bounded = if windowed && records > 1 {
                     crate::indirect::bound_ahead(list, (&args.buffer, offset), (kind, step, records))
                 } else {
@@ -4387,6 +4432,7 @@ impl State {
                     base: offset,
                     records,
                     scratch: bounded.clone(),
+                    opened,
                 });
                 (bounded, 0)
             }

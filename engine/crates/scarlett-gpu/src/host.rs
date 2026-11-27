@@ -2313,6 +2313,12 @@ struct Deferred {
     /// indirect arguments; 0 if none. It stays readable until the next
     /// clamp into it ([`HostList::indirect_state`]).
     indirect_readable: usize,
+    /// Ranges shaders of this recording were declared to write, by host
+    /// copy: from, to, and the mark of the declaration
+    /// ([`HostList::shader_write_mark`]).
+    shader_spans: std::collections::HashMap<usize, Vec<(usize, usize, u64)>, std::hash::BuildHasherDefault<AddressHash>>,
+    /// Declarations of shader writes in this recording so far.
+    shader_marks: u64,
 }
 
 impl Deferred {
@@ -2331,6 +2337,40 @@ impl Deferred {
         self.refreshed.clear();
         self.gpu_written.clear();
         self.filled.clear();
+    }
+}
+
+/// Adds the written range `span` with `mark` to `spans`: one already there
+/// takes the newer mark (the title declares the same views draw after draw).
+fn note_span(spans: &mut Vec<(usize, usize, u64)>, span: (usize, usize), mark: u64) {
+    match spans.iter_mut().rev().find(|s| (s.0, s.1) == span) {
+        Some(s) => s.2 = mark,
+        None => spans.push((span.0, span.1, mark)),
+    }
+}
+
+/// Whether a range of `spans` written after `mark` meets `[from, to)`.
+fn written_since(spans: &[(usize, usize, u64)], (from, to): (usize, usize), mark: u64) -> bool {
+    spans.iter().any(|&(a, b, m)| m > mark && a < to && from < b)
+}
+
+#[cfg(test)]
+mod shader_span_tests {
+    use super::{note_span, written_since};
+
+    #[test]
+    fn writes_after_a_mark_are_told_from_those_before() {
+        let mut spans = Vec::new();
+        note_span(&mut spans, (0x100, 0x200), 1);
+        note_span(&mut spans, (0x400, 0x500), 2);
+        assert!(!written_since(&spans, (0x100, 0x110), 1), "written at the mark, not after");
+        assert!(written_since(&spans, (0x100, 0x110), 0));
+        assert!(written_since(&spans, (0x4f0, 0x600), 1));
+        assert!(!written_since(&spans, (0x200, 0x400), 0), "between the ranges");
+        // The same range declared again is written again.
+        note_span(&mut spans, (0x100, 0x200), 3);
+        assert_eq!(spans.len(), 2);
+        assert!(written_since(&spans, (0x1f0, 0x1f4), 2));
     }
 }
 
@@ -6982,6 +7022,9 @@ impl HostList {
     ) {
         let mut deferred = self.deferred();
         let key = (std::sync::Arc::as_ptr(shadow) as usize, address, len);
+        deferred.shader_marks += 1;
+        let mark = deferred.shader_marks;
+        note_span(deferred.shader_spans.entry(key.0).or_default(), (address, address + len), mark);
         if deferred.gpu_written.insert(key) || !declare_once() {
             deferred.copies.push(Step::GpuWrite(shadow.clone(), address, len));
         }
@@ -7302,6 +7345,31 @@ impl HostList {
 
     /// Whether this is the first time since the reset that the list asks
     /// about `key` (a texture to bring up to date).
+    /// The shader writes declared in this recording so far: a later
+    /// [`HostList::shader_written_since`] with it tells writes after now.
+    pub(crate) fn shader_write_mark(&self) -> u64 {
+        self.deferred().shader_marks
+    }
+
+    /// Whether shaders of this recording were declared to write any of
+    /// `[address, address + len)` of `shadow` after `mark`.
+    pub(crate) fn shader_written_since(
+        &self,
+        shadow: &std::sync::Arc<crate::shadow::Shadow>,
+        address: u64,
+        len: u64,
+        mark: u64,
+    ) -> bool {
+        let deferred = self.deferred();
+        if deferred.shader_marks <= mark {
+            return false;
+        }
+        deferred
+            .shader_spans
+            .get(&(std::sync::Arc::as_ptr(shadow) as usize))
+            .is_some_and(|spans| written_since(spans, (address as usize, (address + len) as usize), mark))
+    }
+
     pub(crate) fn first_use(&self, key: usize) -> bool {
         self.deferred().textures.insert(key)
     }
