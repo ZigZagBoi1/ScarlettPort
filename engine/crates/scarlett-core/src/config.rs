@@ -167,14 +167,29 @@ fn migrate_legacy_store(root: &Path, store: &str) -> Result<()> {
         return Ok(());
     }
     std::fs::create_dir_all(&destination).with_context(|| format!("creating {}", destination.display()))?;
-    if let Err(error) = std::fs::rename(&old, root) {
-        if error.kind() != std::io::ErrorKind::CrossesDevices {
-            return Err(error).with_context(|| format!("moving {} to {}", old.display(), root.display()));
-        }
-        // This preserves the legacy store when it resides on another volume.
-        copy_tree(&old, root).with_context(|| format!("copying {} to {}", old.display(), root.display()))?;
+    match std::fs::rename(&old, root) {
+        Ok(()) => Ok(()),
+        // Another process may have migrated this store while we were opening it.
+        Err(_) if root.is_dir() => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => copy_legacy_store(&old, root),
+        Err(error) => Err(error).with_context(|| format!("moving {} to {}", old.display(), root.display())),
     }
-    Ok(())
+}
+
+/// Stage a fallback copy beside the final directory so a partial copy never
+/// looks like an initialized store. The original remains intact.
+fn copy_legacy_store(from: &Path, to: &Path) -> Result<()> {
+    let parent = to.parent().context("legacy store destination has no parent")?;
+    let stage = tempfile::tempdir_in(parent).with_context(|| format!("staging {}", to.display()))?;
+    copy_tree(from, stage.path()).with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
+    match std::fs::rename(stage.path(), to) {
+        Ok(()) => {
+            let _ = stage.keep();
+            Ok(())
+        }
+        Err(_) if to.is_dir() => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("publishing {}", to.display())),
+    }
 }
 
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -194,6 +209,35 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use std::ffi::OsString;
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_migration_copy_failure_does_not_publish_an_empty_store() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let profile = tempfile::tempdir().unwrap();
+        let legacy = profile.path().join("legacy");
+        let dest = profile.path().join("current");
+        std::fs::create_dir(&legacy).unwrap();
+        std::fs::write(legacy.join("open"), b"profile data").unwrap();
+        std::fs::write(legacy.join("locked"), b"save contents").unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(legacy.join("locked"))
+            .unwrap();
+
+        let error = copy_legacy_store(&legacy, &dest).unwrap_err();
+        assert!(error.downcast_ref::<std::io::Error>().is_some_and(|e| e.raw_os_error() == Some(32)));
+        assert!(!dest.exists(), "a failed copy must not be treated as an initialized store");
+        assert_eq!(std::fs::read(legacy.join("open")).unwrap(), b"profile data");
+        drop(lock);
+
+        copy_legacy_store(&legacy, &dest).unwrap();
+        for entry in ["open", "locked"] {
+            assert_eq!(std::fs::read(dest.join(entry)).unwrap(), std::fs::read(legacy.join(entry)).unwrap());
+        }
+    }
 
     #[test]
     fn environment_overrides_file() {
