@@ -400,21 +400,66 @@ pub(crate) struct HostPipeline {
     pub(crate) state: String,
 }
 
-/// Logs a pipeline that gets no host pipeline, once per reason.
-fn refuse(reason: &'static str, shaders: &[Arc<Shader>]) -> Option<HostPipeline> {
-    static SEEN: std::sync::Mutex<Vec<&str>> = std::sync::Mutex::new(Vec::new());
-    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
-    if !seen.contains(&reason) {
-        seen.push(reason);
-        tracing::warn!(?shaders, "no host pipeline: {reason} (logged once)");
+/// Why a pipeline gets no host pipeline, and whether that was logged where
+/// it was found.
+pub(crate) struct Refusal {
+    why: String,
+    logged: bool,
+}
+
+/// A refusal not logged yet: [`HostPipeline::new`] logs it.
+fn quiet(why: impl Into<String>) -> Refusal {
+    Refusal { why: why.into(), logged: false }
+}
+
+/// A refusal already logged (with the host's error) where it was found.
+fn told(why: impl Into<String>) -> Refusal {
+    Refusal { why: why.into(), logged: true }
+}
+
+/// The reasons pipelines were refused for, by [`refusal_key`]: each is
+/// logged once, and the drop line names it.
+static REFUSALS: std::sync::Mutex<Option<std::collections::HashMap<String, String>>> =
+    std::sync::Mutex::new(None);
+
+/// One pipeline's key: its shaders and graphics state.
+fn refusal_key(shaders: &[Arc<Shader>], g: Option<&GraphicsState>) -> String {
+    format!("{shaders:?} {}", g.map(GraphicsState::describe).unwrap_or_default())
+}
+
+/// Why the pipeline of `shaders` with `g` was refused, if it was.
+pub(crate) fn refusal(shaders: &[Arc<Shader>], g: Option<&GraphicsState>) -> Option<String> {
+    let refusals = REFUSALS.lock().unwrap_or_else(|e| e.into_inner());
+    refusals.as_ref()?.get(&refusal_key(shaders, g)).cloned()
+}
+
+/// Notes `r` for the pipeline, and logs it once per pipeline unless it was
+/// logged where it was found.
+fn note_refusal(r: Refusal, shaders: &[Arc<Shader>], g: Option<&GraphicsState>) {
+    let mut refusals = REFUSALS.lock().unwrap_or_else(|e| e.into_inner());
+    let first = refusals
+        .get_or_insert_with(Default::default)
+        .insert(refusal_key(shaders, g), r.why.clone())
+        .is_none();
+    if first && !r.logged {
+        tracing::warn!(?shaders, "no host pipeline: {} (logged once per pipeline)", r.why);
     }
-    None
 }
 
 impl HostPipeline {
     /// A host pipeline for vertex and pixel shaders with the graphics
     /// state `g`, or for one compute shader.
     pub(crate) fn new(shaders: &[Arc<Shader>], g: Option<&GraphicsState>) -> Option<HostPipeline> {
+        match Self::make(shaders, g) {
+            Ok(p) => Some(p),
+            Err(r) => {
+                note_refusal(r, shaders, g);
+                None
+            }
+        }
+    }
+
+    fn make(shaders: &[Arc<Shader>], g: Option<&GraphicsState>) -> Result<HostPipeline, Refusal> {
         // For the report when the host device is removed: what this thread
         // has in the library from here on.
         super::library::label(format!("{shaders:?}"));
@@ -428,10 +473,7 @@ impl HostPipeline {
                 .iter()
                 .any(|s| !matches!(s.stage, "vertex" | "pixel" | "mesh"))
         {
-            return refuse(
-                "only vertex, mesh, pixel and compute stages are translated",
-                shaders,
-            );
+            return Err(quiet("only vertex, mesh, pixel and compute stages are translated"));
         }
         let mesh = find("mesh");
         let stages = if let Some(cs) = compute {
@@ -440,19 +482,20 @@ impl HostPipeline {
             let first = match (mesh, find("vertex")) {
                 (Some(ms), _) => (ms, D3D12_SHADER_VISIBILITY_MESH),
                 (None, Some(vs)) => (vs, D3D12_SHADER_VISIBILITY_VERTEX),
-                (None, None) => return refuse("no vertex or mesh shader", shaders),
+                (None, None) => return Err(quiet("no vertex or mesh shader")),
             };
             let mut stages = vec![first];
             stages.extend(find("pixel").map(|ps| (ps, D3D12_SHADER_VISIBILITY_PIXEL)));
             stages
         };
-        if mesh.is_some() && !host()?.mesh_shaders() {
-            return refuse("the host GPU has no mesh shaders (or no shader model 6.6)", shaders);
+        if mesh.is_some() && !host().ok_or_else(|| quiet("no host D3D12 device"))?.mesh_shaders() {
+            return Err(quiet("the host GPU has no mesh shaders (or no shader model 6.6)"));
         }
         for (s, _) in &stages {
-            s.translated()?;
+            s.translated()
+                .ok_or_else(|| quiet(format!("{} {} does not translate", s.stage, s.hash)))?;
         }
-        let host = host()?;
+        let host = host().ok_or_else(|| quiet("no host D3D12 device"))?;
 
         let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS19::default();
         // SAFETY: the feature query writes the structure of the given size.
@@ -475,7 +518,10 @@ impl HostPipeline {
         let mut samplers = Vec::new();
         let mut bound = Vec::new();
         for &(shader, visibility) in &stages {
-            let t = &shader.translated()?.host;
+            let t = &shader
+                .translated()
+                .ok_or_else(|| quiet(format!("{} {} does not translate", shader.stage, shader.hash)))?
+                .host;
             let mut stage = Stage {
                 shader: shader.clone(),
                 user_data: None,
@@ -545,7 +591,7 @@ impl HostPipeline {
                                 | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
                             OffsetInDescriptorsFromTableStart: 0,
                         }));
-                        let range: *const D3D12_DESCRIPTOR_RANGE1 = &**ranges.last()?;
+                        let range: *const D3D12_DESCRIPTOR_RANGE1 = &**ranges.last().ok_or_else(|| quiet("a root view table without its range"))?;
                         out.push((slot, params.len() as u32));
                         params.push(D3D12_ROOT_PARAMETER1 {
                             ParameterType: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
@@ -596,7 +642,7 @@ impl HostPipeline {
             Ok(root) => root,
             Err(e) => {
                 tracing::warn!(error = %e, ?shaders, "host root signature refused");
-                return None;
+                return Err(told(format!("host root signature refused: {e}")));
             }
         };
         let code = |i: usize| {
@@ -628,12 +674,12 @@ impl HostPipeline {
                 Err(e) => {
                     tracing::warn!(error = %e, ?shaders, "host pipeline refused");
                     host.log_messages();
-                    return None;
+                    return Err(told(format!("host pipeline refused: {e}")));
                 }
             };
             tracing::info!(?shaders, "host pipeline");
             crate::host::name(&pso, || format!("{shaders:?}"));
-            return Some(HostPipeline {
+            return Ok(HostPipeline {
                 compute: true,
                 mesh: false,
                 pso,
@@ -647,7 +693,7 @@ impl HostPipeline {
             });
         }
         let Some(g) = g else {
-            return refuse("graphics state not kept (plain description)", shaders);
+            return Err(quiet("graphics state not kept (plain description)"));
         };
         let depth_bounds = if g.depth_bounds {
             if host.depth_bounds() {
@@ -681,12 +727,12 @@ impl HostPipeline {
                 Err(e) => {
                     tracing::warn!(error = %e, ?shaders, "host mesh pipeline refused");
                     host.log_messages();
-                    return None;
+                    return Err(told(format!("host mesh pipeline refused: {e}")));
                 }
             };
             tracing::info!(?shaders, "host mesh pipeline");
             crate::host::name(&pso, || format!("{shaders:?}"));
-            return Some(HostPipeline {
+            return Ok(HostPipeline {
                 compute: false,
                 mesh: true,
                 pso,
@@ -707,7 +753,7 @@ impl HostPipeline {
         let mut rect_gs = None;
         if g.topology.0 == RECTANGLES {
             let ps = stages.get(1).and_then(|(s, _)| s.translated());
-            let vs = &stages[0].0.translated()?.host.dxil;
+            let vs = &stages[0].0.translated().ok_or_else(|| quiet("the vertex shader does not translate"))?.host.dxil;
             match scarlett_shader::emit::rect_list_gs(vs, ps.map(|t| &t.host.dxil[..])) {
                 Ok(gs) => rect_gs = Some(gs),
                 Err(e) => tracing::warn!(error = %e, ?shaders, "no rectangle geometry stage"),
@@ -787,7 +833,7 @@ impl HostPipeline {
             Err(e) => {
                 tracing::warn!(error = %e, ?shaders, "host pipeline refused");
                 host.log_messages();
-                return None;
+                return Err(told(format!("host pipeline refused: {e}")));
             }
         };
         tracing::info!(?shaders, "host pipeline");
@@ -802,7 +848,7 @@ impl HostPipeline {
             cull = g.rasterizer.CullMode.0,
             "host graphics state"
         );
-        Some(HostPipeline {
+        Ok(HostPipeline {
             compute: false,
             mesh: false,
             pso,
@@ -1120,6 +1166,22 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::*;
+
+    /// Every pipeline refused for the same reason keeps that reason, for
+    /// its drop line, not just the first one.
+    #[test]
+    fn each_refused_pipeline_keeps_its_reason() {
+        let a = vec![super::super::shader("geometry", b"refusal test a")];
+        let b = vec![super::super::shader("hull", b"refusal test b")];
+        assert!(HostPipeline::new(&a, None).is_none());
+        assert!(HostPipeline::new(&b, None).is_none());
+        for shaders in [&a, &b] {
+            let why = refusal(shaders, None).expect("a refused pipeline has a reason");
+            assert!(why.contains("only vertex, mesh, pixel and compute"), "{why}");
+        }
+        let c = vec![super::super::shader("domain", b"refusal test c")];
+        assert_eq!(refusal(&c, None), None);
+    }
 
     /// A triangle mesh shader of our own and a pixel shader for it.
     const MS: &str = "struct V { float4 p : SV_Position; };

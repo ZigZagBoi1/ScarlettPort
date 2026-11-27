@@ -174,7 +174,10 @@ pub(crate) fn missing(p: &Pending) -> Option<String> {
                 .map(|s| format!("{} {}", s.stage, s.hash))
                 .collect();
             Some(if failed.is_empty() {
-                format!("refused {:?}", p.shaders)
+                match super::host::refusal(&p.shaders, p.graphics.as_deref()) {
+                    Some(why) => format!("refused {:?} ({why})", p.shaders),
+                    None => format!("refused {:?}", p.shaders),
+                }
             } else {
                 failed.join(" + ")
             })
