@@ -196,6 +196,7 @@ Hardware reports from testers. These are **their own measurements**, not ours.
 | World-entry copy stall | 📋 planned | cut the copies that stall entering the world |
 | PC responsiveness | 🧪 in testing | `SCARLETT_FRIENDLY=1` (set by the Stable preset): background work leaves processor time to the desktop |
 | Textures never uploaded | 📋 planned | 14,830 textures are never uploaded |
+| DLSS upscaling | 🧪 in testing | optional NVIDIA DLSS Super Resolution on RTX cards in place of the title's upscaling (`SCARLETT_DLSS=1`); the launcher fetches NVIDIA's files from NVIDIA's GitHub after showing its licence, nothing of NVIDIA's ships with ScarlettPort; no frame generation |
 | FSR upscaler | 📋 planned | the title's FidelityFX calls answered by AMD's PC FidelityFX |
 | Frame generation | 📋 planned | only once the base frame rate is high enough for it to make sense |
 | Save safety | 🧪 in testing | protects your save folder from being overwritten by test runs |

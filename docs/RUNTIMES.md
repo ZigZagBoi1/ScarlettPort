@@ -34,6 +34,7 @@ Every switch is a `SCARLETT_*` environment variable. The full list is in the sou
 |---|---|
 | `SCARLETT_GAME_DIR` | the dump folder (required) |
 | `SCARLETT_UPSCALER=<6\|title\|7\|fsr>` | the upscaler the title uses. Default: the title's own (6), also on the Series S profile, where the title would pick FSR; FSR asked for without `amd_fidelityfx_upscaler*` in the game folder falls back to the title's own. `SCARLETT_OWN_UPSCALER=0` leaves the title's choice alone (`crates/scarlett-loader/src/resolution.rs`) |
+| `SCARLETT_DLSS=1` | NVIDIA DLSS Super Resolution in place of the title's FidelityFX upscaling (RTX cards; off by default). `SCARLETT_DLSS_MODE=quality\|balanced\|performance\|dlaa` sets the render scale, `SCARLETT_STREAMLINE_DIR` the folder with NVIDIA's `sl.interposer.dll` (the launcher's fetch puts it in `<data>\streamlineind`). It turns on the FidelityFX path (`SCARLETT_UPSCALER=7`) at the mode's scale; without the files, the card or the feature everything stays as without it (`crates/scarlett-gpu/src/streamline.rs`) |
 | `SCARLETT_NO_WATCHDOG=1` | set by `play-scarlett.ps1` and the launcher; `scarlett.exe` does not read it (the vendored runtime's `XCL_NO_WATCHDOG` is its counterpart) |
 | `SCARLETT_FAST_BOOT=1` | testing only: press through logos and menus, stop once in the world |
 | `SCARLETT_FAST_BOOT_ESC=0` | with fast boot: press only A (Enter), not START (Esc), which can open the pause menu once in the world so the world is never seen |
