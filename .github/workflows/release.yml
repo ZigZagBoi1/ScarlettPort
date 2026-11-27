@@ -10,6 +10,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -108,10 +110,22 @@ jobs:
 
           ``SHA256SUMS.txt`` lists every file. In PowerShell: ``Get-FileHash .\$zip -Algorithm SHA256``.
 
+          ### Proof it was built from this source
+          Each file in this release has a signed build attestation from GitHub Actions, tying it to commit ``${{ github.sha }}`` of this repository. With the GitHub CLI: ``gh attestation verify ScarlettPort.exe --repo ${{ github.repository }}``.
+
           ### If your antivirus flags it
-          A new unsigned build can be flagged by heuristics. Please report it as a false positive to Microsoft at https://www.microsoft.com/en-us/wdsi/filesubmission (choose "Incorrectly detected as malware/malicious"), and open an issue with the detection name so we can track it.
+          Check the hashes above on VirusTotal: [launcher](https://www.virustotal.com/gui/file/$exeHash), [runtime](https://www.virustotal.com/gui/file/$vicHash). Only download from this Releases page; copies posted elsewhere may be changed. New unsigned builds can be flagged by heuristics because the runtime loads and rewrites game code in memory, which is what an emulator does. Please report it as a false positive to Microsoft at https://www.microsoft.com/en-us/wdsi/filesubmission (choose "Incorrectly detected as malware/malicious"), and open an issue with the detection name and the file path so we can track it.
           "@ | Set-Content notes.md
           "ZIP=$zip" | Out-File -Append $env:GITHUB_ENV
+          "ROOT=$root" | Out-File -Append $env:GITHUB_ENV
+
+      - name: Attest the build
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            ${{ env.ZIP }}
+            ${{ env.ROOT }}/ScarlettPort.exe
+            ${{ env.ROOT }}/runtime/ScarlettPort-Runtime.exe
 
       - name: Publish the release
         env:

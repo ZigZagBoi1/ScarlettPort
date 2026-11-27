@@ -152,6 +152,19 @@ Hardware reports from testers. These are **their own measurements**, not ours.
 
 <sub>The release is built by CI from this repo, is not code-signed, and lists SHA-256 checksums in its notes.</sub>
 
+### "My antivirus says it's a Trojan"
+
+The official release is clean. v0.5.5 scored **0 of 68** antivirus engines on VirusTotal, Microsoft Defender included: [ScarlettPort.exe](https://www.virustotal.com/gui/file/3f3520d1891b294d2a59786d05741ea16e1fd660f93304a74a3043872c931ffc/detection), [ScarlettPort-Runtime.exe](https://www.virustotal.com/gui/file/9714f2ebcbbfefcae9ab823e47cd01e58bed9a4e94ffa3389feb4f42fa0b0791/detection).
+
+If you still get a warning:
+
+- **Check where you got it.** Only download from [Releases](https://github.com/ZigZagBoi1/ScarlettPort/releases). Copies reposted on other sites, Discord servers or videos can be changed, and those really can contain malware.
+- **Check the file.** Compare `Get-FileHash .\ScarlettPort.exe -Algorithm SHA256` with the hash in the release notes. From v0.5.6 every release also has a signed GitHub build attestation: `gh attestation verify ScarlettPort.exe --repo ZigZagBoi1/ScarlettPort` proves the file was built by this repo's CI from public source.
+- **Why heuristics can fire.** The files are not code-signed yet, and the runtime does what every emulator does: it loads the game's code, rewrites parts of it in memory and writes a translated copy into your shader cache. Behaviour scanners sometimes guess "Trojan" from that alone. A name like `Wacatac`, `Sabsik` or anything ending in `!ml` is a machine-learning guess, not a known virus.
+- **Report it.** Submit the file to [Microsoft as a false positive](https://www.microsoft.com/en-us/wdsi/filesubmission) ("Incorrectly detected as malware/malicious") and open an issue with the detection name and the file path. That helps everyone after you.
+
+The full source of the launcher and the runtime is in this repository, and every release is built from it by GitHub Actions.
+
 ## More
 
 <details>
