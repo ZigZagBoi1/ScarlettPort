@@ -15,7 +15,7 @@ use scarlett_shader::{
 };
 use scarlett_shader::{io, resource};
 
-use crate::shader::{MAX_FILE, Source, sources};
+use crate::shader::{Source, sources};
 
 #[derive(Default)]
 struct Tally {
@@ -188,46 +188,41 @@ pub fn warm(paths: Vec<PathBuf>, file: &Path, jobs: Option<usize>) -> Result<()>
     let began = std::time::Instant::now();
     let done = Mutex::new(HashSet::new());
     let counts = [const { AtomicUsize::new(0) }; 5];
-    for root in &paths {
-        for entry in walkdir::WalkDir::new(root).follow_links(true).into_iter().filter_map(Result::ok) {
-            if !entry.file_type().is_file() || entry.metadata().map_or(0, |m| m.len()) > MAX_FILE {
-                continue;
-            }
-            let Ok(data) = std::fs::read(entry.path()) else {
-                continue;
-            };
-            let jobs = sources(&data);
-            let next = AtomicUsize::new(0);
-            std::thread::scope(|s| {
-                for _ in 0..threads.min(jobs.len()) {
-                    s.spawn(|| {
-                        while let Some(job) = jobs.get(next.fetch_add(1, Ordering::Relaxed)) {
-                            let Some(bytes) = job.bytes() else {
-                                continue;
-                            };
-                            let hash = blake3::hash(&bytes).to_hex()[..16].to_owned();
-                            if limit.is_some_and(|n| began.elapsed().as_secs() >= n) {
-                                counts[3].fetch_add(1, Ordering::Relaxed);
-                                break;
-                            }
-                            if (!all && !wanted.contains(&hash)) || !lock(&done).insert(hash) {
-                                continue;
-                            }
-                            let n = counts[4].fetch_add(1, Ordering::Relaxed) + 1;
-                            if n.is_multiple_of(1000) {
-                                println!("warm-up      {n} shaders so far, {:.0} s", began.elapsed().as_secs_f64());
-                            }
-                            let which = match scarlett_hle::modules::d3d12x::warm_shader(&bytes) {
-                                Ok(true) => 0,
-                                Ok(false) => 1,
-                                Err(_) => 2,
-                            };
-                            counts[which].fetch_add(1, Ordering::Relaxed);
+    for path in crate::shader::shader_files(&paths, false) {
+        let Some(data) = crate::shader::read_shader_carrier(&path) else {
+            continue;
+        };
+        let jobs = sources(&data);
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..threads.min(jobs.len()) {
+                s.spawn(|| {
+                    while let Some(job) = jobs.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        let Some(bytes) = job.bytes() else {
+                            continue;
+                        };
+                        let hash = blake3::hash(&bytes).to_hex()[..16].to_owned();
+                        if limit.is_some_and(|n| began.elapsed().as_secs() >= n) {
+                            counts[3].fetch_add(1, Ordering::Relaxed);
+                            break;
                         }
-                    });
-                }
-            });
-        }
+                        if (!all && !wanted.contains(&hash)) || !lock(&done).insert(hash) {
+                            continue;
+                        }
+                        let n = counts[4].fetch_add(1, Ordering::Relaxed) + 1;
+                        if n.is_multiple_of(1000) {
+                            println!("warm-up      {n} shaders so far, {:.0} s", began.elapsed().as_secs_f64());
+                        }
+                        let which = match scarlett_hle::modules::d3d12x::warm_shader(&bytes) {
+                            Ok(true) => 0,
+                            Ok(false) => 1,
+                            Err(_) => 2,
+                        };
+                        counts[which].fetch_add(1, Ordering::Relaxed);
+                    }
+                });
+            }
+        });
     }
     let [translated, there, failed] = [0, 1, 2].map(|i| counts[i].load(Ordering::Relaxed));
     let asked = if all { "all".to_owned() } else { wanted.len().to_string() };
@@ -281,44 +276,35 @@ pub fn run(
     let threads = worker_threads(jobs);
     let seen = Mutex::new(HashSet::new());
     let total = Mutex::new(Tally::default());
-    for root in &paths {
-        for entry in walkdir::WalkDir::new(root)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(Result::ok)
-        {
-            if !entry.file_type().is_file() || entry.metadata().map_or(0, |m| m.len()) > MAX_FILE {
-                continue;
+    for path in crate::shader::shader_files(&paths, false) {
+        let Some(data) = crate::shader::read_shader_carrier(&path) else {
+            continue;
+        };
+        let jobs = sources(&data);
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..threads.min(jobs.len()) {
+                s.spawn(|| {
+                    let mut t = Tally {
+                        list,
+                        ..Tally::default()
+                    };
+                    let mut checks = Checks {
+                        keep: (!pairs.is_empty()).then(|| kept.clone()),
+                        validator: validate
+                            .then(|| Validator::load(dll.as_deref()).ok())
+                            .flatten(),
+                        host: pipelines
+                            .then(|| Host::new(false).ok().map(|h| (h, host::stub_ps())))
+                            .flatten(),
+                    };
+                    while let Some(job) = jobs.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        translate(job, &path, &seen, &mut t, &mut checks);
+                    }
+                    lock(&total).merge(t);
+                });
             }
-            let Ok(data) = std::fs::read(entry.path()) else {
-                continue;
-            };
-            let jobs = sources(&data);
-            let next = AtomicUsize::new(0);
-            std::thread::scope(|s| {
-                for _ in 0..threads.min(jobs.len()) {
-                    s.spawn(|| {
-                        let mut t = Tally {
-                            list,
-                            ..Tally::default()
-                        };
-                        let mut checks = Checks {
-                            keep: (!pairs.is_empty()).then(|| kept.clone()),
-                            validator: validate
-                                .then(|| Validator::load(dll.as_deref()).ok())
-                                .flatten(),
-                            host: pipelines
-                                .then(|| Host::new(false).ok().map(|h| (h, host::stub_ps())))
-                                .flatten(),
-                        };
-                        while let Some(job) = jobs.get(next.fetch_add(1, Ordering::Relaxed)) {
-                            translate(job, entry.path(), &seen, &mut t, &mut checks);
-                        }
-                        lock(&total).merge(t);
-                    });
-                }
-            });
-        }
+        });
     }
     let t = total.into_inner().unwrap_or_else(|e| e.into_inner());
     println!(
@@ -415,40 +401,35 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
         // A line at least once a second, also while a large file is read
         // and nothing is translated yet, so a launcher can tell it works.
         outer.spawn(|| progress.tick(|| done.load(Ordering::Relaxed)));
-        for root in &paths {
-            for entry in walkdir::WalkDir::new(root).follow_links(true).into_iter().filter_map(Result::ok) {
-                if !entry.file_type().is_file() || entry.metadata().map_or(0, |m| m.len()) > MAX_FILE {
-                    continue;
-                }
-                let Ok(data) = std::fs::read(entry.path()) else {
-                    continue;
-                };
-                let jobs = sources(&data);
-                let next = AtomicUsize::new(0);
-                std::thread::scope(|s| {
-                    for _ in 0..threads.min(jobs.len()) {
-                        s.spawn(|| {
-                            while let Some(job) = jobs.get(next.fetch_add(1, Ordering::Relaxed)) {
-                                let Some(bytes) = job.bytes() else { continue };
-                                let hash = blake3::hash(&bytes);
-                                if !lock(&seen).insert(hash) {
-                                    continue;
+        for path in crate::shader::shader_files(&paths, false) {
+            let Some(data) = crate::shader::read_shader_carrier(&path) else {
+                continue;
+            };
+            let jobs = sources(&data);
+            let next = AtomicUsize::new(0);
+            std::thread::scope(|s| {
+                for _ in 0..threads.min(jobs.len()) {
+                    s.spawn(|| {
+                        while let Some(job) = jobs.get(next.fetch_add(1, Ordering::Relaxed)) {
+                            let Some(bytes) = job.bytes() else { continue };
+                            let hash = blake3::hash(&bytes);
+                            if !lock(&seen).insert(hash) {
+                                continue;
+                            }
+                            match scarlett_hle::modules::d3d12x::precompile(&bytes) {
+                                Ok(_) => {
+                                    let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                                    progress.count(n);
                                 }
-                                match scarlett_hle::modules::d3d12x::precompile(&bytes) {
-                                    Ok(_) => {
-                                        let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                                        progress.count(n);
-                                    }
-                                    Err(why) => {
-                                        let mut failed = lock(&failed);
-                                        failed.entry(why).or_insert_with(|| (0, hash.to_hex()[..16].to_owned())).0 += 1;
-                                    }
+                                Err(why) => {
+                                    let mut failed = lock(&failed);
+                                    failed.entry(why).or_insert_with(|| (0, hash.to_hex()[..16].to_owned())).0 += 1;
                                 }
                             }
-                        });
-                    }
-                });
-            }
+                        }
+                    });
+                }
+            });
         }
         progress.stop();
     });

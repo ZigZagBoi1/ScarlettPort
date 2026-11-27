@@ -447,19 +447,18 @@ fn retranslate(folder: &std::path::Path, into: &std::path::Path, view_limit: u32
         .collect();
     if !missing.is_empty() {
         println!("{} of {} containers are looked for in the title's files", missing.len(), wanted.len());
-        for root in crate::default_paths(Vec::new())? {
-            for entry in walkdir::WalkDir::new(root).follow_links(true).into_iter().filter_map(std::result::Result::ok) {
-                let size = entry.metadata().map_or(0, |m| m.len());
-                if missing.is_empty() || !entry.file_type().is_file() || size > crate::shader::MAX_FILE {
-                    continue;
-                }
-                let Ok(data) = std::fs::read(entry.path()) else { continue };
-                for source in crate::shader::sources(&data) {
-                    let Some(bytes) = source.bytes() else { continue };
-                    let hash = blake3::hash(&bytes).to_hex()[..16].to_owned();
-                    if missing.remove(hash.as_str()) {
-                        std::fs::write(kept.join(format!("{hash}.cdxil")), &bytes[..])?;
-                    }
+        for path in crate::shader::shader_files(&crate::default_paths(Vec::new())?, false) {
+            if missing.is_empty() {
+                break;
+            }
+            let Some(data) = crate::shader::read_shader_carrier(&path) else {
+                continue;
+            };
+            for source in crate::shader::sources(&data) {
+                let Some(bytes) = source.bytes() else { continue };
+                let hash = blake3::hash(&bytes).to_hex()[..16].to_owned();
+                if missing.remove(hash.as_str()) {
+                    std::fs::write(kept.join(format!("{hash}.cdxil")), &bytes[..])?;
                 }
             }
         }
