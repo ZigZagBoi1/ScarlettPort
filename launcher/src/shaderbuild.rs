@@ -409,6 +409,14 @@ fn world_split(job: &Job) -> Result<String, String> {
         }
     };
     let mut untranslated = 0;
+    if !st.warm {
+        let dir = shader_dir(job);
+        if let Some((translator, cached)) = matching_cli_shader_cache(&dir, &job.hash) {
+            log(&job.tx, format!("Reusing {cached} existing cached shaders for matching translator ({translator}); skipping `scarlett shaders`."));
+            st.warm = true;
+            st.save(&path);
+        }
+    }
     if st.warm {
         log(&job.tx, "Shaders already translated for this engine build: skipping `scarlett shaders`.");
     } else {
@@ -678,6 +686,21 @@ fn classic(job: &Job) -> Result<String, String> {
     }
 }
 
+/// Returns `(translator, count)` if `dir` holds a completed CLI shader cache whose recorded
+/// `.translator` fingerprint matches `job_hash` (`translator:<hex> ...`).
+fn matching_cli_shader_cache(dir: &Path, job_hash: &str) -> Option<(String, u64)> {
+    let expected = job_hash
+        .strip_prefix("translator:")
+        .and_then(|rest| rest.split_whitespace().next())
+        .filter(|h| !h.is_empty())?;
+    let recorded = std::fs::read_to_string(dir.join(".translator")).ok()?;
+    if !recorded.trim().eq_ignore_ascii_case(expected) {
+        return None;
+    }
+    let cached = engine::count_cached_shaders(dir);
+    (!engine::too_few_shaders(cached)).then(|| (expected.to_string(), cached))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -710,5 +733,25 @@ mod tests {
         assert_eq!(State::load(&path, "a"), s);
         assert_eq!(State::load(&path, "b"), State { hash: "b".into(), ..Default::default() });
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cli_shader_cache_reuse_requires_matching_translator_and_enough_files() {
+        let dir = std::env::temp_dir().join(format!("sp-cli-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sub = dir.join("00");
+        std::fs::create_dir_all(&sub).unwrap();
+        let needed = (engine::SHADERS_TOTAL / 20) as usize;
+        for i in 0..needed {
+            std::fs::write(sub.join(format!("s_{i}.bin")), b"x").unwrap();
+        }
+        std::fs::write(dir.join(".translator"), "abcdef0123456789").unwrap();
+
+        let matched = matching_cli_shader_cache(&dir, "translator:ABCDEF0123456789 C:/cache");
+        assert_eq!(matched, Some(("ABCDEF0123456789".into(), needed as u64)));
+        assert_eq!(matching_cli_shader_cache(&dir, "translator:9999999999999999 C:/cache"), None);
+        assert_eq!(matching_cli_shader_cache(&dir, "build:deadbeef C:/cache"), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

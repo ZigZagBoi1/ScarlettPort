@@ -389,7 +389,8 @@ pub fn run(
 /// Every shader found into the cache runs translate from.
 pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
     let cfg = scarlett_core::Config::load()?;
-    scarlett_hle::modules::d3d12x::use_shader_cache(cfg.cache_subdir("shaders")?);
+    let shader_dir = cfg.cache_subdir("shaders")?;
+    scarlett_hle::modules::d3d12x::use_shader_cache(shader_dir.clone());
     let paths = crate::default_paths(paths)?;
     let threads = worker_threads(jobs);
     let started = std::time::Instant::now();
@@ -434,12 +435,16 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
         progress.stop();
     });
     let failed = failed.into_inner().unwrap_or_else(|e| e.into_inner());
+    let done = done.load(Ordering::Relaxed);
     println!(
         "{} shaders in the cache, {} do not translate, {:.0} s",
-        done.load(Ordering::Relaxed),
+        done,
         failed.values().map(|f| f.0).sum::<usize>(),
         started.elapsed().as_secs_f64()
     );
+    if done > 0 && std::env::var_os("SCARLETT_TRANSLATE_ONLY").is_none() {
+        let _ = std::fs::write(shader_dir.join(".translator"), scarlett_hle::SHADER_TRANSLATOR);
+    }
     for (why, (n, hash)) in failed {
         println!("  {n:>5}  {why}  (e.g. {hash})");
     }
