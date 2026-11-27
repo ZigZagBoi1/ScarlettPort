@@ -173,7 +173,11 @@ pub fn prepare(jobs: Option<usize>, all: bool) -> Result<()> {
     let jobs = jobs.unwrap_or(cores).max(1);
     let steps = if all { 3 } else { 2 };
     println!("prepare step 1/{steps} shaders");
-    crate::translate::precompile(Vec::new(), Some(jobs))?;
+    if std::env::var_os("SCARLETT_PREPARE_SKIP_SHADERS").is_some_and(|v| v == "1") {
+        println!("prepare note skipping shader scan (already cached)");
+    } else {
+        crate::translate::precompile(Vec::new(), Some(jobs))?;
+    }
     println!("prepare step 2/{steps} library");
     let dir = folder()?;
     scarlett_hle::known_pipelines::use_translations(dir.with_file_name("shaders"));

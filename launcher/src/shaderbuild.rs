@@ -566,11 +566,18 @@ fn world_split(job: &Job) -> Result<String, String> {
     let cmds = help(job).map(|h| crate::prep::commands(&h)).unwrap_or_default();
     let step = crate::prep::pipeline_command(&cmds).unwrap_or("warm");
     let mut planned = None;
-    let mut out = pipelines(job, &base, &mut p, share, step, &mut planned)?;
+    let skip_shaders_in_prepare = st.warm;
+    let base_p2 = |c: &mut Command| {
+        base(c);
+        if skip_shaders_in_prepare {
+            c.env("SCARLETT_PREPARE_SKIP_SHADERS", "1");
+        }
+    };
+    let mut out = pipelines(job, &base_p2, &mut p, share, step, &mut planned)?;
     if step != "warm" && matches!(out, Outcome::Exit(Some(c)) if c != 0) {
         log(&job.tx, format!("`scarlett {step}` failed; falling back to `scarlett warm`."));
         planned = None;
-        out = pipelines(job, &base, &mut p, share, "warm", &mut planned)?;
+        out = pipelines(job, &base_p2, &mut p, share, "warm", &mut planned)?;
     }
     match out {
         Outcome::Exit(Some(0)) => {}
