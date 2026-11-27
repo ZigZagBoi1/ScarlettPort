@@ -48,13 +48,14 @@ You supply a dump of your own legally purchased copy. Nothing of any title is in
 - Launcher 0.5.0: a first-run setup (game folder search, player name, one-time shader preparation).
 - Launcher 0.5.1: a calmer game check (the dump's own file list is advisory), a Setup page with every step's status and a way back into setup, mouse look with sensitivity, the game below normal priority so the PC stays responsive, a shader bar that reaches 100%, scrolling pages, and one-click Update now.
 
-**Known issues:** haze indoors; a crash reported mid-prologue ([#51](https://github.com/ZigZagBoi1/ScarlettPort/issues/51)).
+**Known issues:** on the Stable preset some players get a black screen or a GPU reset right after loading ([#61](https://github.com/ZigZagBoi1/ScarlettPort/issues/61)); until the fix ships, use the Experimental preset. Also: haze indoors; a crash mid-prologue on 16 GB RAM ([#51](https://github.com/ZigZagBoi1/ScarlettPort/issues/51)); the game ending at the boat screen after the prologue ([#56](https://github.com/ZigZagBoi1/ScarlettPort/issues/56)).
 
 ### Community results
 
 Hardware reports from testers. These are **their own measurements**, not ours.
 
 - **RX 9060 XT 16 GB + Ryzen 7 7700X**, v0.4.9 after warm: 18.7 fps median (53.4 ms; best 32.9 ms), up 3.3x from v0.4.4. [#53](https://github.com/ZigZagBoi1/ScarlettPort/issues/53)
+- **RTX 4070 12 GB + Ryzen 9 3900X**, v0.5.0: whole prologue played, 3-6 fps in the world, 30 fps in menus. [#56](https://github.com/ZigZagBoi1/ScarlettPort/issues/56)
 - **RTX 5070 12 GB + Ryzen 7 5800X3D**, v0.4.6: 7-8 fps. [#33](https://github.com/ZigZagBoi1/ScarlettPort/issues/33)
 - **RX 9060 XT**, v0.4.4: 5.3-6.0 fps. [#43](https://github.com/ZigZagBoi1/ScarlettPort/issues/43)
 - **RTX 3080 10 GB:** 3-4 fps in the world, through the prologue into the first mission. [#26](https://github.com/ZigZagBoi1/ScarlettPort/issues/26)
@@ -67,6 +68,7 @@ Hardware reports from testers. These are **their own measurements**, not ours.
 | Report | GPU | CPU | Version | Their result |
 |---|---|---|---|---|
 | [#53](https://github.com/ZigZagBoi1/ScarlettPort/issues/53) | RX 9060 XT 16 GB | Ryzen 7 7700X | 0.4.9, after warm | 18.7 fps median (53.4 ms; best 32.9 ms), 3.3x over 0.4.4 |
+| [#56](https://github.com/ZigZagBoi1/ScarlettPort/issues/56) | RTX 4070 12 GB | Ryzen 9 3900X | 0.5.0 | 3-6 fps in the world, whole prologue |
 | [#33](https://github.com/ZigZagBoi1/ScarlettPort/issues/33) | RTX 5070 12 GB | Ryzen 7 5800X3D | 0.4.6 | 7-8 fps |
 | [#43](https://github.com/ZigZagBoi1/ScarlettPort/issues/43) | RX 9060 XT | Ryzen 7 7700X | 0.4.4 | 5.3-6.0 fps |
 | [#26](https://github.com/ZigZagBoi1/ScarlettPort/issues/26) | RTX 3080 10 GB | Ryzen 9 3900X | | 3-4 fps in the world, prologue into the first mission |
@@ -365,7 +367,7 @@ cd ScarlettPort
 
 - While the game runs, write button names into `press.txt` (e.g. `DOWN DOWN A`) to press them.
 - Logs go to `logs\`. Attach one when you open an issue.
-- Controls: an Xbox controller works best. With no pad connected, the keyboard is a pad: Enter = A, Backspace = B, WASD = left stick, IJKL = right stick.
+- Controls: Xbox controllers and PlayStation pads (DualSense, DualShock 4, over USB or Bluetooth) both work. With no pad connected, the keyboard is a pad: Enter = A, Backspace = B, WASD = left stick, IJKL = right stick.
 
 **Shader build times** (12-thread CPU)
 
