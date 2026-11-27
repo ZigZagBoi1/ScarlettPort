@@ -23,6 +23,8 @@ pub mod runtime;
 pub use host::HostPolicy;
 pub use registry::{HleExport, HleModule, registry};
 pub use scarlett_gpu::console;
+#[cfg(windows)]
+pub use scarlett_gpu::streamline;
 /// The shader translator's fingerprint (`scarlett fingerprint`).
 pub use scarlett_gpu::shader_cache::TRANSLATOR as SHADER_TRANSLATOR;
 #[cfg(all(windows, feature = "diagnostics"))]
