@@ -127,6 +127,46 @@ fn is_link(p: &Path) -> bool {
     std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
 }
 
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
+}
+
+/// True when `pack_dir` (or any symlink inside it) resolves into `target_dir`.
+fn pack_uses_dir(pack_dir: &Path, target_dir: &Path) -> bool {
+    let Ok(canon_target) = std::fs::canonicalize(target_dir) else {
+        return false;
+    };
+    fn scan(dir: &Path, canon_target: &Path, depth: u32) -> bool {
+        if let Ok(c) = std::fs::canonicalize(dir) {
+            if c.starts_with(canon_target) {
+                return true;
+            }
+        }
+        if depth >= 4 {
+            return false;
+        }
+        let Ok(rd) = std::fs::read_dir(dir) else { return false };
+        for e in rd.flatten() {
+            let p = e.path();
+            if is_link(&p) {
+                if let Ok(c) = std::fs::canonicalize(&p) {
+                    if c.starts_with(canon_target) {
+                        return true;
+                    }
+                }
+            }
+            if e.file_type().is_ok_and(|t| t.is_dir()) && scan(&p, canon_target, depth + 1) {
+                return true;
+            }
+        }
+        false
+    }
+    scan(pack_dir, &canon_target, 0)
+}
+
 /// Walks `dir` (following links), counting files and noting empty files and broken links.
 fn walk(dir: &Path, rep: &mut Report, empty: &mut Vec<PathBuf>, broken: &mut Vec<(PathBuf, String)>, depth: u32) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
@@ -202,7 +242,11 @@ pub fn run(dir: &Path) -> Report {
     // ---- pack\
     let pack = dir.join("pack");
     let pack_ok = std::fs::metadata(&pack).is_ok_and(|m| m.is_dir());
-    let elsewhere: Vec<PathBuf> = link_homes(dir).into_iter().map(|h| h.join("pack")).filter(|p| p.is_dir() && *p != pack).collect();
+    let elsewhere: Vec<PathBuf> = link_homes(dir)
+        .into_iter()
+        .map(|h| h.join("pack"))
+        .filter(|p| p.is_dir() && !same_dir(p, &pack) && !pack_uses_dir(&pack, p))
+        .collect();
     if !pack_ok {
         rep.pack_problem = true;
         let detail = match elsewhere.first() {
@@ -461,5 +505,31 @@ ff | 83886080 | 2026-01-01T00:00:00Z | saves\profile_player.sav
         let after: Vec<_> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(before, after);
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn split_storage_symlinks_pass_without_second_pack_warning() {
+        let d = tmp("split-game");
+        let ssd = tmp("split-ssd");
+        full_dump(&d);
+        std::fs::create_dir_all(ssd.join("pack").join("core_licenses")).unwrap();
+        std::fs::write(ssd.join("shaders.rpf"), b"shaders").unwrap();
+        std::fs::write(ssd.join("pack").join("core_licenses").join("core_licenses.rpf"), b"lic").unwrap();
+        std::fs::remove_file(d.join("shaders.rpf")).unwrap();
+        std::fs::remove_file(d.join("pack").join("core_licenses").join("core_licenses.rpf")).unwrap();
+        if std::os::windows::fs::symlink_file(ssd.join("shaders.rpf"), d.join("shaders.rpf")).is_ok()
+            && std::os::windows::fs::symlink_file(
+                ssd.join("pack").join("core_licenses").join("core_licenses.rpf"),
+                d.join("pack").join("core_licenses").join("core_licenses.rpf"),
+            )
+            .is_ok()
+        {
+            let r = run(&d);
+            assert_eq!(r.problems(), 0, "{:?}", r.findings);
+            assert_eq!(r.worst(), Level::Ok);
+        }
+        let _ = std::fs::remove_dir_all(d);
+        let _ = std::fs::remove_dir_all(ssd);
     }
 }

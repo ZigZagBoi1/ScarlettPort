@@ -45,9 +45,12 @@ pub struct Progress {
 #[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
 pub struct State {
     pub hash: String,
-    /// World: `scarlett warm` finished.
+    /// World: `scarlett warm` / `scarlett shaders` translation finished.
     #[serde(default)]
     pub warm: bool,
+    /// World: pipeline warming (`scarlett warm` / `scarlett prepare`) finished.
+    #[serde(default)]
+    pub pipelines_warmed: bool,
     /// World: the first graphics record not done yet.
     #[serde(default)]
     pub next: u64,
@@ -77,6 +80,63 @@ impl State {
             let _ = std::fs::write(path, j);
         }
     }
+}
+
+/// The runtime's default CLI cache folder (`%LOCALAPPDATA%\ScarlettPort\cache`), where manual
+/// `scarlett shaders` runs write when `SCARLETT_CACHE_DIR` is unset.
+pub fn cli_default_cache() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("ScarlettPort").join("cache"))
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
+}
+
+/// Links an existing CLI shader cache into `scarlett_cache\shaders` via a directory junction
+/// when `scarlett_cache\shaders` is empty, avoiding copying or re-translating cached shaders.
+pub fn ensure_reused_shader_cache(scarlett_cache: &Path) -> Option<String> {
+    let cli_cache = cli_default_cache()?;
+    ensure_reused_shader_cache_from(scarlett_cache, &cli_cache.join("shaders"))
+}
+
+pub fn ensure_reused_shader_cache_from(scarlett_cache: &Path, src_shaders: &Path) -> Option<String> {
+    let dst = scarlett_cache.join("shaders");
+    if engine::count_cached_shaders(&dst) > 0 {
+        return None;
+    }
+    let count = engine::count_cached_shaders(src_shaders);
+    if count == 0 || same_dir(&dst, src_shaders) {
+        return None;
+    }
+    if std::fs::create_dir_all(scarlett_cache).is_err() {
+        return None;
+    }
+    if std::fs::symlink_metadata(&dst).is_ok() {
+        // Only replace an empty directory; never delete an existing file or non-empty dir.
+        if std::fs::remove_dir(&dst).is_err() {
+            return None;
+        }
+    }
+    #[cfg(windows)]
+    let ok = {
+        use std::os::windows::process::CommandExt;
+        Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&dst)
+            .arg(src_shaders)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(0x0800_0000)
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    #[cfg(not(windows))]
+    let ok = std::os::unix::fs::symlink(src_shaders, &dst).is_ok();
+    ok.then(|| format!("Reusing {count} existing cached shaders from {} (linked at {}).", src_shaders.display(), dst.display()))
 }
 
 /// The state file's key for a World build: the engine hash and the preset's cache folder, so a
@@ -408,10 +468,18 @@ fn world_split(job: &Job) -> Result<String, String> {
             crate::runtime::set_switch(c, k, v);
         }
     };
+    let cache_root = shader_dir(job).parent().map(Path::to_path_buf).unwrap_or_else(|| engine::scarlett_cache(&job.cache_dir));
+    if let Some(msg) = ensure_reused_shader_cache(&cache_root) {
+        log(&job.tx, msg);
+    }
     let mut untranslated = 0;
     if st.warm {
         log(&job.tx, "Shaders already translated for this engine build: skipping `scarlett shaders`.");
     } else {
+        let existing = engine::count_cached_shaders(&shader_dir(job));
+        if existing > 0 {
+            log(&job.tx, format!("Found {existing} existing cached shaders; verifying and translating only missing or invalidated shaders."));
+        }
         p.jobs = engine::jobs(cores(), free_mb(), 512);
         let mut cmd = Command::new(&job.exe);
         base(&mut cmd);
@@ -506,6 +574,8 @@ fn world_split(job: &Job) -> Result<String, String> {
         Outcome::Stopped | Outcome::Idle => return Err("Stopped. Press Build shaders again to resume.".into()),
     }
     let took = flow::duration(p.started.elapsed().as_secs());
+    st.pipelines_warmed = true;
+    st.save(&path);
     if p.total == 0 {
         p.total = shader_total;
     }
@@ -705,10 +775,26 @@ mod tests {
     fn state_resets_for_another_engine_build() {
         let dir = std::env::temp_dir().join(format!("sp-state-{}", std::process::id()));
         let path = dir.join("s.json");
-        let s = State { hash: "a".into(), warm: true, next: 3000, total: None, on_demand: vec![1000] };
+        let s = State { hash: "a".into(), warm: true, pipelines_warmed: true, next: 3000, total: None, on_demand: vec![1000] };
         s.save(&path);
         assert_eq!(State::load(&path, "a"), s);
         assert_eq!(State::load(&path, "b"), State { hash: "b".into(), ..Default::default() });
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reuses_existing_cli_shader_cache_without_overwriting() {
+        let base = std::env::temp_dir().join(format!("sp-reuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let src = base.join("cli").join("shaders");
+        let dst_root = base.join("launcher").join("scarlett");
+        std::fs::create_dir_all(src.join("ab")).unwrap();
+        std::fs::write(src.join("ab").join("0123"), b"ok").unwrap();
+        std::fs::create_dir_all(dst_root.join("shaders")).unwrap();
+        let msg = ensure_reused_shader_cache_from(&dst_root, &src);
+        assert!(msg.is_some(), "should link empty dst to populated src");
+        assert_eq!(engine::count_cached_shaders(&dst_root.join("shaders")), 1);
+        assert!(ensure_reused_shader_cache_from(&dst_root, &src).is_none(), "already populated");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

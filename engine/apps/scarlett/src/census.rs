@@ -48,7 +48,7 @@ pub fn run(paths: Vec<PathBuf>, strict: bool, list_missing: bool) -> Result<()> 
     let mut missing: BTreeMap<(String, String), BTreeSet<PathBuf>> = BTreeMap::new();
 
     for root in &paths {
-        for entry in walkdir::WalkDir::new(root) {
+        for entry in walkdir::WalkDir::new(root).follow_links(true) {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(error) if error.depth() == 0 => {

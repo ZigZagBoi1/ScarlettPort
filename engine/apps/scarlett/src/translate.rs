@@ -189,7 +189,7 @@ pub fn warm(paths: Vec<PathBuf>, file: &Path, jobs: Option<usize>) -> Result<()>
     let done = Mutex::new(HashSet::new());
     let counts = [const { AtomicUsize::new(0) }; 5];
     for root in &paths {
-        for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
+        for entry in walkdir::WalkDir::new(root).follow_links(true).into_iter().filter_map(Result::ok) {
             if !entry.file_type().is_file() || entry.metadata().map_or(0, |m| m.len()) > MAX_FILE {
                 continue;
             }
@@ -283,6 +283,7 @@ pub fn run(
     let total = Mutex::new(Tally::default());
     for root in &paths {
         for entry in walkdir::WalkDir::new(root)
+            .follow_links(true)
             .into_iter()
             .filter_map(Result::ok)
         {
@@ -415,7 +416,7 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
         // and nothing is translated yet, so a launcher can tell it works.
         outer.spawn(|| progress.tick(|| done.load(Ordering::Relaxed)));
         for root in &paths {
-            for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
+            for entry in walkdir::WalkDir::new(root).follow_links(true).into_iter().filter_map(Result::ok) {
                 if !entry.file_type().is_file() || entry.metadata().map_or(0, |m| m.len()) > MAX_FILE {
                     continue;
                 }

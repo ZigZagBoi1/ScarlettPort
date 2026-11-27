@@ -448,7 +448,7 @@ fn retranslate(folder: &std::path::Path, into: &std::path::Path, view_limit: u32
     if !missing.is_empty() {
         println!("{} of {} containers are looked for in the title's files", missing.len(), wanted.len());
         for root in crate::default_paths(Vec::new())? {
-            for entry in walkdir::WalkDir::new(root).into_iter().filter_map(std::result::Result::ok) {
+            for entry in walkdir::WalkDir::new(root).follow_links(true).into_iter().filter_map(std::result::Result::ok) {
                 let size = entry.metadata().map_or(0, |m| m.len());
                 if missing.is_empty() || !entry.file_type().is_file() || size > crate::shader::MAX_FILE {
                     continue;

@@ -74,6 +74,30 @@ mod tests {
             assert_eq!(blake3::hash(&entries[0].bytes().unwrap()), runtime_hash);
         }
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn walkdir_follows_symlink_files() {
+        let base = std::env::temp_dir().join(format!("scarlett-symlink-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let ssd = base.join("ssd");
+        let game = base.join("game");
+        std::fs::create_dir_all(&ssd).unwrap();
+        std::fs::create_dir_all(&game).unwrap();
+        let target = ssd.join("shaders.rpf");
+        let link = game.join("shaders.rpf");
+        std::fs::write(&target, b"DXBC\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x01\0\0\0\x20\0\0\0\0\0\0\0").unwrap();
+        if std::os::windows::fs::symlink_file(&target, &link).is_ok() {
+            let found: Vec<_> = walkdir::WalkDir::new(&link)
+                .follow_links(true)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_type().is_file())
+                .collect();
+            assert_eq!(found.len(), 1, "direct symlink to file should be discovered");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
 
 #[derive(Default)]
@@ -100,6 +124,7 @@ pub fn run(paths: Vec<PathBuf>, verbose: bool, disasm: bool) -> Result<()> {
     let mut t = Totals::default();
     for root in &paths {
         for entry in walkdir::WalkDir::new(root)
+            .follow_links(true)
             .into_iter()
             .filter_map(Result::ok)
         {
