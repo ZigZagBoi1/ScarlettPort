@@ -112,6 +112,11 @@ Tools and diagnostics:
   shader ahead of a run, on the processor only (about 4.5 to 6.5 minutes
   here); the shader cache is keyed on the translator's source, so a new
   build that does not touch the translator starts warm.
+  `SCARLETT_WARM_SECONDS=N` stops starting new scan or translation work
+  after `N` seconds; a read, scan or translation already in progress may
+  finish. With a hash list instead of `all`, scanning ends after each
+  requested 16-digit hash has been attempted, even if it was cached or
+  did not translate.
 - Counters, all off or diagnostics-only: `SCARLETT_MERGE_RACE=1` (title bytes
   a copy-back is about to put back to older values: none found in 138,000
   copy-backs), `SCARLETT_WALLS_TRACE`, `SCARLETT_CARD_ACCOUNTING`, and a census

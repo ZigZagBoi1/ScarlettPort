@@ -178,42 +178,95 @@ pub fn warm(paths: Vec<PathBuf>, file: &Path, jobs: Option<usize>) -> Result<()>
         }
         anyhow::ensure!(!wanted.is_empty(), "no 16-digit shader hash in {}", file.display());
     }
-    // `SCARLETT_WARM_SECONDS=<n>`: stop taking new shaders after n seconds
-    // (what is done stays in the cache; the next warm-up goes on from there).
+    // `SCARLETT_WARM_SECONDS=<n>`: stop starting scan and translation work
+    // after n seconds. In-progress work can finish, and cache entries stay.
     let limit = std::env::var("SCARLETT_WARM_SECONDS").ok().and_then(|v| v.trim().parse::<u64>().ok());
     let cfg = scarlett_core::Config::load()?;
     scarlett_hle::modules::d3d12x::use_shader_cache(cfg.cache_subdir("shaders")?);
     let paths = crate::default_paths(paths)?;
     let threads = worker_threads(jobs);
     let began = std::time::Instant::now();
+    let expired = || limit.is_some_and(|seconds| began.elapsed().as_secs() >= seconds);
+    let files = std::iter::once_with(|| crate::shader::shader_files_until(&paths, false, expired))
+        .flatten();
+    let ([translated, there, failed], timed_out) = scan_warm(
+        files,
+        (!all).then_some(&wanted),
+        threads,
+        began,
+        expired,
+        scarlett_hle::modules::d3d12x::warm_shader,
+    );
+    let asked = if all { "all".to_owned() } else { wanted.len().to_string() };
+    let stopped = if timed_out { " (stopped at the time limit)" } else { "" };
+    println!(
+        "warm-up      {asked} hashes asked, {} found: {translated} translated now, {there} in the cache already, {failed} do not translate; {:.1} s on {threads} threads{stopped}",
+        translated + there + failed,
+        began.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+fn scan_warm(
+    mut files: impl Iterator<Item = PathBuf>,
+    wanted: Option<&HashSet<String>>,
+    threads: usize,
+    began: std::time::Instant,
+    expired: impl Fn() -> bool + Sync,
+    warm_shader: impl Fn(&[u8]) -> Result<bool, String> + Sync,
+) -> ([usize; 3], bool) {
     let done = Mutex::new(HashSet::new());
-    let counts = [const { AtomicUsize::new(0) }; 5];
-    for path in crate::shader::shader_files(&paths, false) {
+    let counts = [const { AtomicUsize::new(0) }; 3];
+    let attempted = AtomicUsize::new(0);
+    let complete = || wanted.is_some_and(|hashes| attempted.load(Ordering::Relaxed) == hashes.len());
+    let timed_out = loop {
+        if complete() {
+            break false;
+        }
+        if expired() {
+            break true;
+        }
+        let path = files.next();
+        // Candidate discovery can itself take time before yielding a path.
+        if expired() {
+            break true;
+        }
+        let Some(path) = path else { break false };
         let Some(data) = crate::shader::read_shader_carrier(&path) else {
             continue;
         };
+        if expired() {
+            break true;
+        }
         let jobs = sources(&data);
         let next = AtomicUsize::new(0);
         std::thread::scope(|s| {
             for _ in 0..threads.min(jobs.len()) {
                 s.spawn(|| {
                     while let Some(job) = jobs.get(next.fetch_add(1, Ordering::Relaxed)) {
-                        let Some(bytes) = job.bytes() else {
-                            continue;
-                        };
-                        let hash = blake3::hash(&bytes).to_hex()[..16].to_owned();
-                        if limit.is_some_and(|n| began.elapsed().as_secs() >= n) {
-                            counts[3].fetch_add(1, Ordering::Relaxed);
+                        if complete() || expired() {
                             break;
                         }
-                        if (!all && !wanted.contains(&hash)) || !lock(&done).insert(hash) {
+                        let Some(bytes) = job.bytes() else { continue };
+                        let hex = blake3::hash(&bytes).to_hex();
+                        let hash = &hex[..16];
+                        if wanted.is_some_and(|hashes| !hashes.contains(hash)) {
                             continue;
                         }
-                        let n = counts[4].fetch_add(1, Ordering::Relaxed) + 1;
+                        {
+                            let mut done = lock(&done);
+                            if expired() {
+                                break;
+                            }
+                            if !done.insert(hash.to_owned()) {
+                                continue;
+                            }
+                        }
+                        let n = attempted.fetch_add(1, Ordering::Relaxed) + 1;
                         if n.is_multiple_of(1000) {
                             println!("warm-up      {n} shaders so far, {:.0} s", began.elapsed().as_secs_f64());
                         }
-                        let which = match scarlett_hle::modules::d3d12x::warm_shader(&bytes) {
+                        let which = match warm_shader(&bytes) {
                             Ok(true) => 0,
                             Ok(false) => 1,
                             Err(_) => 2,
@@ -223,16 +276,8 @@ pub fn warm(paths: Vec<PathBuf>, file: &Path, jobs: Option<usize>) -> Result<()>
                 });
             }
         });
-    }
-    let [translated, there, failed] = [0, 1, 2].map(|i| counts[i].load(Ordering::Relaxed));
-    let asked = if all { "all".to_owned() } else { wanted.len().to_string() };
-    let stopped = if counts[3].load(Ordering::Relaxed) > 0 { " (stopped at the time limit)" } else { "" };
-    println!(
-        "warm-up      {asked} hashes asked, {} found: {translated} translated now, {there} in the cache already, {failed} do not translate; {:.1} s on {threads} threads{stopped}",
-        translated + there + failed,
-        began.elapsed().as_secs_f64()
-    );
-    Ok(())
+    };
+    (counts.map(|n| n.load(Ordering::Relaxed)), timed_out)
 }
 
 pub fn run(
@@ -1047,3 +1092,66 @@ mod progress_tests {
         assert!(due(101, 1_000, 0));
     }
 }
+
+#[cfg(test)]
+mod warm_tests {
+    use super::{HashSet, PathBuf, scan_warm};
+    use std::cell::Cell;
+    use std::time::Instant;
+
+    #[test]
+    fn stops_before_the_next_carrier_after_all_requested_hashes_are_attempted() {
+        let mut translated = [0u8; 32];
+        translated[..4].copy_from_slice(b"DXBC");
+        translated[20] = 1;
+        translated[24] = 32;
+        let mut cached = translated;
+        cached[4] = 1;
+        let mut refused = translated;
+        refused[4] = 2;
+        let mut unrelated = translated;
+        unrelated[4] = 3;
+
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("shaders.dxbc");
+        let later = dir.path().join("other.bin");
+        std::fs::write(&first, [unrelated, translated, translated, cached, refused].concat()).unwrap();
+        std::fs::write(&later, translated).unwrap();
+        let wanted: HashSet<_> = [translated, cached, refused]
+            .iter()
+            .map(|bytes| blake3::hash(bytes).to_hex()[..16].to_owned())
+            .collect();
+        let files = crate::shader::shader_files(&[dir.path().to_path_buf()], false)
+            .into_iter()
+            .inspect(|path| assert_eq!(path, &first, "requested a later carrier"));
+        let result = scan_warm(files, Some(&wanted), 2, Instant::now(), || false, |bytes| {
+            match bytes[4] {
+                0 => Ok(true),
+                1 => Ok(false),
+                2 => Err("authored refusal".into()),
+                _ => panic!("attempted an unrequested shader"),
+            }
+        });
+        assert_eq!(result, ([1, 1, 1], false));
+    }
+
+    #[test]
+    fn expired_budget_never_requests_an_input_file() {
+        let files = std::iter::from_fn(|| -> Option<PathBuf> { panic!("requested an input file") });
+        let warm = |_: &[u8]| panic!("translated after the deadline");
+        assert_eq!(scan_warm(files, None, 2, Instant::now(), || true, warm), ([0; 3], true));
+    }
+
+    #[test]
+    fn deadline_during_discovery_discards_partial_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = [dir.path().join("first.bin"), dir.path().join("second.bin")];
+        for path in &paths {
+            std::fs::write(path, b"authored fixture").unwrap();
+        }
+        let expired = Cell::new(false);
+        let files = crate::shader::shader_files_until(&paths, false, || expired.replace(true));
+        assert!(files.is_empty());
+    }
+}
+

@@ -201,14 +201,25 @@ fn scan_priority(path: &Path, len: u64) -> (u8, u64) {
 /// non-shader asset databases when walking directories, deduplicating by canonical path,
 /// and ordering shader packs and executables first so progress starts immediately.
 pub(crate) fn shader_files(paths: &[PathBuf], report_large: bool) -> Vec<PathBuf> {
+    shader_files_until(paths, report_large, || false)
+}
+
+/// As `shader_files`, but discards partial results if discovery is stopped.
+pub(crate) fn shader_files_until(
+    paths: &[PathBuf],
+    report_large: bool,
+    stop: impl Fn() -> bool,
+) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     let mut candidates: Vec<(u8, u64, PathBuf)> = Vec::new();
     for root in paths {
-        for entry in walkdir::WalkDir::new(root)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(Result::ok)
-        {
+        let mut entries = walkdir::WalkDir::new(root).follow_links(true).into_iter();
+        loop {
+            if stop() {
+                return Vec::new();
+            }
+            let Some(entry) = entries.next() else { break };
+            let Ok(entry) = entry else { continue };
             if !entry.file_type().is_file() {
                 continue;
             }
