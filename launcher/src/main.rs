@@ -819,6 +819,9 @@ impl Launcher {
             self.go(Page::Settings);
             return;
         }
+        if game::is_network_path(self.config.cache_dir.trim()) {
+            self.log(format!("The cache folder {} is on a network share. Windows will not run the game image from there, so it is loaded from a local temporary copy; a cache folder on a local disk (Settings) is faster and safer.", self.config.cache_dir.trim()), LogKind::Info);
+        }
         if kind == RunKind::Precompile {
             return self.start_build(game);
         }

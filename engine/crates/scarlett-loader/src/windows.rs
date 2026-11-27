@@ -49,24 +49,60 @@ pub struct BindReport {
     pub missing: Vec<MissingImport>,
 }
 
+const ERROR_ACCESS_DENIED: i32 = 5;
+
+/// Maps `path` with the Windows loader; null on failure (see `GetLastError`).
+fn map_library(path: &Path) -> HMODULE {
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: `wide` is a NUL-terminated path. The image has no entry point
+    // and no imports, so loading it runs no title code.
+    unsafe { LoadLibraryExW(wide.as_ptr(), std::ptr::null_mut(), 0) }
+}
+
 /// Writes the prepared copy into `dir` and maps it with the Windows loader.
 ///
 /// `dir` receives derived game data, so it must be outside the repository.
 pub fn load(prepared: &PreparedImage, dir: &Path) -> Result<LoadedImage> {
     scarlett_core::ensure_outside_repo(dir)?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let path = dir.join(prepared.file_name());
+    let mut path = dir.join(prepared.file_name());
     write_if_changed(&path, &prepared.bytes)?;
 
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: `wide` is a NUL-terminated path. The image has no entry point
-    // and no imports, so loading it runs no title code.
-    let module = unsafe { LoadLibraryExW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+    let mut module = map_library(&path);
+    let mut error = std::io::Error::last_os_error();
+    // A cache folder on a network share (or a Wine drive mapped to one)
+    // refuses to map images as code: "Access is denied" (#217). The same
+    // bytes load from a local temporary folder.
+    if module.is_null() && error.raw_os_error() == Some(ERROR_ACCESS_DENIED) {
+        let local = std::env::temp_dir().join("ScarlettPort").join("images");
+        if scarlett_core::ensure_outside_repo(&local).is_ok()
+            && std::fs::create_dir_all(&local).is_ok()
+        {
+            let copy = local.join(prepared.file_name());
+            if write_if_changed(&copy, &prepared.bytes).is_ok() {
+                tracing::warn!(
+                    cache = %path.display(),
+                    local = %copy.display(),
+                    "the cache folder refused to map the image (a network share?): loading a local copy"
+                );
+                module = map_library(&copy);
+                if module.is_null() {
+                    error = std::io::Error::last_os_error();
+                } else {
+                    path = copy;
+                }
+            }
+        }
+    }
     if module.is_null() {
         bail!(
-            "LoadLibraryExW({}) failed: {}{}",
+            "LoadLibraryExW({}) failed: {error}{}{}",
             path.display(),
-            std::io::Error::last_os_error(),
+            if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) {
+                " (a cache folder on a network share or cloud drive cannot hold the game image:                  pick a cache folder on a local disk)"
+            } else {
+                ""
+            },
             if prepared.info.has_relocations {
                 ""
             } else {

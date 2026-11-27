@@ -177,6 +177,25 @@ pub fn free_space(_: &Path) -> Option<u64> {
     None
 }
 
+/// Whether `path` is on a network share: a `\\server\share` path or a mapped network drive.
+/// Windows will not map the game image from there as code (#217).
+pub fn is_network_path(path: &str) -> bool {
+    let p = path.trim().replace('/', "\\");
+    if p.starts_with("\\\\") && !p.starts_with(r"\\?\") && !p.starts_with(r"\\.\") {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        let b = p.as_bytes();
+        if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+            const DRIVE_REMOTE: u32 = 4;
+            let root = format!("{}:\\", b[0] as char);
+            return unsafe { sys::GetDriveTypeW(wide(&root).as_ptr()) } == DRIVE_REMOTE;
+        }
+    }
+    false
+}
+
 /// `<fixed drive with the most free space>\ScarlettCache`.
 #[cfg(windows)]
 pub fn default_cache() -> String {
@@ -200,6 +219,15 @@ pub fn default_cache() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_paths() {
+        assert!(is_network_path(r"\\nas\games\cache"));
+        assert!(is_network_path("//nas/games/cache"));
+        assert!(!is_network_path(r"\\?\C:\cache"));
+        assert!(!is_network_path(""));
+        assert!(!is_network_path(r"relative\cache"));
+    }
 
     #[test]
     fn identity_and_sanitize() {
