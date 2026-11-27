@@ -7,6 +7,8 @@ const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
 static PRESSURED: AtomicBool = AtomicBool::new(false);
 static HEADROOM: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Windows' commit is near its limit ([`commit_tight`]).
+static COMMIT_TIGHT: AtomicBool = AtomicBool::new(false);
 
 fn memory_status() -> Option<MEMORYSTATUSEX> {
     // SAFETY: the API initializes the fields of a correctly sized structure.
@@ -103,11 +105,43 @@ fn next_pressure(was: bool, physical: u64, commit: u64) -> bool {
     }
 }
 
+/// Whether the system's commit (`total - available`) is past 85 % of its
+/// limit, with a band so that it does not flip every second: on above 85 %,
+/// off again below 80 %. Players' out-of-memory crashes came with commit at
+/// its limit while physical memory was still free (issue #311), so caches
+/// kept on free RAM alone grew the very thing that ran out.
+fn next_commit_tight(was: bool, total: u64, available: u64) -> bool {
+    if total == 0 {
+        return false;
+    }
+    let used = u128::from(total.saturating_sub(available)) * 100;
+    let total = u128::from(total);
+    if was { used >= total * 80 } else { used > total * 85 }
+}
+
+/// Windows' commit is near its limit: caches of the PC's memory kept for
+/// later use (spare scratch, idle copies, idle host lists) are kept short.
+pub(crate) fn commit_tight() -> bool {
+    COMMIT_TIGHT.load(Ordering::Relaxed)
+}
+
 /// Called by the once-per-second submission sweep. A failed sample keeps the last good state.
 pub(crate) fn refresh() {
     let Some(status) = memory_status() else { return };
     let (physical, commit) = (status.ullAvailPhys, status.ullAvailPageFile);
     HEADROOM.store(physical.min(commit), Ordering::Relaxed);
+    let tight_was = commit_tight();
+    let tight = next_commit_tight(tight_was, status.ullTotalPageFile, commit);
+    if tight != tight_was {
+        COMMIT_TIGHT.store(tight, Ordering::Relaxed);
+        tracing::info!(
+            commit_used_mib = status.ullTotalPageFile.saturating_sub(commit) >> 20,
+            commit_limit_mib = status.ullTotalPageFile >> 20,
+            "system commit {}: idle host caches {}",
+            if tight { "above 85 % of its limit" } else { "back below 80 % of its limit" },
+            if tight { "kept short" } else { "kept as before" }
+        );
+    }
     let was = pressured();
     let pressure = next_pressure(was, physical, commit);
     if pressure != was {
@@ -175,6 +209,17 @@ mod tests {
             assert_eq!(has_upload_reserve(commit, false), lookahead);
             assert_eq!(has_growth_reserve(commit, false), growth);
         }
+    }
+
+    #[test]
+    fn commit_tight_turns_on_above_85_and_off_below_80_percent() {
+        assert!(!next_commit_tight(false, 0, 0));
+        assert!(!next_commit_tight(false, 100 * GIB, 15 * GIB));
+        assert!(next_commit_tight(false, 100 * GIB, 14 * GIB));
+        assert!(next_commit_tight(true, 100 * GIB, 20 * GIB));
+        assert!(!next_commit_tight(true, 100 * GIB, 21 * GIB));
+        // A 48 GiB PC with 45 GiB committed and RAM still free.
+        assert!(next_commit_tight(false, 48 * GIB, 3 * GIB));
     }
 
     #[test]

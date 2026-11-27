@@ -3088,6 +3088,7 @@ pub fn title_memory_remapped(at: usize, len: usize) {
 /// its bits ([`PUBLISHED`]) with no view behind it.
 pub fn title_memory_unmapping(at: usize, len: usize) {
     crate::texback::remapped(at, len);
+    crate::resource::placed_freed(at as u64, len as u64);
     forget_views(at / BLOCK, at.saturating_add(len).div_ceil(BLOCK));
     let mut g = title_memory_changed(at, len);
     if CHANGING.get().0 && len != 0 {
@@ -3111,7 +3112,15 @@ pub fn title_memory_unmapping(at: usize, len: usize) {
 /// `[at, at + len)`, or with no length the whole allocation at `at`: what
 /// was noted of its blocks (guarded, clean, absent) would be taken for true
 /// of the next memory at the address.
+///
+/// What was made of the memory goes too, as when the runtime unmaps it
+/// ([`copies_freed`]): before, the copies lived until the idle sweep, five
+/// minutes with plenty of RAM free (issue #311).
 pub fn title_memory_freed(at: usize, len: usize) {
+    let span_end = if len != 0 { at.saturating_add(len) } else { allocation_end(at, at) };
+    if span_end > at {
+        copies_freed(at, span_end - at);
+    }
     if len != 0 {
         forget_views(at / BLOCK, at.saturating_add(len).div_ceil(BLOCK));
     } else if VIEWS.any(at / BLOCK, at / BLOCK + 1) {
@@ -3145,6 +3154,21 @@ pub fn title_memory_freed(at: usize, len: usize) {
     // (Memory that is still a view is not freed by that call, which fails:
     // it must not stay read-only.)
     open(&g, at, end * BLOCK);
+}
+
+/// The title frees or decommits `[at, at + len)`: what keeps track of what
+/// title memory shows forgets it, as for unmapping
+/// ([`title_memory_changed`]), and the copies made of it that nothing holds
+/// go at once (`crate::shadow::freed_let_go`); those a list or a slot
+/// holds stay until the sweep finds them idle, since the card may still
+/// read them. The guards are left to the caller.
+fn copies_freed(at: usize, len: usize) {
+    crate::texback::remapped(at, len);
+    crate::resource::placed_freed(at as u64, len as u64);
+    crate::descriptor::host::remapped(at, len);
+    crate::inplace::views_gone(at, len);
+    crate::inplace::title_memory_freeing(at, len);
+    crate::shadow::freed_let_go(at as u64, len as u64);
 }
 
 /// The end of the allocation at `at`, if `inside` lies in it; else `at`.

@@ -4951,6 +4951,101 @@ pub(crate) fn in_place_let_go(at: u64, len: u64) -> u64 {
     n
 }
 
+/// Whether a copy may go now: only the table holds it (no list not yet
+/// reset, no pass over the heap, no submission comparing it) and only the
+/// copy holds its host buffer (no descriptor slot views it). As
+/// [`let_go_idle`] asks, without the idle time.
+fn unheld(shadow: &Arc<Shadow>) -> bool {
+    Arc::strong_count(shadow) == 1 && crate::host::references(&shadow.buffer) == 1
+}
+
+/// Whether copies of memory the title frees go at once
+/// ([`freed_let_go`]); `SCARLETT_FREED_COPIES=keep`: they wait for the idle
+/// sweep, as before.
+fn freed_drops() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SCARLETT_FREED_COPIES").as_deref() != Ok("keep"))
+}
+
+/// The keys of `map` (start, length) whose span touches `[at, end)`; a
+/// window starts at most [`WINDOW`] below what it holds.
+fn touching<V>(map: &BTreeMap<(u64, u64), V>, at: u64, end: u64) -> Vec<(u64, u64)> {
+    map.range((at.saturating_sub(WINDOW), 0)..(end, 0))
+        .map(|(key, _)| *key)
+        .filter(|key| key.0.saturating_add(key.1) > at && key.0 < end)
+        .collect()
+}
+
+/// The title freed or decommitted `[at, at + len)`: the host copies of that
+/// memory nothing holds go now, not after the idle sweep's minutes (issue
+/// #311: they were gigabytes while the world streams). Windows outside
+/// buffers leave the table; the copies of title buffers there leave their
+/// entry. A copy a list or a slot still holds stays until the sweep finds
+/// it idle, as before: the card may still read it. Those that go wait for
+/// the submissions running now ([`crate::host::retire`]). Returns how many.
+pub(crate) fn freed_let_go(at: u64, len: u64) -> u64 {
+    if len == 0 || !freed_drops() {
+        return 0;
+    }
+    let end = at.saturating_add(len);
+    let mut gone: Vec<Arc<Shadow>> = Vec::new();
+    // (The recording threads share the lock: the writer's only when there
+    // is a window there.)
+    let there = !touching(&*LOOSE.read().unwrap_or_else(|e| e.into_inner()), at, end).is_empty();
+    if there {
+        // Under the lock `loose` hands copies out with: none is handed out
+        // between the look and the removal.
+        let mut map = LOOSE.write().unwrap_or_else(|e| e.into_inner());
+        let keys: Vec<(u64, u64)> = touching(&map, at, end).into_iter().filter(|key| map.get(key).is_some_and(unheld)).collect();
+        gone.extend(keys.into_iter().filter_map(|key| map.remove(&key)));
+    }
+    // Taking the map for a change tells every thread's memory of answers
+    // (`found`) to look again: only when there is a copy to take.
+    let any = buffers_read()
+        .range(..(end, 0))
+        .rev()
+        .take(256)
+        .any(|(_, entry)| entry.end > at && entry.shadow.as_ref().is_some_and(unheld));
+    if any {
+        let mut map = buffers();
+        for (_, entry) in map.range_mut(..(end, 0)).rev().take(256) {
+            if entry.end > at && entry.shadow.as_ref().is_some_and(unheld) {
+                gone.extend(entry.shadow.take());
+            }
+        }
+    }
+    let n = gone.len() as u64;
+    if n != 0 {
+        FREED_GONE[0].fetch_add(n, Ordering::Relaxed);
+        FREED_GONE[1].fetch_add(gone.iter().map(|s| s.len).sum::<u64>(), Ordering::Relaxed);
+    }
+    for shadow in gone {
+        crate::host::retire(shadow);
+    }
+    n
+}
+
+#[cfg(test)]
+mod freed_tests {
+    use super::*;
+
+    #[test]
+    fn touching_finds_the_windows_over_a_freed_range() {
+        let mut map = BTreeMap::new();
+        for key in [(0u64, WINDOW), (WINDOW, WINDOW), (2 * WINDOW, 0x1000), (3 * WINDOW, WINDOW)] {
+            map.insert(key, ());
+        }
+        assert_eq!(touching(&map, WINDOW + 8, WINDOW + 24), [(WINDOW, WINDOW)]);
+        assert_eq!(touching(&map, WINDOW - 1, WINDOW + 1), [(0, WINDOW), (WINDOW, WINDOW)]);
+        // Past a window's end: not that window.
+        assert!(touching(&map, 2 * WINDOW + 0x1000, 2 * WINDOW + 0x2000).is_empty());
+        assert_eq!(touching(&map, 0, 4 * WINDOW).len(), 4);
+    }
+}
+
+/// Copies let go by [`freed_let_go`] since the start, and their bytes.
+pub(crate) static FREED_GONE: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
 /// For the in-place census (`crate::inplace`): the title buffers (start,
 /// bytes, false) and the windows outside buffers that have a copy (start,
 /// bytes, true).

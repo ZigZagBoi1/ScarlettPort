@@ -240,6 +240,49 @@ static IDLE: std::sync::Mutex<(Vec<Idle>, u64)> = std::sync::Mutex::new((Vec::ne
 #[cfg(windows)]
 const IDLE_MOST: (usize, u64) = (512, 256 << 20);
 
+/// The most host lists kept idle while the PC's memory or Windows' commit
+/// is short ([`crate::residency::pressured`], [`crate::residency::commit_tight`]):
+/// each keeps its allocators and buffers, which [`IDLE_MOST`]'s bytes do not
+/// count (some 0.7 MB of commit a list, run 69: up to 350 MB for 512).
+#[cfg(windows)]
+const IDLE_TIGHT: usize = 32;
+
+/// How many host lists may stay idle now.
+#[cfg(windows)]
+fn idle_most() -> usize {
+    idle_most_for(crate::residency::pressured() || crate::residency::commit_tight())
+}
+
+#[cfg(windows)]
+fn idle_most_for(tight: bool) -> usize {
+    if tight { IDLE_TIGHT } else { IDLE_MOST.0 }
+}
+
+/// Host lists kept idle now, for the memory line.
+#[cfg(windows)]
+pub(crate) fn idle_lists() -> usize {
+    IDLE.lock().unwrap_or_else(|e| e.into_inner()).0.len()
+}
+
+/// Under memory pressure: the idle host lists past [`IDLE_TIGHT`] go (they
+/// have run and were reset; nothing names them).
+#[cfg(windows)]
+pub(crate) fn trim_idle() {
+    let gone: Vec<Idle> = {
+        let mut idle = IDLE.lock().unwrap_or_else(|e| e.into_inner());
+        if idle.0.len() <= IDLE_TIGHT {
+            return;
+        }
+        // The oldest first: `fresh_list` takes from the end.
+        let over = idle.0.len() - IDLE_TIGHT;
+        let gone: Vec<Idle> = idle.0.drain(..over).collect();
+        idle.1 -= gone.iter().map(|g| g.1).sum::<u64>();
+        gone
+    };
+    // Freed outside the lock.
+    drop(gone);
+}
+
 /// Whether host lists that have run are used again (on by default;
 /// `SCARLETT_LIST_POOL=0`: each is made new and thrown away, as before).
 #[cfg(windows)]
@@ -279,7 +322,8 @@ pub(crate) fn recycle(lists: Vec<Detached>, ran: &[usize]) {
         // The descriptor slots and the upload memory its commands named.
         drop(_state);
         drop(_uploads);
-        if !ran.contains(&i) || IDLE.lock().unwrap_or_else(|e| e.into_inner()).0.len() >= IDLE_MOST.0 {
+        let most = idle_most();
+        if !ran.contains(&i) || IDLE.lock().unwrap_or_else(|e| e.into_inner()).0.len() >= most {
             continue;
         }
         // As the title's reset does: what the list kept for its commands
@@ -287,7 +331,7 @@ pub(crate) fn recycle(lists: Vec<Detached>, ran: &[usize]) {
         host.reset();
         let bytes = host.scratch_kept();
         let mut idle = IDLE.lock().unwrap_or_else(|e| e.into_inner());
-        if idle.0.len() < IDLE_MOST.0 && idle.1 + bytes <= IDLE_MOST.1 {
+        if idle.0.len() < most && idle.1 + bytes <= IDLE_MOST.1 {
             idle.0.push(Idle(host, bytes));
             idle.1 += bytes;
         }
@@ -2382,6 +2426,13 @@ static NEWER_THIN_FUNCTIONS: Table<160> = Table(thin::table(true));
 mod tests {
     use super::*;
     use crate::object::slot;
+
+    #[test]
+    fn idle_lists_kept_short_under_memory_pressure() {
+        assert_eq!(idle_most_for(false), IDLE_MOST.0);
+        assert_eq!(idle_most_for(true), IDLE_TIGHT);
+        assert!(IDLE_TIGHT < IDLE_MOST.0);
+    }
 
     #[test]
     fn every_inline_command_falls_back_to_the_table() {

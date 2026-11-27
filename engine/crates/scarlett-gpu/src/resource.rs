@@ -2020,6 +2020,8 @@ pub(crate) fn let_go_idle() {
     if !*ON.get_or_init(|| std::env::var_os("SCARLETT_TEXTURE_SWEEP").is_none_or(|v| v != "0")) {
         return;
     }
+    // Placed textures whose memory went.
+    forget_placed();
     // Copies replaced by ones with more levels, as any let go.
     {
         let mut replaced = REPLACED.lock().unwrap_or_else(|e| e.into_inner());
@@ -2948,6 +2950,156 @@ static PLACED_TEXTURES: std::sync::Mutex<std::collections::BTreeMap<(u64, [u32; 
 #[cfg(windows)]
 static PLACED_RAW: std::sync::Mutex<std::collections::BTreeSet<(u64, [u32; 14])>> =
     std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Ranges of title memory freed or unmapped since the last sweep
+/// ([`placed_freed`]), for [`forget_placed`].
+#[cfg(windows)]
+static PLACED_FREED: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());
+
+/// Placed textures [`forget_placed`] took out of [`PLACED_TEXTURES`] whose
+/// host copy is still to go, by resource.
+#[cfg(windows)]
+static PLACED_LEFT: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+/// Since the start: placed textures forgotten because their memory went,
+/// and of them those whose host copy went soon after (not after the
+/// sweep's idle time).
+#[cfg(windows)]
+pub(crate) static PLACED_FORGOTTEN: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
+/// Title memory `[at, at + len)` was freed, decommitted or unmapped: the
+/// placed textures that start there are kept for [`forget_placed`] (the
+/// first page of a texture holds its smallest levels, which are mapped
+/// first and unmapped last: a texture whose first page goes is gone). Only
+/// the range is noted: this is called with the runtime's mapping locks
+/// held, and locks one mutex of its own and calls nothing.
+#[cfg(windows)]
+pub(crate) fn placed_freed(at: u64, len: u64) {
+    /// Ranges kept until a sweep takes them; past that they are joined.
+    const MOST: usize = 1 << 14;
+    if len == 0 {
+        return;
+    }
+    note_range(&mut PLACED_FREED.lock().unwrap_or_else(|e| e.into_inner()), at, at.saturating_add(len), MOST);
+}
+
+/// Adds `[at, end)` to `ranges`: onto the last if it goes on from there,
+/// else as one more, and with `most` already there all as one.
+fn note_range(ranges: &mut Vec<(u64, u64)>, at: u64, end: u64, most: usize) {
+    if let Some(last) = ranges.last_mut()
+        && last.1 == at
+    {
+        last.1 = end;
+        return;
+    }
+    match ranges.len() {
+        n if n >= most => {
+            // Kept whole: one range from the lowest to the highest. That
+            // forgets more textures than went, which only makes them again.
+            let low = ranges.iter().map(|r| r.0).min().unwrap_or(at).min(at);
+            let high = ranges.iter().map(|r| r.1).max().unwrap_or(end).max(end);
+            ranges.clear();
+            ranges.push((low, high));
+        }
+        _ => ranges.push((at, end)),
+    }
+}
+
+/// The keys of `map` whose address lies in one of `ranges`.
+fn placed_in<V>(map: &std::collections::BTreeMap<(u64, [u32; 14]), V>, ranges: &[(u64, u64)]) -> Vec<(u64, [u32; 14])> {
+    let mut keys = Vec::new();
+    for &(at, end) in ranges {
+        if end > at {
+            keys.extend(map.range((at, [0; 14])..(end, [0; 14])).map(|(key, _)| *key));
+        }
+    }
+    keys
+}
+
+/// From the sweep: the placed textures whose memory went
+/// ([`placed_freed`]) leave [`PLACED_TEXTURES`] (it only grew: one entry per
+/// address and description ever viewed), so that the next view there makes
+/// a texture of what is there then; and their host copies go as soon as no
+/// list and no slot holds them, not after the sweep's idle minutes.
+///
+/// The title resource itself is not freed: slots and lists made earlier
+/// name it, and it is small; with no host copy it holds nothing of the
+/// card's or of the PC's memory to speak of.
+#[cfg(windows)]
+fn forget_placed() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let ranges = std::mem::take(&mut *PLACED_FREED.lock().unwrap_or_else(|e| e.into_inner()));
+    if !ranges.is_empty() {
+        let forgotten: Vec<usize> = {
+            let mut map = PLACED_TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
+            let keys = placed_in(&map, &ranges);
+            keys.into_iter().filter_map(|key| map.remove(&key)).collect()
+        };
+        {
+            let mut raw = PLACED_RAW.lock().unwrap_or_else(|e| e.into_inner());
+            let keys: Vec<(u64, [u32; 14])> = ranges
+                .iter()
+                .filter(|r| r.1 > r.0)
+                .flat_map(|&(at, end)| raw.range((at, [0; 14])..(end, [0; 14])).copied().collect::<Vec<_>>())
+                .collect();
+            for key in keys {
+                raw.remove(&key);
+            }
+        }
+        PLACED_FORGOTTEN[0].fetch_add(forgotten.len() as u64, Relaxed);
+        PLACED_LEFT.lock().unwrap_or_else(|e| e.into_inner()).extend(forgotten);
+    }
+    // Their host copies, by the sweep's rules (`let_go_idle`) with a second
+    // of idle time: a thread that was handed one and has not yet recorded
+    // its use is protected by that alone.
+    let left = std::mem::take(&mut *PLACED_LEFT.lock().unwrap_or_else(|e| e.into_inner()));
+    if left.is_empty() {
+        return;
+    }
+    const IDLE_MS: u64 = 1000;
+    const IDLE_FRAMES: u64 = 4;
+    let mut keep = Vec::new();
+    for at in left {
+        // SAFETY: placed textures are never freed (`PLACED_TEXTURES`).
+        let r = unsafe { &*(at as *const Resource) };
+        if !fills(&r.desc) || crate::texture::host_wrote(at) {
+            // The general sweep's to judge (or never let go): not ours.
+            continue;
+        }
+        let gone = {
+            let mut made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
+            match made.as_ref() {
+                // None now: nothing to let go.
+                None => None,
+                Some((host, _))
+                    if crate::host::long_ago(r.host.used.load(Relaxed), IDLE_MS, IDLE_FRAMES)
+                        && std::sync::Arc::strong_count(host) == 1
+                        && crate::host::references(&host.texture) == 1 =>
+                {
+                    crate::texture::unstage(at as This);
+                    r.host.wanted.store(u32::MAX, Relaxed);
+                    made.take()
+                }
+                Some(_) => {
+                    keep.push(at);
+                    None
+                }
+            }
+        };
+        if let Some((host, _)) = gone {
+            r.host.gone.store(true, Relaxed);
+            KINDS[2].fetch_add(1, Relaxed);
+            KINDS[3].fetch_add(host.bytes, Relaxed);
+            PLACED_FORGOTTEN[1].fetch_add(1, Relaxed);
+            crate::host::retire(host);
+        }
+    }
+    // Still held by a list or a slot: looked at again next time. (A slot
+    // may show it for long; the general sweep takes it from there too.)
+    const LEFT_MOST: usize = 1 << 16;
+    keep.truncate(LEFT_MOST);
+    PLACED_LEFT.lock().unwrap_or_else(|e| e.into_inner()).extend(keep);
+}
 
 /// Placed textures asked for a second time with other filler words in
 /// their description: each was a second resource and host copy before the
@@ -4579,5 +4731,58 @@ float4 lit() : SV_Target { return 1.0; }
         let d = unsafe { more.texture.GetDesc() };
         assert_eq!((more.base, d.Width, d.MipLevels), (0, 256, 9));
         assert!(more.serial != copy.serial && more.grown.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn freed_ranges_join_and_stay_bounded() {
+        let mut r = Vec::new();
+        note_range(&mut r, 0x1000, 0x2000, 3);
+        note_range(&mut r, 0x2000, 0x3000, 3);
+        assert_eq!(r, [(0x1000, 0x3000)], "one goes on from the last");
+        note_range(&mut r, 0x8000, 0x9000, 3);
+        note_range(&mut r, 0x5000, 0x6000, 3);
+        assert_eq!(r.len(), 3);
+        note_range(&mut r, 0x100, 0x200, 3);
+        assert_eq!(r, [(0x100, 0x9000)], "past the most, all as one");
+    }
+
+    #[test]
+    fn placed_in_finds_the_textures_that_start_in_a_range() {
+        let mut map = std::collections::BTreeMap::new();
+        for at in [0x1000u64, 0x1fff, 0x2000, 0x5000] {
+            map.insert((at, [7u32; 14]), ());
+            map.insert((at, [0u32; 14]), ());
+        }
+        let keys = placed_in(&map, &[(0x1000, 0x2000), (0x5000, 0x5000)]);
+        let starts: Vec<u64> = keys.iter().map(|k| k.0).collect();
+        assert_eq!(starts, [0x1000, 0x1000, 0x1fff, 0x1fff]);
+    }
+
+    /// A placed texture whose memory is freed leaves the table: the next
+    /// view there makes a texture of what is there then. The title resource
+    /// made before stays valid (slots made earlier name it).
+    #[cfg(windows)]
+    #[test]
+    fn a_placed_texture_is_forgotten_when_its_memory_is_freed() {
+        use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc};
+        let desc = [3u32, 0, 0, 0, 64, 0, 64, 0x1_0001, 98, 1, 0, 0x105, 0, 0];
+        let whole = placed_bytes(&desc).unwrap();
+        // SAFETY: memory of our own that stays.
+        let at = unsafe { VirtualAlloc(std::ptr::null(), whole as usize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) } as u64;
+        let first = texture_at(at, &desc).unwrap();
+        assert_eq!(texture_at(at, &desc), Some(first));
+        // Memory elsewhere goes: it stays.
+        placed_freed(at + whole, 0x10000);
+        forget_placed();
+        assert_eq!(placed_known(at, &desc), Some(first));
+        // Its own memory goes (from its first page on).
+        placed_freed(at, 0x1000);
+        forget_placed();
+        assert_eq!(placed_known(at, &desc), None);
+        let second = texture_at(at, &desc).unwrap();
+        assert_ne!(second, first);
+        assert_eq!(placed_known(at, &desc), Some(second));
+        // The first is still a texture of that memory.
+        assert_eq!(title_texture(first).map(|t| t.1), Some(at as usize));
     }
 }

@@ -54,7 +54,8 @@ pub(crate) fn room(memory: Option<[u64; 4]>) {
     if let Ok(mut pool) = STAGING.try_lock() {
         let staging_limit = if crate::residency::critical_commit() {
             0
-        } else if pressure {
+        } else if pressure || crate::residency::commit_tight() {
+            // (Staging blocks are the PC's memory: commit.)
             1
         } else {
             limit

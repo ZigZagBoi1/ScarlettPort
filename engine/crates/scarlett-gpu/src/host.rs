@@ -362,9 +362,15 @@ static RESIDENT: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic:
 /// 85 % of the card's budget, windows of title memory and staging buffers
 /// for five minutes with 12 GiB of the PC's memory free, and 1 GiB of
 /// scratch chunks.
+///
+/// Not while Windows' commit is past 85 % of its limit
+/// ([`crate::residency::commit_tight`]): all of that is commit, and players'
+/// out-of-memory crashes came with commit at its limit and RAM still free
+/// (issue #311). Then the shorter times hold, as on a PC with little RAM.
 pub(crate) fn keep_freed() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("SCARLETT_KEEP_FREED").is_none_or(|v| v != "0"))
+        && !crate::residency::commit_tight()
 }
 
 /// Effective idle timeout (in milliseconds) for system-RAM caches (staging
@@ -441,9 +447,11 @@ fn sweep() {
     #[cfg(feature = "diagnostics")]
     crate::book::check();
     crate::residency::refresh();
-    if crate::residency::pressured() {
+    if crate::residency::pressured() || crate::residency::commit_tight() {
         trim_spare_chunks();
+        crate::list::trim_idle();
     }
+    log_commit(now);
     crate::pool::room(host().and_then(|h| h.video_memory()));
     crate::pipeline::trim_library();
     crate::shadow::let_go_idle();
@@ -782,6 +790,46 @@ fn private_bytes() -> u64 {
     // SAFETY: our own process and a sized structure.
     unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) };
     c.PagefileUsage as u64
+}
+
+/// Every 30 s, from the sweep: the process's working set and commit and the
+/// system's commit against its limit, for out-of-memory reports (issue #311).
+fn log_commit(now: u64) {
+    use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let last = LAST.load(Ordering::Relaxed);
+    if now < last + 30_000 || LAST.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_err() {
+        return;
+    }
+    let mut c = PROCESS_MEMORY_COUNTERS {
+        cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: our own process and a sized structure.
+    unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) };
+    // SAFETY: plain data the call fills in.
+    let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    m.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
+    // SAFETY: a sized structure.
+    unsafe { GlobalMemoryStatusEx(&mut m) };
+    let idle_lists = crate::list::idle_lists();
+    tracing::info!(
+        working_set_mib = c.WorkingSetSize >> 20,
+        commit_mib = c.PagefileUsage >> 20,
+        system_commit_mib = m.ullTotalPageFile.saturating_sub(m.ullAvailPageFile) >> 20,
+        system_commit_limit_mib = m.ullTotalPageFile >> 20,
+        physical_free_mib = m.ullAvailPhys >> 20,
+        spare_scratch_mib = ALIVE[4].load(Ordering::Relaxed) >> 20,
+        idle_lists,
+        freed_copies = crate::shadow::FREED_GONE[0].load(Ordering::Relaxed),
+        freed_copies_mib = crate::shadow::FREED_GONE[1].load(Ordering::Relaxed) >> 20,
+        placed_forgotten = crate::resource::PLACED_FORGOTTEN[0].load(Ordering::Relaxed),
+        placed_copies_let_go = crate::resource::PLACED_FORGOTTEN[1].load(Ordering::Relaxed),
+        commit_tight = crate::residency::commit_tight(),
+        "process memory"
+    );
 }
 
 /// What the runtime does when the host GPU fails for good: report it like a
