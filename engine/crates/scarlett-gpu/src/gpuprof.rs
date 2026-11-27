@@ -23,8 +23,12 @@
 
 #[path = "gpuprof/agg.rs"]
 mod agg;
+#[path = "gpuprof/sends.rs"]
+mod sends;
 
-use std::collections::{HashMap, VecDeque};
+pub(crate) use sends::{Kind, Sending};
+
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -72,6 +76,12 @@ struct Prof {
     since: Instant,
     /// Lists not timed: no free block.
     untimed: u64,
+    /// Closed lists' blocks by list, and the blocks of those sent since.
+    closed: HashMap<usize, u32>,
+    sent: HashSet<u32>,
+    /// Lists read without stamps: sent to the card, never sent.
+    unread: [u64; 2],
+    sends: sends::Sends,
 }
 
 // SAFETY: free-threaded host objects and a mapping, behind a lock.
@@ -129,6 +139,10 @@ fn make() -> Option<Prof> {
             agg: Agg::default(),
             since: Instant::now(),
             untimed: 0,
+            closed: HashMap::new(),
+            sent: HashSet::new(),
+            unread: [0; 2],
+            sends: sends::Sends::default(),
         })
     }
 }
@@ -234,6 +248,7 @@ pub(crate) fn end(list: &ID3D12GraphicsCommandList) {
         unsafe {
             list.ResolveQueryData(&p.heap, D3D12_QUERY_TYPE_TIMESTAMP, base, n, &p.back, u64::from(base) * 8);
         }
+        p.closed.insert(list.as_raw() as usize, o.block);
         p.pending.push_back((o, Instant::now()));
     });
 }
@@ -246,6 +261,7 @@ pub(crate) fn frame() {
     }
     with(|p| {
         p.agg.frame();
+        p.sends.read();
         let now = Instant::now();
         let cap = p.frequency;
         while p.pending.front().is_some_and(|(_, at)| now.duration_since(*at) >= AFTER) {
@@ -259,12 +275,25 @@ pub(crate) fn frame() {
                 std::ptr::write_bytes(ptr, 0, n);
                 s
             };
+            if stamps.first().is_none_or(|&s| s == 0) || stamps.last().is_none_or(|&s| s == 0) {
+                p.unread[usize::from(!p.sent.contains(&o.block))] += 1;
+            }
+            p.sent.remove(&o.block);
             p.agg.add_list(ListStamps { stamps: &stamps, keys: &o.keys, draws: &o.draws }, cap);
             p.free.push(o.block);
         }
         if now.duration_since(p.since) >= EVERY {
             let names = &p.names;
-            let report = p.agg.report(TOP, p.frequency, &|k| names.get(k as usize).cloned().unwrap_or_default());
+            let mut report = p.agg.report(TOP, p.frequency, &|k| names.get(k as usize).cloned().unwrap_or_default());
+            let title_ms = p.agg.list_ticks as f64 * 1e3 / p.frequency.max(1) as f64 / p.agg.frames.max(1) as f64;
+            report.push_str(&format!(
+                "  GPU unread title lists: {} sent to the card (ran without stamps), {} never sent (recorded, closed, not executed)\n",
+                p.unread[0], p.unread[1]
+            ));
+            report.push_str(&sends::report(&p.sends.spans, p.agg.frames, title_ms, p.sends.untimed));
+            p.sends.spans.clear();
+            p.sends.untimed = 0;
+            p.unread = [0; 2];
             tracing::info!(untimed_lists = p.untimed, "{report}");
             p.agg = Agg::default();
             p.since = now;
@@ -283,4 +312,47 @@ pub(crate) fn name(p: &crate::pipeline::host::HostPipeline) -> String {
     };
     let stages: Vec<String> = p.stages.iter().map(|s| format!("{} {}", s.shader.stage, s.shader.hash)).collect();
     format!("{kind}: {}", stages.join(", "))
+}
+
+/// The title's lists in `lists` go to the card now (unread ones are then
+/// told apart from lists never sent).
+pub(crate) fn lists_sent(lists: &[Option<ID3D12CommandList>]) {
+    if !on() {
+        return;
+    }
+    with(|p| {
+        for l in lists.iter().flatten() {
+            if let Some(b) = p.closed.remove(&(l.as_raw() as usize)) {
+                p.sent.insert(b);
+            }
+        }
+    });
+}
+
+/// A submission of `kind` is about to go to `queue`: a stamp goes ahead.
+pub(crate) fn sending(queue: &ID3D12CommandQueue, kind: Kind) -> Option<Sending> {
+    if !on() {
+        return None;
+    }
+    with(|p| p.sends.sending(queue, kind)).flatten()
+}
+
+/// The submission went: a stamp goes behind it.
+pub(crate) fn sent(queue: &ID3D12CommandQueue, s: Option<Sending>) {
+    if let Some(s) = s {
+        with(|p| p.sends.sent(queue, s));
+    }
+}
+/// A stamp list to put among a submission's lists ahead of the part
+/// `kind` names, and the token for the one behind it.
+pub(crate) fn inline(queue: &ID3D12CommandQueue, kind: Kind) -> Option<(ID3D12CommandList, Sending)> {
+    if !on() {
+        return None;
+    }
+    with(|p| p.sends.inline(queue, kind)).flatten()
+}
+
+/// The stamp list behind that part.
+pub(crate) fn inline_end(s: Sending) -> Option<ID3D12CommandList> {
+    with(|p| p.sends.inline_end(s)).flatten()
 }

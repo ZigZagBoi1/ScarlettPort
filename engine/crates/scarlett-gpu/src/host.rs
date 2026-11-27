@@ -4417,7 +4417,9 @@ impl Host {
                         }
                     }
                     list.Close()?;
+                    let timed = crate::gpuprof::sending(&self.queue, crate::gpuprof::Kind::CardCopies);
                     self.queue.ExecuteCommandLists(&[Some(list.cast()?)]);
+                    crate::gpuprof::sent(&self.queue, timed);
                     Ok(())
                 })()
             };
@@ -4783,7 +4785,9 @@ impl Host {
                 // In the order of the queue: the sends of title bytes so
                 // far are ahead of this fetch, every later one behind it.
                 let order = QUEUE_ORDER.lock().unwrap_or_else(|e| e.into_inner());
+                let timed = crate::gpuprof::sending(&self.queue, crate::gpuprof::Kind::Fetch);
                 self.queue.ExecuteCommandLists(&lists);
+                crate::gpuprof::sent(&self.queue, timed);
                 let after = *order;
                 drop(order);
                 self.card_sent();
@@ -5082,7 +5086,9 @@ impl Host {
                         list.CopyBufferRegion(fetched, at, &plan.ranges[i].shadow.buffer, lo as u64, (hi - lo) as u64);
                     }
                     list.Close()?;
+                    let timed = crate::gpuprof::sending(&self.queue, crate::gpuprof::Kind::Fetch);
                     self.queue.ExecuteCommandLists(&[Some(list.cast()?)]);
+                    crate::gpuprof::sent(&self.queue, timed);
                     self.card_sent();
                     *submitted += 1;
                     self.queue.Signal(&self.fence, *submitted)?;
@@ -5679,6 +5685,21 @@ impl Host {
             }
             lists.push(list.list.cast().ok());
         }
+        // The profiler times the layer's card steps list on its own.
+        if own.is_some()
+            && let Some((ahead, token)) = crate::gpuprof::inline(&self.queue, crate::gpuprof::Kind::OwnSteps)
+        {
+            let end = firsts.get(1).copied().unwrap_or(lists.len());
+            let mut moved = 1;
+            if let Some(behind) = crate::gpuprof::inline_end(token) {
+                lists.insert(end, Some(behind));
+                moved += 1;
+            }
+            lists.insert(firsts[0], Some(ahead));
+            for f in firsts.iter_mut().skip(1) {
+                *f += moved;
+            }
+        }
         batch.fill();
         stage.next("submit: the last refreshes");
         crate::frametl::set(crate::frametl::PREP_SNAP);
@@ -5725,7 +5746,15 @@ impl Host {
             shadow.placed_copy(at, &bytes);
         }
         if let Some(check) = card.as_ref().and_then(|c| c.check.clone()) {
+            let timed = crate::gpuprof::inline(&self.queue, crate::gpuprof::Kind::Check);
+            let token = timed.map(|(ahead, token)| {
+                lists.push(Some(ahead));
+                token
+            });
             lists.push(Some(check));
+            if let Some(behind) = token.and_then(crate::gpuprof::inline_end) {
+                lists.push(Some(behind));
+            }
         }
         #[cfg(feature = "diagnostics")]
         split.part(4);
@@ -5762,10 +5791,13 @@ impl Host {
             // SAFETY: closed lists; the fence is ours.
             let signalled = unsafe {
                 let mut from = 0;
+                crate::gpuprof::lists_sent(&lists);
+                let timed = crate::gpuprof::sending(&self.queue, crate::gpuprof::Kind::Title);
                 for to in cuts.into_iter().chain([lists.len()]) {
                     self.queue.ExecuteCommandLists(&lists[from..to]);
                     from = to;
                 }
+                crate::gpuprof::sent(&self.queue, timed);
                 self.queue.Signal(&self.fence, *submitted)
             };
             awake::sent(&self.device);
@@ -5818,7 +5850,10 @@ impl Host {
             let started = std::time::Instant::now();
             // SAFETY: closed lists; the fence and event are ours.
             unsafe {
+                crate::gpuprof::lists_sent(group);
+                let timed = crate::gpuprof::sending(&self.queue, crate::gpuprof::Kind::Title);
                 self.queue.ExecuteCommandLists(group);
+                crate::gpuprof::sent(&self.queue, timed);
                 self.card_sent();
                 let waited = self
                     .queue

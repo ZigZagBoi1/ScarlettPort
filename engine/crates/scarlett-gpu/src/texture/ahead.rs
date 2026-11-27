@@ -273,7 +273,9 @@ impl Worker {
                 job.record(&self.list);
             }
             self.list.Close()?;
+            let timed = crate::gpuprof::sending(&self.queue, crate::gpuprof::Kind::TextureAhead);
             self.queue.ExecuteCommandLists(&[Some(self.list.cast()?)]);
+            crate::gpuprof::sent(&self.queue, timed);
             self.queue.Signal(&self.fence, value)?;
             // (Without an event: this waits.)
             self.fence.SetEventOnCompletion(value, windows::Win32::Foundation::HANDLE::default())?;
