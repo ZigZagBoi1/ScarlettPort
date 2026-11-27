@@ -473,10 +473,17 @@ fn world_split(job: &Job) -> Result<String, String> {
         log(&job.tx, msg);
     }
     let mut untranslated = 0;
+    let existing = engine::count_cached_shaders(&shader_dir(job));
+    if !st.warm && !path.exists() && existing >= engine::SHADERS_TOTAL * 3 / 4 {
+        st.warm = true;
+        st.save(&path);
+        p.done = existing.min(engine::SHADERS_TOTAL);
+        p.total = engine::SHADERS_TOTAL;
+        log(&job.tx, format!("Reusing {existing} existing cached shaders; skipping `scarlett shaders` and proceeding to pipeline warming."));
+    }
     if st.warm {
         log(&job.tx, "Shaders already translated for this engine build: skipping `scarlett shaders`.");
     } else {
-        let existing = engine::count_cached_shaders(&shader_dir(job));
         if existing > 0 {
             log(&job.tx, format!("Found {existing} existing cached shaders; verifying and translating only missing or invalidated shaders."));
         }
