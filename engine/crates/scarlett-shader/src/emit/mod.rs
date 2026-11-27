@@ -112,6 +112,8 @@ mod valu_tests;
 mod waterfall_tests;
 #[cfg(all(test, windows))]
 mod wave64_tests;
+#[cfg(all(test, windows))]
+mod wave64_lds_tests;
 mod wave;
 
 use crate::dxbc::{Container, FourCC};
@@ -120,7 +122,7 @@ use crate::{ShaderError, io, ir, resource, structure};
 
 pub use bitcode::census;
 pub use sampler::StaticSampler;
-pub use lower::{host_settings, set_host_max_wave, set_host_rdna, set_host_rdna4};
+pub use lower::{host_settings, set_host_max_wave, set_host_rdna, set_host_rdna4, wave64_lds};
 pub use rect::rect_list_gs;
 pub use shader::{
     MEMORY_FAULTS, MEMORY_PAGES, MEMORY_READ_ONLY, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_CONSTANTS, SLOT_FAULTS, SLOT_MEMORY, SLOT_STRIDES,
@@ -316,6 +318,9 @@ pub fn translation_fingerprint() -> Vec<u8> {
     out.extend_from_slice(&loop_limit().to_le_bytes());
     out.push(group_sync());
     out.extend_from_slice(&shader_opt().to_le_bytes());
+    if lower::wave64_lds() {
+        out.extend_from_slice(b"wave64 lds");
+    }
     out
 }
 
@@ -456,6 +461,7 @@ pub fn emit(
 ) -> Result<HostShader, ShaderError> {
     // (what an earlier program's lowering on this thread left behind)
     lower::take_needs();
+    lower::take_lds_region();
     let original = emit_program(c, native, p, st, io, res);
     // A console wave64 compute program on a host of 32-lane waves that
     // still needs 64 lanes, or whose cross-lane code sits where not every
@@ -565,6 +571,9 @@ pub fn emit(
                     | [0x24, 0x31, 0xbb, 0xe7, 0xdc, 0x15, 0x4a, 0xd7, 0x59, 0xd2, 0x0b, 0xc9, 0x54, 0x82, 0x9c, 0x1c]
             );
         let wide_on = wide_option.as_ref().map_or(scene_kernel, |v| v == "1");
+        // `SCARLETT_WAVE64_LDS` (on unless `0`): on for a program kept at 64 lanes by LDS read
+        // and written in one lane-branch region ([`lower::wave64_lds`])
+        let wide_on = wide_on || lower::wave64_lds() && lower::take_lds_region();
         // A single guest wave can iterate an active-lane loop until both host
         // halves have finished. The precise latch and convergence conditions
         // for the driver compute route are checked by widen().
@@ -721,6 +730,9 @@ fn widen(
         // (a program whose waves are the host's meets no one: no barrier, any group)
         crate::native::StageIo::Cs(_) if !(native.wave64 && lower::host_max_wave() == 32) => {}
         crate::native::StageIo::Cs(cs) if cs.threads.iter().product::<u32>() == 64 => {}
+        // (`SCARLETT_WAVE64_LDS`, on unless `0`: the halves of each console wave meet on their own, so
+        // the console waves of a group may decide differently)
+        crate::native::StageIo::Cs(cs) if lower::wave64_lds() && cs.threads.iter().product::<u32>() % 64 == 0 => {}
         crate::native::StageIo::Cs(cs) => {
             if why {
                 eprintln!("WAVE64-WIDE not tried: thread groups of {:?}", cs.threads);

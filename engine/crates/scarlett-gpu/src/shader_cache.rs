@@ -83,6 +83,10 @@ fn build() -> [u8; 32] {
             }
             bytes.push(0);
         }
+        // Whether LDS-sharing wave64 programs are made for 32-lane hosts
+        // (`SCARLETT_WAVE64_LDS`, on unless `0`).
+        bytes.extend_from_slice(b"wave64 lds=");
+        bytes.push(scarlett_shader::emit::wave64_lds() as u8);
         // And which clean-up passes ran over the translated code.
         bytes.extend_from_slice(&scarlett_shader::emit::shader_opt().to_le_bytes());
         bytes

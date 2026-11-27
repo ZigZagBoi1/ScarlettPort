@@ -228,6 +228,9 @@ pub(crate) struct Module {
     tags: HashMap<u32, Tag>,
     /// Instructions the clean-up passes leave as they are ([`Module::keep_since`]).
     pub(crate) kept: std::collections::HashSet<u32>,
+    /// Blocks split by [`Module::split_head`]: the block that now holds the start of each,
+    /// which later branches to it and phis at its top go to.
+    heads: HashMap<usize, usize>,
 }
 
 impl Module {
@@ -464,6 +467,7 @@ impl Module {
     }
     /// A phi at the top of `block`; incoming values come with [`Module::set_phi`].
     pub fn phi(&mut self, block: usize, ty: Ty) -> V {
+        let block = self.heads.get(&block).copied().unwrap_or(block);
         let i = self.insts.len() as u32;
         self.insts.push(Inst {
             ty,
@@ -511,6 +515,47 @@ impl Module {
         self.insts[i as usize].op = Op::Phi(incoming);
     }
     pub fn terminate(&mut self, block: usize, t: Term) {
+        let head = |b: usize| self.heads.get(&b).copied().unwrap_or(b);
+        let t = match t {
+            Term::Br(b) => Term::Br(head(b)),
+            Term::CondBr(c, x, y) => Term::CondBr(c, head(x), head(y)),
+            Term::Ret => Term::Ret,
+        };
+        self.blocks[block].term = Some(t);
+    }
+
+    /// Splits `block` where it now ends: what it holds so far (phis and body) moves to a new
+    /// block, returned, which every branch to `block` – those made already and those made
+    /// later – reaches instead, as do phis made later for its top. `block` keeps its
+    /// terminator and whatever is added to it from now on, and so stays the block its
+    /// successors' phis name; code put between the two parts must end the new block with
+    /// [`Self::terminate_exact`] into `block`. (The entry block is not split.)
+    pub fn split_head(&mut self, block: usize) -> usize {
+        let head = self.new_block();
+        let (phis, body) = {
+            let b = &mut self.blocks[block];
+            (std::mem::take(&mut b.phis), std::mem::take(&mut b.body))
+        };
+        self.blocks[head].phis = phis;
+        self.blocks[head].body = body;
+        let to = |b: usize| if b == block { head } else { b };
+        for (n, b) in self.blocks.iter_mut().enumerate() {
+            if n == head {
+                continue;
+            }
+            b.term = match b.term {
+                Some(Term::Br(x)) => Some(Term::Br(to(x))),
+                Some(Term::CondBr(c, x, y)) => Some(Term::CondBr(c, to(x), to(y))),
+                t => t,
+            };
+        }
+        // (a block split again: its start is still where the first split put it)
+        self.heads.entry(block).or_insert(head);
+        head
+    }
+
+    /// [`Self::terminate`] without following splits: a branch to the later part itself.
+    pub fn terminate_exact(&mut self, block: usize, t: Term) {
         self.blocks[block].term = Some(t);
     }
 
