@@ -53,6 +53,33 @@ pub fn run(
     // A title that relaunched itself: the old process must be gone first.
     scarlett_hle::modules::lifecycle::wait_for_previous();
     let cfg = scarlett_core::Config::load()?;
+    // DLSS (`SCARLETT_DLSS=1`): Streamline is loaded before anything of the
+    // title or the host GPU, and fails soft; only if it offers DLSS does the
+    // title render through its FidelityFX path at the mode's scale
+    // (`scarlett_loader::resolution`), whose upscalings DLSS takes over
+    // (`scarlett_hle::modules::fidelityfx`).
+    let mut asked = scarlett_hle::streamline::Asked::from_env().map_err(anyhow::Error::msg)?;
+    if asked.dlss && asked.dir.is_none() {
+        asked.dir = Some(cfg.data_dir.join("streamline").join("bin").join("x64"));
+    }
+    let available = scarlett_hle::streamline::init(&asked);
+    if asked.dlss {
+        println!(
+            "upscaling      DLSS {}",
+            if available.dlss {
+                format!("on, scene at the {} scale ({})", asked.mode.name(), asked.mode.scale())
+            } else {
+                "asked, not available (see the log): the usual upscaler runs".to_owned()
+            }
+        );
+    }
+    if available.dlss {
+        // SAFETY: nothing else runs yet; the resolution patches read these later.
+        unsafe {
+            std::env::set_var("SCARLETT_UPSCALER", "7");
+            std::env::set_var("SCARLETT_RENDER_SCALE", format!("{}", asked.mode.scale()));
+        }
+    }
     let original = std::fs::read(exe).with_context(|| format!("reading {}", exe.display()))?;
     let prepared = scarlett_loader::prepare(&original)?;
     let hash = prepared.original_hash.to_hex();
@@ -178,7 +205,10 @@ pub fn run(
         show(name, dll.bind_imports(&with_dlls, policy)?);
     }
     let exe_name = exe.file_name().unwrap_or_default().to_string_lossy();
-    show(&exe_name, image.bind_imports(&with_dlls, policy)?);
+    // The title's FidelityFX calls go through ours when DLSS is on (bound as
+    // before otherwise).
+    let interposed = scarlett_hle::modules::fidelityfx::Interpose { inner: &with_dlls };
+    show(&exe_name, image.bind_imports(&interposed, policy)?);
     if execute {
         let size = image.info().size_of_image as usize;
         // SAFETY: the image stays mapped, and nothing of it has run yet.
