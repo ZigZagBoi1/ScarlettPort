@@ -124,8 +124,13 @@ static CURSOR_LOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// cursor should be hidden inside the client area.
 #[cfg(windows)]
 pub(crate) fn cursor_locked() -> bool {
-    CURSOR_LOCKED.load(Ordering::Relaxed)
+    CURSOR_LOCKED.load(Ordering::Relaxed) || LOOK_ACTIVE.load(Ordering::Relaxed)
 }
+
+/// Set while the plain mouse look (`SCARLETT_MOUSE_LOOK`) pins the pointer to
+/// the window's middle each poll; the pointer is hidden then too.
+#[cfg(windows)]
+static LOOK_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Parses an opt-in boolean environment variable (`1`, `true`, `yes`, `on`,
 /// ignoring surrounding whitespace and ASCII case).
@@ -1605,8 +1610,12 @@ mod host {
             let sensitivity = mouse_look_sensitivity();
             if sensitivity <= 0.0 || !focused() {
                 self.look = (0.0, 0.0);
+                LOOK_ACTIVE.store(false, Ordering::Relaxed);
                 return None;
             }
+            // The warp below moves the pointer, so the window gets a
+            // WM_SETCURSOR and `lifecycle` hides it.
+            LOOK_ACTIVE.store(true, Ordering::Relaxed);
             let mut at = POINT { x: 0, y: 0 };
             let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
             // SAFETY: plain queries into locals; the window is ours (focused).
