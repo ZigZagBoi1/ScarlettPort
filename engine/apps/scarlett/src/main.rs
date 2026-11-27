@@ -214,7 +214,6 @@ fn parse_jobs(value: &str) -> Result<usize, &'static str> {
 
 fn main() -> Result<()> {
     scarlett_core::env::alias_scarlett();
-    scarlett_core::config::migrate_legacy_data();
     scarlett_core::logging::init("info");
     // The audio recorder `run` starts for `SCARLETT_AUDIO_CAPTURE`.
     #[cfg(all(windows, feature = "diagnostics"))]

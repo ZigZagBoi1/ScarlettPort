@@ -111,12 +111,12 @@ impl Config {
 
     /// Returns `<cache>/<sub>`, creating it, after checking the asset policy.
     pub fn cache_subdir(&self, sub: &str) -> Result<PathBuf> {
-        subdir(&self.cache_dir, sub)
+        subdir(&self.cache_dir, "cache", sub)
     }
 
     /// Returns `<data>/<sub>`, creating it, after checking the asset policy.
     pub fn data_subdir(&self, sub: &str) -> Result<PathBuf> {
-        subdir(&self.data_dir, sub)
+        subdir(&self.data_dir, "data", sub)
     }
 }
 
@@ -128,9 +128,10 @@ fn explicit_config_path(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Opt
         .map(PathBuf::from)
 }
 
-fn subdir(root: &Path, sub: &str) -> Result<PathBuf> {
+fn subdir(root: &Path, store: &str, sub: &str) -> Result<PathBuf> {
     let dir = root.join(sub);
     ensure_outside_repo(&dir)?;
+    migrate_legacy_store(root, store)?;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     Ok(dir)
 }
@@ -142,49 +143,38 @@ fn default_dir(name: &str) -> Result<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .context("cannot determine a user directory; set SCARLETT_CACHE_DIR and SCARLETT_DATA_DIR")?;
-    migrate_legacy_data();
     Ok(base.join("ScarlettPort").join(name))
 }
 
 /// The data folder's former name under `%LOCALAPPDATA%`.
 const LEGACY_DATA_DIR: &str = "victory"; // rename:keep
 
-/// On first start: whatever the former folder under `%LOCALAPPDATA%` holds
-/// (saves, caches, settings) and `%LOCALAPPDATA%\ScarlettPort` does not yet
-/// is moved over (copied when it cannot be moved). The launcher keeps its
-/// own files in the same folder, so this goes entry by entry.
-pub fn migrate_legacy_data() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let Some(base) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) else {
-            return;
-        };
-        let root = base.join("ScarlettPort");
-        let old = base.join(LEGACY_DATA_DIR);
-        let Ok(entries) = std::fs::read_dir(&old) else {
-            return;
-        };
-        if std::fs::create_dir_all(&root).is_err() {
-            return;
+/// Migrate only the default store a caller is about to use. Resolving paths
+/// alone must not touch another runtime's files.
+fn migrate_legacy_store(root: &Path, store: &str) -> Result<()> {
+    let Some(base) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) else {
+        return Ok(());
+    };
+    let destination = base.join("ScarlettPort");
+    if root != destination.join(store) || root.exists() {
+        return Ok(());
+    }
+    // Different subdirectories can be opened concurrently at startup.
+    static MIGRATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = MIGRATION.lock().unwrap_or_else(|e| e.into_inner());
+    let old = base.join(LEGACY_DATA_DIR).join(store);
+    if root.exists() || !old.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&destination).with_context(|| format!("creating {}", destination.display()))?;
+    if let Err(error) = std::fs::rename(&old, root) {
+        if error.kind() != std::io::ErrorKind::CrossesDevices {
+            return Err(error).with_context(|| format!("moving {} to {}", old.display(), root.display()));
         }
-        for entry in entries.flatten() {
-            let target = root.join(entry.file_name());
-            if target.exists() {
-                continue;
-            }
-            if std::fs::rename(entry.path(), &target).is_err() {
-                let copied = if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                    copy_tree(&entry.path(), &target)
-                } else {
-                    std::fs::copy(entry.path(), &target).map(|_| ())
-                };
-                if let Err(e) = copied {
-                    eprintln!("ScarlettPort: copying {} to {}: {e}", entry.path().display(), target.display());
-                }
-            }
-        }
-        let _ = std::fs::remove_dir(&old);
-    });
+        // This preserves the legacy store when it resides on another volume.
+        copy_tree(&old, root).with_context(|| format!("copying {} to {}", old.display(), root.display()))?;
+    }
+    Ok(())
 }
 
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
