@@ -92,6 +92,61 @@ fn ask(what: &str, from: u32) {
     }
 }
 
+/// Whether the threads the submitting thread waits for run at its priority
+/// (`SCARLETT_HELPER_PRIORITY=1`; off by default, `SCARLETT_AB` can flip it
+/// while the title runs): above normal, ahead of the title's threads and of
+/// the threads that translate lists. They are the threads that spread its
+/// work (`shadow::wide`, the pools of `land`), the one that makes the heaps'
+/// records and the one that passes over the heap's views beside the lists.
+///
+/// On a six-core processor the title's threads and the translating lists can
+/// keep every core busy while the submitting thread (above normal) waits for
+/// helpers at normal priority that are not running. Measured upstream in one
+/// run on an i5-12400F with an RTX 3060 (off / on): 8.6 / 9.6 fps, heap
+/// records waited for 6.2 / 2.5 ms a frame, the card idle behind the
+/// submitting thread 24.7 / 13.2 ms. Not yet measured here, so off.
+fn helpers_raised() -> bool {
+    #[cfg(feature = "diagnostics")]
+    if let Some(bit) = crate::ab::bit("SCARLETT_HELPER_PRIORITY") {
+        return crate::ab::on(bit);
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::switch::on("SCARLETT_HELPER_PRIORITY"))
+}
+
+/// A helper's priority ([`helpers_raised`]). [`Self::keep`] is called before
+/// each piece of work; it asks the system only when the switch has changed.
+pub(crate) struct Priority {
+    applied: Option<bool>,
+}
+
+impl Priority {
+    pub(crate) fn new() -> Self {
+        let mut priority = Self { applied: None };
+        priority.keep();
+        priority
+    }
+
+    pub(crate) fn keep(&mut self) {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL, THREAD_PRIORITY_NORMAL,
+        };
+        let on = helpers_raised();
+        if self.applied == Some(on) {
+            return;
+        }
+        // Never touched while off: the thread keeps the priority it was made with.
+        if self.applied.is_none() && !on {
+            self.applied = Some(false);
+            return;
+        }
+        let priority = if on { THREAD_PRIORITY_ABOVE_NORMAL } else { THREAD_PRIORITY_NORMAL };
+        // SAFETY: our own thread.
+        unsafe { SetThreadPriority(GetCurrentThread(), priority) };
+        self.applied = Some(on);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
