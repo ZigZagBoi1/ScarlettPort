@@ -664,7 +664,8 @@ impl Launcher {
     /// Gathers the hardware report and opens a prefilled GitHub issue (or copies it).
     pub fn hardware_report(&mut self, ctx: &egui::Context) {
         let sys = report::system();
-        let lines: Vec<String> = self.logs.iter().map(|(t, _)| t.clone()).collect();
+        // A launcher opened after the run has no live log: the last run's log then (#170).
+        let lines: Vec<String> = if self.logs.is_empty() { self.last_log.clone() } else { self.logs.iter().map(|(t, _)| t.clone()).collect() };
         let tail = lines[lines.len().saturating_sub(200)..].join("\n");
         let folders = [(self.config.game_path.as_str(), "<game>"), (self.config.cache_dir.as_str(), "<cache>")];
         let engine = if self.world_selected() { format!("World engine (ScarlettPort runtime), {}", self.world_hash.as_deref().map(|h| &h[..12]).unwrap_or("?")) } else { format!("Classic engine (XCL), {}", self.runtime_hash.as_deref().map(|h| &h[..12]).unwrap_or("?")) };
@@ -675,7 +676,7 @@ impl Launcher {
             ("driver", sys.driver.clone()),
             ("system", format!("{}; {} GB RAM; {}", sys.cpu, sys.ram_gb, sys.os)),
             ("runtime", format!("Launcher v{VERSION}; {engine}{build}; {} preset", presets::label(&self.config.preset))),
-            ("fps", report::fps_summary(&lines)),
+            ("fps", report::fps_summary_or(&lines, || perf::last_log().map(|p| perf::tail(&p, 200_000)).unwrap_or_default())),
         ];
         for f in &mut fields {
             f.1 = report::scrub(&f.1, &folders);

@@ -128,9 +128,21 @@ fn replace_ci(text: &str, from: &str, to: &str) -> String {
     out
 }
 
+const NO_FPS: &str = "No frame-rate lines in this session's log.";
+
+/// [`fps_summary`] of `logs`, else of `fallback()` (the last run's whole log file): the live log
+/// keeps only its newest lines, and a launcher opened after the run has none (#170).
+pub fn fps_summary_or(logs: &[String], fallback: impl FnOnce() -> Vec<String>) -> String {
+    let s = fps_summary(logs);
+    if s != NO_FPS {
+        return s;
+    }
+    fps_summary(&fallback())
+}
+
 /// The last run's frame-rate summary from the log: the fps lines and any p99 / freeze lines.
 pub fn fps_summary(logs: &[String]) -> String {
-    let fps: Vec<f32> = logs.iter().filter_map(|l| crate::engine::parse_fps(l)).filter(|f| *f > 0.).collect();
+    let fps: Vec<f32> = logs.iter().filter_map(|l| crate::engine::parse_fps(&crate::perf::strip_ansi(l))).filter(|f| *f > 0.).collect();
     let mut out = Vec::new();
     if !fps.is_empty() {
         let avg = fps.iter().sum::<f32>() / fps.len() as f32;
@@ -145,7 +157,7 @@ pub fn fps_summary(logs: &[String]) -> String {
     {
         out.push(l.clone());
     }
-    if out.is_empty() { "No frame-rate lines in this session's log.".into() } else { out.join("\n") }
+    if out.is_empty() { NO_FPS.into() } else { out.join("\n") }
 }
 
 pub fn percent_encode(s: &str) -> String {
@@ -244,6 +256,17 @@ mod tests {
         let logs = vec!["D3D12.X: 600 frames presented, 4.0 fps over the last 300".to_string(), "frame p99 410 ms".into(), "x".into()];
         let s = fps_summary(&logs);
         assert!(s.contains("average 4.0") && s.contains("p99"));
+    }
+
+    #[test]
+    fn summary_reads_the_runtime_interval_lines() {
+        // The runtime's own interval line, with tracing's colours, as the run log holds it.
+        let line = "\u{1b}[2m2026-11-27T19:41:04.715093Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2mscarlett_gpu::host\u{1b}[0m\u{1b}[2m:\u{1b}[0m 19.6 fps, 51.0 ms/frame (3.1 preparing: copies 0.4 ms), 2210 draws/frame".to_string();
+        assert!(fps_summary(std::slice::from_ref(&line)).contains("average 19.6"));
+        // Nothing in the live log (#170): the last run's log file is read instead.
+        let s = fps_summary_or(&[], || vec![line.clone()]);
+        assert!(s.contains("1 fps samples") && s.contains("19.6"), "{s}");
+        assert_eq!(fps_summary_or(&[], Vec::new), NO_FPS);
     }
 
     #[test]
