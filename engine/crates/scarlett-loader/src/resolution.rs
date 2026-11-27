@@ -81,14 +81,51 @@ pub fn parse_render_scale(spec: &str) -> Option<f32> {
     spec.trim().parse::<f32>().ok().filter(|s| (0.5..=1.0).contains(s))
 }
 
-/// `SCARLETT_UPSCALER=<kind>`: 6 (the title's own) or 7 (FidelityFX).
+/// `SCARLETT_UPSCALER=<kind>`: 6 (the title's own) or 7 (FidelityFX), also
+/// spelled `title`/`own` and `fsr` (the launcher's names). `None` if unset
+/// or not one of them (said why).
 pub fn asked_upscaler() -> Option<u32> {
     let spec = var("UPSCALER")?;
-    let kind = spec.trim().parse::<u32>().ok().filter(|k| matches!(k, 6 | 7));
+    let kind = parse_upscaler(&spec);
     if kind.is_none() {
-        eprintln!("ScarlettPort: SCARLETT_UPSCALER={spec}: expected 6 (the title's own) or 7 (FidelityFX)");
+        eprintln!("ScarlettPort: SCARLETT_UPSCALER={spec}: expected 6 or title (the title's own) or 7 or fsr (FidelityFX)");
     }
     kind
+}
+
+pub fn parse_upscaler(spec: &str) -> Option<u32> {
+    match spec.trim().to_ascii_lowercase().as_str() {
+        "6" | "title" | "own" => Some(6),
+        "7" | "fsr" | "fidelityfx" => Some(7),
+        _ => None,
+    }
+}
+
+/// The upscaler the picker is made to return, and why.
+///
+/// By default the title's own (6). On the Series S profile (the launcher's)
+/// the title picks FidelityFX (7), which loads the console's AMD upscaler
+/// DLL; when that DLL is refused or missing the upscaler never produces an
+/// output and the world stays black, and its 29 pipelines come in through a
+/// creation method we do not have. `SCARLETT_OWN_UPSCALER=0` leaves the
+/// title's choice alone; FidelityFX asked for without its DLL in the game's
+/// folder falls back to the title's own.
+pub fn chosen_upscaler(fsr_dll_present: impl FnOnce() -> bool) -> (Option<u32>, &'static str) {
+    match asked_upscaler() {
+        Some(7) if !fsr_dll_present() => (Some(6), "FidelityFX asked for, its DLL is not in the game folder: the title's own"),
+        Some(kind) => (Some(kind), "asked for"),
+        None if var("OWN_UPSCALER").is_some_and(|v| v.trim() == "0") => (None, "the title's choice (SCARLETT_OWN_UPSCALER=0)"),
+        None => (Some(6), "default: the title's own"),
+    }
+}
+
+/// Whether the game folder (`SCARLETT_GAME_DIR`) holds the AMD upscaler DLL.
+/// Without a known folder it is taken to be there.
+fn fsr_dll_in_game_dir() -> bool {
+    let Some(dir) = var("GAME_DIR") else { return true };
+    std::fs::read_dir(dir).map_or(true, |entries| {
+        entries.flatten().any(|e| e.file_name().to_string_lossy().to_ascii_lowercase().starts_with("amd_fidelityfx_upscaler"))
+    })
 }
 
 /// A place to change: its offset in the image and the bytes there
@@ -279,8 +316,10 @@ pub unsafe fn apply_asked(base: usize, size: usize) {
         asked.push((&OWN_SCALE, own_scale_code(s), format!("{s}")));
         asked.push((&FFX_SCALE, ffx_scale_code(s), format!("{s}")));
     }
-    if let Some(kind) = asked_upscaler() {
-        asked.push((&PICKER, picker_code(kind), format!("returns {kind}")));
+    let (kind, why) = chosen_upscaler(fsr_dll_in_game_dir);
+    match kind {
+        Some(kind) => asked.push((&PICKER, picker_code(kind), format!("returns {kind}, {why}"))),
+        None => tracing::info!(why, "upscaler picker left alone"),
     }
     for (site, code, value) in asked {
         // SAFETY: the caller's promise.
@@ -310,6 +349,11 @@ mod tests {
         assert_eq!(parse_render_scale("1"), Some(1.0));
         assert_eq!(parse_render_scale("0.4"), None);
         assert_eq!(parse_render_scale("1.5"), None);
+        assert_eq!(parse_upscaler("6"), Some(6));
+        assert_eq!(parse_upscaler(" Title "), Some(6));
+        assert_eq!(parse_upscaler("fsr"), Some(7));
+        assert_eq!(parse_upscaler("7"), Some(7));
+        assert_eq!(parse_upscaler("stretch"), None);
     }
 
     /// The calls and loads in the bytes compared are the ones the

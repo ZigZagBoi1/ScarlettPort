@@ -9026,7 +9026,12 @@ impl Meter {
             self.caption = Some(buffer);
         }
         let Some(caption) = &self.caption else { return };
-        let text = format!(" | ScarlettPort {fps:.0} fps {ms:.1} ms/frame {draws:.0} draws/frame");
+        // "<window text> | ScarlettPort | N fps M ms/frame D draws/frame"; the
+        // name is left out when the window text already carries it. Scripts
+        // read `N fps M ms/frame D draws`, so that part keeps its shape.
+        let named = String::from_utf16_lossy(caption).contains("ScarlettPort");
+        let brand = if named { "" } else { " | ScarlettPort" };
+        let text = format!("{brand} | {fps:.0} fps {ms:.1} ms/frame {draws:.0} draws/frame");
         let mut text: Vec<u16> = caption.iter().copied().chain(text.encode_utf16()).collect();
         text.push(0);
         // Setting the text waits for the window's thread (a title thread,

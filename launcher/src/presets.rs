@@ -104,7 +104,7 @@ pub const EXPERIMENTAL_OFF: [(&str, &str); 6] = [
 /// Switches the launcher can set that the bundled runtime (engine/ in this repository) does not
 /// read: they matter only to a local build that has them (Settings, Runtime). Kept exact by the
 /// `bundled_runtime_reads_every_other_switch` test, which reads the engine's sources.
-pub const NOT_IN_BUNDLED: [&str; 32] = [
+pub const NOT_IN_BUNDLED: [&str; 31] = [
     // C1 and play.ps1's fixed settings (fx- builds)
     "SCARLETT_PRECOMPILED_GRAPHICS",
     "SCARLETT_READFIX",
@@ -115,7 +115,6 @@ pub const NOT_IN_BUNDLED: [&str; 32] = [
     "SCARLETT_PREP_BARRIERS",
     "SCARLETT_PREP_TABLES",
     "SCARLETT_PREP_REUSE",
-    "SCARLETT_OWN_UPSCALER",
     "SCARLETT_NO_WATCHDOG",
     "SCARLETT_SYNC_PRECISE",
     "SCARLETT_READ_SETTLE_PRECISE",

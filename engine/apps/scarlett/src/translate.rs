@@ -404,43 +404,48 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
     let seen = Mutex::new(HashSet::new());
     let done = AtomicUsize::new(0);
     let failed = Mutex::new(BTreeMap::<String, (usize, String)>::new());
-    for root in &paths {
-        for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
-            if !entry.file_type().is_file() || entry.metadata().map_or(0, |m| m.len()) > MAX_FILE {
-                continue;
-            }
-            let Ok(data) = std::fs::read(entry.path()) else {
-                continue;
-            };
-            let jobs = sources(&data);
-            let next = AtomicUsize::new(0);
-            std::thread::scope(|s| {
-                for _ in 0..threads.min(jobs.len()) {
-                    s.spawn(|| {
-                        while let Some(job) = jobs.get(next.fetch_add(1, Ordering::Relaxed)) {
-                            let Some(bytes) = job.bytes() else { continue };
-                            let hash = blake3::hash(&bytes);
-                            if !lock(&seen).insert(hash) {
-                                continue;
-                            }
-                            match scarlett_hle::modules::d3d12x::precompile(&bytes) {
-                                Ok(_) => {
-                                    let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                                    if n.is_multiple_of(1000) {
-                                        println!("{n} shaders in the cache, {:.0} s", started.elapsed().as_secs_f64());
+    let progress = Progress::new(started);
+    std::thread::scope(|outer| {
+        // A line at least once a second, also while a large file is read
+        // and nothing is translated yet, so a launcher can tell it works.
+        outer.spawn(|| progress.tick(|| done.load(Ordering::Relaxed)));
+        for root in &paths {
+            for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
+                if !entry.file_type().is_file() || entry.metadata().map_or(0, |m| m.len()) > MAX_FILE {
+                    continue;
+                }
+                let Ok(data) = std::fs::read(entry.path()) else {
+                    continue;
+                };
+                let jobs = sources(&data);
+                let next = AtomicUsize::new(0);
+                std::thread::scope(|s| {
+                    for _ in 0..threads.min(jobs.len()) {
+                        s.spawn(|| {
+                            while let Some(job) = jobs.get(next.fetch_add(1, Ordering::Relaxed)) {
+                                let Some(bytes) = job.bytes() else { continue };
+                                let hash = blake3::hash(&bytes);
+                                if !lock(&seen).insert(hash) {
+                                    continue;
+                                }
+                                match scarlett_hle::modules::d3d12x::precompile(&bytes) {
+                                    Ok(_) => {
+                                        let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                                        progress.count(n);
+                                    }
+                                    Err(why) => {
+                                        let mut failed = lock(&failed);
+                                        failed.entry(why).or_insert_with(|| (0, hash.to_hex()[..16].to_owned())).0 += 1;
                                     }
                                 }
-                                Err(why) => {
-                                    let mut failed = lock(&failed);
-                                    failed.entry(why).or_insert_with(|| (0, hash.to_hex()[..16].to_owned())).0 += 1;
-                                }
                             }
-                        }
-                    });
-                }
-            });
+                        });
+                    }
+                });
+            }
         }
-    }
+        progress.stop();
+    });
     let failed = failed.into_inner().unwrap_or_else(|e| e.into_inner());
     println!(
         "{} shaders in the cache, {} do not translate, {:.0} s",
@@ -959,5 +964,84 @@ mod tests {
             ),
             "{err}"
         );
+    }
+}
+
+/// Progress of `scarlett shaders` (and `prepare`'s first step): the line
+/// `<n> shaders in the cache, <s> s` (what the launcher parses) every
+/// [`Progress::EVERY`] shaders and at least once a second.
+struct Progress {
+    started: std::time::Instant,
+    /// Milliseconds since `started` of the last line.
+    last: std::sync::atomic::AtomicU64,
+    printed: AtomicUsize,
+    stopped: std::sync::atomic::AtomicBool,
+}
+
+impl Progress {
+    const EVERY: usize = 100;
+    const MAX_QUIET_MS: u64 = 1000;
+
+    fn new(started: std::time::Instant) -> Self {
+        Self {
+            started,
+            last: std::sync::atomic::AtomicU64::new(0),
+            printed: AtomicUsize::new(0),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
+    }
+
+    fn line(&self, n: usize) {
+        use std::io::Write;
+        self.last.store(self.now_ms(), Ordering::Relaxed);
+        // Never a smaller count after a larger one (threads race to print).
+        let n = self.printed.fetch_max(n, Ordering::Relaxed).max(n);
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{n} shaders in the cache, {:.0} s", self.started.elapsed().as_secs_f64());
+        let _ = out.flush();
+    }
+
+    /// A shader done, `n` in all.
+    fn count(&self, n: usize) {
+        if due(n, self.now_ms(), self.last.load(Ordering::Relaxed)) {
+            self.line(n);
+        }
+    }
+
+    /// Until [`Progress::stop`]: a line whenever a second went by without one.
+    fn tick(&self, done: impl Fn() -> usize) {
+        while !self.stopped.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if self.now_ms().saturating_sub(self.last.load(Ordering::Relaxed)) >= Self::MAX_QUIET_MS {
+                self.line(done().max(self.printed.load(Ordering::Relaxed)));
+            }
+        }
+    }
+
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Whether the `n`th shader, at `now` ms with the last line at `last` ms,
+/// gets a line.
+fn due(n: usize, now: u64, last: u64) -> bool {
+    n.is_multiple_of(Progress::EVERY) || now.saturating_sub(last) >= Progress::MAX_QUIET_MS
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::due;
+
+    #[test]
+    fn a_line_every_hundred_or_every_second() {
+        assert!(due(100, 10, 5));
+        assert!(due(2_000, 10, 5));
+        assert!(!due(101, 500, 0));
+        assert!(due(101, 1_000, 0));
     }
 }

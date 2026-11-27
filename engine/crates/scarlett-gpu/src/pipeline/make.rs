@@ -198,7 +198,11 @@ fn wait_budget() -> Duration {
         let millis = std::env::var("SCARLETT_PIPELINE_WAIT_MS")
             .ok()
             .and_then(|value| value.trim().parse::<u64>().ok())
-            .unwrap_or(500);
+            // 0 by default: a draw whose pipeline is still being made is
+            // left out of that frame instead of holding it up to 500 ms (a
+            // first run then stood at ~1 fps, ~780 ms a frame, while the
+            // title's pipelines were made). What every lit test run used.
+            .unwrap_or(0);
         tracing::info!(millis, "host pipeline wait budget per frame");
         Duration::from_millis(millis)
     })

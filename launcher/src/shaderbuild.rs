@@ -272,13 +272,13 @@ fn world(job: &Job) -> Result<String, String> {
         base(&mut cmd);
         cmd.args(engine::warm_args(&job.game, p.jobs));
         log(&job.tx, format!("> scarlett warm \"{}\" --jobs {}  (phase 1 of {phases}: translate every shader, about 3 min; already translated ones are read from the cache)", job.game.display(), p.jobs));
-        p.current = "translating (the engine reports every 2,000 shaders)".into();
+        p.current = "translating (the engine reports at least once a second)".into();
         send(job, &p);
         let mut tick = Instant::now();
         let out = run(cmd, job, None, |l| {
             if let Some(n) = engine::parse_warm(l) {
                 p.done = n.min(p.total);
-                p.current = format!("translating shaders {}–{}", n, (n + 2000).min(p.total));
+                p.current = format!("translating shaders {}–{}", n, (n + 100).min(p.total));
                 p.current_since = Instant::now();
             }
             if let Some((t, r)) = engine::parse_warm_end(l) {
@@ -416,7 +416,7 @@ fn world_split(job: &Job) -> Result<String, String> {
                 p.name = "Translating shaders";
                 p.done = n;
                 p.total = p.total.max(n);
-                p.current = format!("translating shaders {}–{}", n, (n + 1000).min(p.total));
+                p.current = format!("translating shaders {}–{}", n, (n + 100).min(p.total));
                 p.current_since = Instant::now();
             }
             if let Some(f) = engine::parse_shaders_failed(l) {

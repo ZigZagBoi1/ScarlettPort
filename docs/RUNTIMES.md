@@ -33,8 +33,8 @@ Every switch is a `SCARLETT_*` environment variable. The full list is in the sou
 | Variable | Effect |
 |---|---|
 | `SCARLETT_GAME_DIR` | the dump folder (required) |
-| `SCARLETT_OWN_UPSCALER=1` | ask for the title's own upscaler instead of FSR on the Series S profile. Set by `play-scarlett.ps1`; read by the source vendored here (`crates/scarlett-loader/src/hooks.rs`) |
-| `SCARLETT_NO_WATCHDOG=1` | disarm the title's stall watchdog so it can wait for slow first-run shader builds. Set by `play-scarlett.ps1` |
+| `SCARLETT_UPSCALER=<6\|title\|7\|fsr>` | the upscaler the title uses. Default: the title's own (6), also on the Series S profile, where the title would pick FSR; FSR asked for without `amd_fidelityfx_upscaler*` in the game folder falls back to the title's own. `SCARLETT_OWN_UPSCALER=0` leaves the title's choice alone (`crates/scarlett-loader/src/resolution.rs`) |
+| `SCARLETT_NO_WATCHDOG=1` | set by `play-scarlett.ps1` and the launcher; `scarlett.exe` does not read it (the vendored runtime's `XCL_NO_WATCHDOG` is its counterpart) |
 | `SCARLETT_FAST_BOOT=1` | testing only: press through logos and menus, stop once in the world |
 | `SCARLETT_SAVE_SLOT=<name>` | pick a save slot |
 | `SCARLETT_AUTO_INPUT=1` | press A on a timer |
@@ -45,7 +45,7 @@ Every switch is a `SCARLETT_*` environment variable. The full list is in the sou
 | `SCARLETT_SYNC_PRECISE=1` | a submission waits only for the submissions it depends on. Set by `play-scarlett.ps1` |
 | `SCARLETT_READ_SETTLE_PRECISE=1` | read-backs settle on the exact submissions they need (needs the relay). Set by `play-scarlett.ps1` |
 | `SCARLETT_PRECOMPILED_GRAPHICS=1` | make graphics pipelines from the title's precompiled cache, engines before 0.4.6 only (their `precompile-graphics` command is gone); `play-scarlett.ps1` and `setup-scarlett.ps1 -Game <dump>` run `scarlett shaders` instead |
-| `SCARLETT_PIPELINE_WAIT_MS=0` | do not hold a draw back for a pipeline build. Set by `play-scarlett.ps1` |
+| `SCARLETT_PIPELINE_WAIT_MS=<ms>` | how long a frame may wait for pipelines still being made (default 0: such a draw is left out of that frame) |
 | `SCARLETT_SHADER_OPT=on` | opt-in shader clean-up passes (off by default; they can drop walls and roofs on some cards) |
 | `SCARLETT_FAIR_DUE=0\|1\|2` | order of the texture upload queue. `2` (default): textures showing less than the title holds first, then the longest due; `1`: plain turns; `0`: the older order |
 | `SCARLETT_TEX_SPAN_PCT=<n>` | share of a long frame the texture pass may take (25 by default; `0`: off) |
