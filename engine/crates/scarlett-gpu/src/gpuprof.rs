@@ -37,8 +37,8 @@ use agg::{Agg, ListStamps, OVERFLOW, PRELUDE};
 /// Stamps a list may use.
 const SLOTS: u32 = 1024;
 /// Blocks of [`SLOTS`]: lists timed at once (recorded and not read yet).
-const BLOCKS: u32 = 1024;
-const AFTER: Duration = Duration::from_millis(750);
+const BLOCKS: u32 = 8192;
+const AFTER: Duration = Duration::from_millis(3000);
 const EVERY: Duration = Duration::from_secs(5);
 const TOP: usize = 25;
 
@@ -52,6 +52,9 @@ struct Open {
     /// Per span (stamps - 1 of them while open): pipeline key, draws.
     keys: Vec<u32>,
     draws: Vec<u32>,
+    /// When it began: a list dropped while open never ends, and its block
+    /// is taken back once no other is free.
+    since: Instant,
 }
 
 struct Prof {
@@ -147,12 +150,21 @@ impl Prof {
             // Reset without a close: its stamps were never resolved.
             self.free.push(old.block);
         }
+        if self.free.is_empty() {
+            let now = Instant::now();
+            let stale: Vec<usize> = self.open.iter().filter(|(_, o)| now.duration_since(o.since) > 2 * AFTER).map(|(&k, _)| k).collect();
+            for k in stale {
+                if let Some(o) = self.open.remove(&k) {
+                    self.free.push(o.block);
+                }
+            }
+        }
         let Some(block) = self.free.pop() else {
             self.untimed += 1;
             return false;
         };
         self.stamp(list, block * SLOTS);
-        self.open.insert(at, Open { block, keys: vec![PRELUDE], draws: vec![0] });
+        self.open.insert(at, Open { block, keys: vec![PRELUDE], draws: vec![0], since: Instant::now() });
         true
     }
 }
