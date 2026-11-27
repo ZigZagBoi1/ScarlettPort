@@ -53,6 +53,9 @@ Every switch is a `SCARLETT_*` environment variable. The full list is in the sou
 | `SCARLETT_FAIR_DUE=0\|1\|2` | order of the texture upload queue. `2` (default): textures showing less than the title holds first, then the longest due; `1`: plain turns; `0`: the older order |
 | `SCARLETT_TEX_SPAN_PCT=<n>` | share of a long frame the texture pass may take (25 by default; `0`: off) |
 | `SCARLETT_SHADER_LOOP_LIMIT=<n>` | cap on translated shader loop iterations (can smear hair; unset by default) |
+| `SCARLETT_SKIP_BINK=1\|all` | skip the movies that play once (logos, intro); `all` also the looping ones, which then stay dark. Off by default |
+| `SCARLETT_THREAD_TICKET=0` | the old thread numbering for shaders with console lanes in groups of several host waves (on by default: waves take their threads from a group counter) |
+| `SCARLETT_RAW_VIEW_CLAMP=1` | keep raw buffer views inside their buffer: a range past the end is shortened, an unaligned or past-the-end start is a null view (off by default; the meter line counts the cuts) |
 
 ### Verified speed settings (set by `play-scarlett.ps1` and the launcher; each is off in the runtime itself)
 
@@ -89,6 +92,7 @@ None of these has been measured on the reference machine in this build. Try them
 | `SCARLETT_PRECOMPILED_PSO` | precompiled pipelines from the title's cache (`SCARLETT_PRECOMPILED_DUMP=<dir>` dumps them; diagnostics) |
 | `SCARLETT_LINK_PAIRS=<file>` | linked mesh/pixel pairs file for translation |
 | `SCARLETT_F3_VIEW_FIX` | host-side view fix; leave off |
+| `SCARLETT_HELPER_PRIORITY=1` | the threads the submitting thread waits for (wide pool, landing pools, heap records, the heap pass) run above normal, at its priority |
 
 ### Shader build (launcher)
 
