@@ -90,16 +90,23 @@ pub(crate) fn presented(change: impl Fn(&str, bool, bool)) {
         p.draws += drawn.saturating_sub(p.drawn);
     }
     (p.last, p.drawn) = (now, drawn);
-    let number = ((now - p.started).as_secs_f64() / asked.seconds) as u64;
+    // `SCARLETT_AB_WARMUP_S`: every switch off (phase 0) for that long from
+    // the first present, so loading runs as without the A/B.
+    static WARMUP: OnceLock<f64> = OnceLock::new();
+    let warmup = *WARMUP.get_or_init(|| std::env::var("SCARLETT_AB_WARMUP_S").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0));
+    let number = (((now - p.started).as_secs_f64() - warmup).max(0.0) / asked.seconds) as u64;
     if number == p.number {
         return;
     }
     let bits = |number: u64| (number % (1 << asked.switches.len())) as u32;
     let (was, will) = (bits(p.number), bits(number));
     let (mean, median, most) = summary(&mut p.frames);
+    // (Sorted by `summary`.)
+    let pct = |q: f32| p.frames.get(((p.frames.len() as f32 * q) as usize).min(p.frames.len().saturating_sub(1))).copied().unwrap_or(0.0);
+    let (p95, p99) = (pct(0.95), pct(0.99));
     let on: Vec<&str> = asked.switches.iter().enumerate().filter(|(n, _)| was >> n & 1 != 0).map(|(_, s)| s.as_str()).collect();
     tracing::info!(
-        "A/B phase {} bits {was} on [{}]: {} frames, mean {mean:.1} ms, median {median:.1}, p90 {most:.1}, {:.0} draws a frame",
+        "A/B phase {} bits {was} on [{}]: {} frames, mean {mean:.1} ms, median {median:.1}, p90 {most:.1}, p95 {p95:.1}, p99 {p99:.1}, {:.0} draws a frame",
         p.number,
         on.join(" "),
         p.frames.len(),

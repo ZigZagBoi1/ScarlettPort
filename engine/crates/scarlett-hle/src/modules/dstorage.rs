@@ -680,8 +680,36 @@ fn walls_trace() -> u8 {
 }
 
 /// The files opened, by the address of our file object, with their paths
-/// (for the walls trace: a request names its file by that address).
+/// (for the walls trace and failed requests: a request names its file by
+/// that address).
 static WALLS_FILES: Mutex<Vec<(usize, String)>> = Mutex::new(Vec::new());
+
+/// The path of the file `request` reads from: "memory" for a source in
+/// memory, "?" for a file object we did not open.
+fn source_path(request: &Request) -> String {
+    if request.options & MEMORY_SOURCE != 0 {
+        return "memory".to_string();
+    }
+    let files = WALLS_FILES.lock().unwrap_or_else(|e| e.into_inner());
+    let source = request.source as usize;
+    files.iter().find(|f| f.0 == source).map_or_else(|| "?".to_string(), |f| f.1.clone())
+}
+
+/// What a player is told, once per run, when a game file's zlib data does
+/// not inflate: the title never learns why a read failed and stops
+/// itself with a debug break (0x80000003) moments later (issue #125), so
+/// without this the log names no file and the crash looks like ours.
+fn damaged_file_message(path: &str, offset: u64, size: u32) -> String {
+    format!(
+        "ScarlettPort: the game file {path} holds compressed data that does not \
+         inflate ({size} bytes at byte {offset}). The game stops when a read fails, \
+         usually within a second, with exception 0x80000003.\n\
+         The file is most likely damaged: an incomplete copy, or a copy made \
+         from a failing disk. Copy the game files again from a good source; if \
+         the dump came with dump-manifest.log, compare this file's SHA-256 \
+         with the one listed there.\n"
+    )
+}
 
 /// The walls trace's line for a request that is done.
 fn walls_request(request: &Request, result: &Result<(), HRESULT>, started: std::time::Instant) {
@@ -689,13 +717,7 @@ fn walls_request(request: &Request, result: &Result<(), HRESULT>, started: std::
     if level == 0 || (level == 1 && result.is_ok()) {
         return;
     }
-    let file = if request.options & MEMORY_SOURCE != 0 {
-        "memory".to_string()
-    } else {
-        let files = WALLS_FILES.lock().unwrap_or_else(|e| e.into_inner());
-        let source = request.source as usize;
-        files.iter().find(|f| f.0 == source).map_or_else(|| "?".to_string(), |f| f.1.clone())
-    };
+    let file = source_path(request);
     let hr = match result {
         Ok(()) => 0,
         Err(hr) => *hr as u32,
@@ -1396,7 +1418,9 @@ extern "system" fn close(this: QueueRef) {
 fn execute(request: &Request) -> Result<(), HRESULT> {
     let options = request.options;
     let fail = |hr: HRESULT, why: &str| {
+        let file = source_path(request);
         tracing::warn!(
+            file,
             options = format_args!("{options:#x}"),
             offset = request.offset,
             source_size = request.source_size,
@@ -1407,6 +1431,17 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
             hr = format_args!("{:#010x}", hr as u32),
             "dstorage: request failed: {why}"
         );
+        // Bytes read from a file that do not inflate: zlib checks its own
+        // stream (Adler-32), so the file is damaged. (Not said of BCPack,
+        // whose failures may be ours.)
+        static TOLD: AtomicBool = AtomicBool::new(false);
+        if hr == INVALID_DATA
+            && why == "zlib"
+            && options & MEMORY_SOURCE == 0
+            && !TOLD.swap(true, Ordering::Relaxed)
+        {
+            scarlett_loader::log_crash(&damaged_file_message(&file, request.offset, request.source_size));
+        }
         hr
     };
     if options & !(ZLIB | BCPACK | PAGE_DESTINATION | MEMORY_SOURCE) != 0 {
@@ -2012,6 +2047,33 @@ mod tests {
         assert_eq!(result(array, 1), S_OK);
         assert_eq!(buffers[2], contents[100..116]);
         assert_eq!(buffers[3], contents[..16]);
+    }
+
+    #[test]
+    fn a_request_names_the_file_it_reads() {
+        let (dir, file) = file_with(&[0u8; 64]);
+        let mut out = [0u8; 16];
+        let at = out.as_mut_ptr().cast();
+        let from_file = request(ZLIB, at, 16, file, 0, 16);
+        let path = dir.path().join("data.bin");
+        assert_eq!(source_path(&from_file), path.to_string_lossy());
+        let bytes = [0u8; 16];
+        let from_memory = request(ZLIB | MEMORY_SOURCE, at, 16, bytes.as_ptr().cast(), 0, 16);
+        assert_eq!(source_path(&from_memory), "memory");
+        let unknown = request(ZLIB, at, 16, bytes.as_ptr().cast(), 0, 16);
+        assert_eq!(source_path(&unknown), "?");
+        // A stream of zeros does not inflate: the request fails as damaged data.
+        assert_eq!(execute(&from_file), Err(INVALID_DATA));
+    }
+
+    #[test]
+    fn the_damaged_file_message_says_which_file_and_what_to_do() {
+        let text = damaged_file_message(r"D:\game\levels.rpf", 8_297_846_416, 265);
+        assert!(text.starts_with(r"ScarlettPort: the game file D:\game\levels.rpf "), "{text}");
+        assert!(text.contains("265 bytes at byte 8297846416"), "{text}");
+        assert!(text.contains("0x80000003"), "{text}");
+        assert!(text.contains("dump-manifest.log"), "{text}");
+        assert!(text.ends_with('\n'));
     }
 
     #[test]
