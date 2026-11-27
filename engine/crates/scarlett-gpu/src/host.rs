@@ -3497,6 +3497,27 @@ fn relay_wait(why: usize, done: impl Fn(&Line) -> bool) {
     blamed(why, us);
 }
 
+/// Diagnostic ceilings only, never for play (`SCARLETT_DIAG_NO_BACK`,
+/// `SCARLETT_DIAG_NO_SNAP`; `VICTORY_` names too; A/B-able): what a frame
+/// costs without the copy-back of what shaders wrote (title memory keeps the
+/// bytes it last had; the card's compares still run), or without the
+/// snapshots before a submission (that one breaks state: run rb-snap1 ended
+/// in a fault once it was off again).
+pub(crate) fn diag_bypass(name: &'static str) -> bool {
+    #[cfg(feature = "diagnostics")]
+    if let Some(on) = crate::ab::pick(name) {
+        return on;
+    }
+    static KNOWN: std::sync::Mutex<Vec<(&'static str, bool)>> = std::sync::Mutex::new(Vec::new());
+    let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&(_, on)) = known.iter().find(|k| k.0 == name) {
+        return on;
+    }
+    let on = crate::switch::on(name) || crate::switch::on(&name.replacen("SCARLETT_", "VICTORY_", 1));
+    known.push((name, on));
+    on
+}
+
 /// What the thread that lands flights fetches card copies' pieces with
 /// ([`relay`]): a list, a fence and an event of its own (the host's are
 /// behind the submission lock), and the memory the pieces come down to.
@@ -5007,14 +5028,26 @@ impl Host {
                 }
                 let mut hand_back = relay_hand_back(&back);
                 stage.next("landing: copies in the card's memory");
-                self.relay_card_back(&plans, fetch, &mut || {
-                    if crate::land::on() {
-                        let _looking = crate::timeline::span("landing: looking through copies, beside the fetch");
-                        hand_back.look(crate::land::stat::SCAN_BESIDE);
-                    }
-                });
+                let no_back = diag_bypass("SCARLETT_DIAG_NO_BACK");
+                if no_back {
+                    let behind = plans.iter().map(|p| p.0.sent_as).max().unwrap_or(0);
+                    let after = match fetch.as_ref().is_some_and(|f| f.queue.is_some()) {
+                        true => behind,
+                        false => *QUEUE_ORDER.lock().unwrap_or_else(|e| e.into_inner()),
+                    };
+                    crate::shadow::relay_fetched(after);
+                } else {
+                    self.relay_card_back(&plans, fetch, &mut || {
+                        if crate::land::on() {
+                            let _looking = crate::timeline::span("landing: looking through copies, beside the fetch");
+                            hand_back.look(crate::land::stat::SCAN_BESIDE);
+                        }
+                    });
+                }
                 stage.next("landing: copies in the PC's memory");
-                hand_back.merge();
+                if !no_back {
+                    hand_back.merge();
+                }
                 stage.next("landing: ranges done with");
                 let finishing = std::time::Instant::now();
                 // Only now, and flight by flight: a range another flight
@@ -5804,7 +5837,9 @@ impl Host {
         {
             #[cfg(feature = "diagnostics")]
             let snapshots = std::time::Instant::now();
-            crate::shadow::take_snapshots();
+            if !diag_bypass("SCARLETT_DIAG_NO_SNAP") {
+                crate::shadow::take_snapshots();
+            }
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::SnapshotUs, snapshots.elapsed().as_micros() as u64);
         }
