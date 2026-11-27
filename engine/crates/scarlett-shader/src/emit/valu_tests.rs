@@ -2555,3 +2555,126 @@ fn typed_non_d16_table_load_preserves_integer_bits() {
         }
     }
 }
+
+/// Not a test: how long a long run of one float instruction takes on the card
+/// in each form the translator can give it (`--ignored float_forms_cost`).
+#[test]
+#[ignore = "a tool: times float instruction forms on the card"]
+fn float_forms_cost() {
+    use super::host::DISPATCH_REPEAT;
+    // (label, VOP3 op of the chain, op between (0 none), rdna bits)
+    let forms: &[(&str, u16, u16, u32)] = &[
+        ("v_mul_f32", 0x108, 0, 0),
+        ("v_mul_legacy_f32 as now", 0x107, 0, 0),
+        ("v_mul_legacy_f32 one compare", 0x107, 0, u32::MAX),
+        ("v_mul_f32 + v_max_f32 as now", 0x108, 0x110, 0),
+        ("v_mul_f32 + v_max_f32 host form", 0x108, 0x110, super::rdna::MAX_MIN),
+    ];
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(host) = Host::new(false) else { return };
+    for &(label, op, between, bits) in forms {
+        let mut body = Vec::new();
+        for v in [0u8, 5, 6, 7] {
+            body.push(vop1(0x001, v, vgpr(1)));
+        }
+        for _ in 0..1000 {
+            for v in [0u8, 5, 6, 7] {
+                body.extend(vop3(op, v, vgpr(v), vgpr(2), 0));
+                if between != 0 {
+                    body.extend(vop3(between, v, vgpr(v), vgpr(3), 0));
+                }
+            }
+        }
+        for v in [5u8, 6, 7] {
+            body.extend(vop3(0x103, 0, vgpr(0), vgpr(v), 0));
+        }
+        // (u32::MAX: RDNA's legacy product, with its one comparison.)
+        if bits == u32::MAX {
+            lower::TEST_RDNA.set(Some(super::rdna::LEGACY));
+        } else {
+            lower::TEST_HOST_FLOAT.set(Some(bits));
+        }
+        let shader = build_cs(&body, 64, 0);
+        lower::TEST_HOST_FLOAT.set(None);
+        lower::TEST_RDNA.set(None);
+        let (root, pso) = host.compute_pipeline(&shader).expect("pipeline");
+        let mut ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
+        for u in &shader.user_data {
+            if let (RootType::Constants, 0) = (u.root, u.slot) {
+                ud[u.index as usize] = [1.5f32, 0.999, 0.25, 0.0][u.dword as usize].to_bits();
+            }
+        }
+        let time = |repeat: u32| {
+            DISPATCH_REPEAT.set(repeat);
+            let began = std::time::Instant::now();
+            host.dispatch(&root, &pso, &Dispatch { roots: vec![(0, Root::Constants(ud.clone()))], views: &[View::RawUav(1)], samplers: &[], groups: [65536, 1, 1] })
+                .expect("dispatch");
+            DISPATCH_REPEAT.set(1);
+            began.elapsed().as_secs_f64() * 1e3
+        };
+        let runs: Vec<(f64, f64)> = (0..3).map(|_| (time(1), time(11))).collect();
+        let one = runs.iter().map(|r| r.0).fold(f64::INFINITY, f64::min);
+        let many = runs.iter().map(|r| r.1).fold(f64::INFINITY, f64::min);
+        println!("{label:32} {} bytes of DXIL, {:.3} ms a dispatch", shader.dxil.len(), (many - one) / 10.0);
+    }
+}
+
+/// On a host that is not RDNA, the forms `SCARLETT_HOST_FLOAT` asks for
+/// ([`super::host_float`]) give on this card what the spelled-out ones give.
+/// Run it on a kind of card before its default has them (an RTX 3060: every
+/// case alike).
+#[test]
+#[ignore = "on a card host_float forms are used on (SCARLETT_HOST_FLOAT)"]
+fn host_float_forms_give_the_spelled_out_bits() {
+    const ONE: u16 = 242;
+    const MINUS_ONE: u16 = 243;
+    let (a, b, c) = (vgpr(1), vgpr(2), vgpr(3));
+    let saturated = vop3_mod(0x110, 5, vgpr(1), vgpr(1), 0, 0, 0, 0, true);
+    let two = |x: [u32; 2], y: [u32; 2]| [x, y].concat();
+    let bodies: [(&str, Vec<u32>, bool); 14] = [
+        ("max", vop3(0x110, 0, a, b, 0).to_vec(), true),
+        ("min", vop3(0x10F, 0, a, b, 0).to_vec(), true),
+        ("max3", vop3(0x154, 0, a, b, c).to_vec(), true),
+        ("min3", vop3(0x151, 0, a, b, c).to_vec(), true),
+        ("med3 0 1", vop3(0x157, 0, a, 128, ONE).to_vec(), true),
+        ("med3 1 0", vop3(0x157, 0, ONE, a, 128).to_vec(), true),
+        ("med3 1 -1", vop3(0x157, 0, ONE, MINUS_ONE, a).to_vec(), true),
+        ("fract", vec![vop1(0x020, 0, a)], true),
+        ("mul_legacy", vop3(0x107, 0, a, b, 0).to_vec(), false),
+        ("mul_legacy by itself", vop3(0x107, 0, a, a, 0).to_vec(), false),
+        ("mul_legacy by a constant", vop3(0x107, 0, a, MINUS_ONE, 0).to_vec(), false),
+        ("mul_legacy of a saturated", two(saturated, vop3(0x107, 0, vgpr(5), b, 0)), false),
+        ("mad_legacy", vop3(0x140, 0, a, b, c).to_vec(), false),
+        ("max of a mul_legacy", two(vop3(0x107, 5, a, b, 0), vop3(0x110, 0, vgpr(5), c, 0)), false),
+    ];
+    let numbers = [0.0f32, -0.0, 1.0, -1.0, 0.3, -2.5e-7, 3e38, f32::INFINITY, f32::NEG_INFINITY, f32::NAN];
+    let mut cases = Vec::new();
+    for (i, x) in numbers.iter().enumerate() {
+        for (j, y) in numbers.iter().enumerate() {
+            let z = numbers[(3 * i + j) % numbers.len()];
+            cases.push([x.to_bits(), y.to_bits(), z.to_bits(), 0]);
+        }
+    }
+    for (name, body, exact) in bodies {
+        let mut got: Vec<Vec<u32>> = Vec::new();
+        let mut written = Vec::new();
+        for bits in [0, super::HOST_FLOAT_ALL] {
+            lower::TEST_HOST_FLOAT.set(Some(bits));
+            let shader = build_valu_cs(&body);
+            lower::TEST_HOST_FLOAT.set(None);
+            written.push(shader.dxil.clone());
+            let mut all = Vec::new();
+            run_cases_on(&shader, &cases, &[("hardware", false)], |_, _, _, r| all.push(r));
+            got.push(all);
+        }
+        let mut bad = 0;
+        for (case, (&was, &is)) in cases.iter().zip(got[0].iter().zip(&got[1])) {
+            let (x, y) = (f32::from_bits(was), f32::from_bits(is));
+            let same = was == is || x.is_nan() && y.is_nan() || !exact && x == 0.0 && y == 0.0;
+            if !same { bad += 1; if bad < 4 { println!("{name} of {:?}: {x} ({was:#x}), now {y} ({is:#x})", case.map(f32::from_bits)); } }
+        }
+        println!("{name}: {bad} of {} differ", cases.len());
+        assert!(bad == 0 || !exact, "{name}: {bad} cases differ");
+    }
+}
+

@@ -293,6 +293,18 @@ pub(crate) fn amd(device: &ID3D12Device) -> bool {
     }
 }
 
+/// Whether the device is an NVIDIA card.
+pub(crate) fn nvidia(device: &ID3D12Device) -> bool {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, IDXGIAdapter1, IDXGIFactory4};
+    // SAFETY: plain queries.
+    unsafe {
+        CreateDXGIFactory2::<IDXGIFactory4>(DXGI_CREATE_FACTORY_FLAGS(0))
+            .and_then(|f| f.EnumAdapterByLuid::<IDXGIAdapter1>(device.GetAdapterLuid()))
+            .and_then(|a| a.GetDesc1())
+            .is_ok_and(|d| d.VendorId == 0x10DE)
+    }
+}
+
 /// Whether the device is an AMD RDNA 4 card ([`rdna4_id`]).
 pub(crate) fn rdna4(device: &ID3D12Device) -> bool {
     use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, IDXGIAdapter1, IDXGIFactory4};

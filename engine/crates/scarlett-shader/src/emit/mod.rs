@@ -120,7 +120,7 @@ use crate::{ShaderError, io, ir, resource, structure};
 
 pub use bitcode::census;
 pub use sampler::StaticSampler;
-pub use lower::{host_settings, set_host_max_wave, set_host_rdna, set_host_rdna4};
+pub use lower::{host_settings, set_host_max_wave, set_host_nvidia, set_host_rdna, set_host_rdna4};
 pub use rect::rect_list_gs;
 pub use shader::{
     MEMORY_FAULTS, MEMORY_PAGES, MEMORY_READ_ONLY, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_CONSTANTS, SLOT_FAULTS, SLOT_MEMORY, SLOT_STRIDES,
@@ -261,6 +261,48 @@ pub fn rdna_float() -> u32 {
     })
 }
 
+/// On a host that is not RDNA: which of [`rdna`]'s float forms are used
+/// there too, because the host's own instruction gives what the console's
+/// does. `SCARLETT_HOST_FLOAT`: a set of [`rdna`]'s bits (decimal or `0x`
+/// hex), `0` none; unset: [`HOST_FLOAT_NVIDIA`] on an NVIDIA card
+/// ([`set_host_nvidia`]), none elsewhere.
+///
+/// - [`rdna::MAX_MIN`], [`rdna::MED3`]: as on RDNA. On an RTX 3060
+///   (`host_float_forms_give_the_spelled_out_bits`) FMax/FMin order -0
+///   below +0 as the console does, for every pair of +-0, +-1, 0.3, a
+///   denormal, 3e38, +-infinity and NaN.
+/// - [`rdna::FRACT`] is not one of them: the 3060's Frc of -1e-10 is 1.0
+///   (`v_fract_f32_never_returns_one`).
+/// - [`rdna::LEGACY`] is not one of them: RDNA's one comparison of the
+///   smaller magnitude is slower there than the two comparisons
+///   (`float_forms_cost`), and NVIDIA's compiler drops the add of +0 that
+///   would give a zero product the console's sign without them (a legacy
+///   product of -1 and 0 came back -0).
+///
+/// Measured on the RTX 3060 (`float_forms_cost`, 4,000 dependent ops a
+/// thread): `v_max_f32` spelled out is ~7 times the plain one.
+///
+/// Part of the translation: the shader cache keys on it ([`host_settings`]).
+pub fn host_float() -> u32 {
+    static BITS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *BITS.get_or_init(|| {
+        let value = std::env::var("SCARLETT_HOST_FLOAT").ok();
+        let unset = if lower::host_nvidia() { HOST_FLOAT_NVIDIA } else { 0 };
+        parse_set(value.as_deref(), unset, HOST_FLOAT_ALL)
+    })
+}
+
+/// The bits [`host_float`] can have.
+pub const HOST_FLOAT_ALL: u32 = rdna::MAX_MIN | rdna::MED3;
+
+/// [`host_float`] on an NVIDIA card when `SCARLETT_HOST_FLOAT` is unset:
+/// none. In the title on the RTX 3060 (cache retranslated, same spot, 240 s
+/// in the world) `5` and `1` changed the picture (a character's hair dark
+/// instead of fair: in a whole program the driver's FMax/FMin do not keep
+/// what they do alone) and gained nothing: 7.8 fps and ~88 ms/frame in the
+/// title's lists either way.
+pub const HOST_FLOAT_NVIDIA: u32 = 0;
+
 /// The bits of [`rdna_float`].
 pub mod rdna {
     /// `v_max_f32` and the like: the host's FMax and FMin, without the code
@@ -311,6 +353,7 @@ pub fn translation_fingerprint() -> Vec<u8> {
     }
     out.extend_from_slice(&lower::host_max_wave().to_le_bytes());
     out.extend_from_slice(&lower::host_rdna().to_le_bytes());
+    out.extend_from_slice(&lower::host_float().to_le_bytes());
     out.extend_from_slice(&shader::view_heap_limit().to_le_bytes());
     out.extend_from_slice(&shader::raw_views().to_le_bytes());
     out.extend_from_slice(&loop_limit().to_le_bytes());

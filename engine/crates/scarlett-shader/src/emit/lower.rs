@@ -1130,9 +1130,39 @@ pub fn host_settings() -> [u32; 5] {
         host_max_wave(),
         super::shader::view_heap_limit(),
         super::shader::raw_views(),
-        host_rdna(),
+        // (RDNA's bits, or another host's, with the top bit for which.)
+        if HOST_RDNA.load(std::sync::atomic::Ordering::Relaxed) { host_rdna() | 1 << 31 } else { host_float() },
         u32::from(raw_size_own_handle()),
     ]
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's choice for [`host_float`] on a host that is not RDNA, for
+    /// its thread only.
+    pub(super) static TEST_HOST_FLOAT: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+static HOST_NVIDIA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tells the translator that the host is an NVIDIA card
+/// ([`super::host_float`]'s default).
+pub fn set_host_nvidia(on: bool) {
+    HOST_NVIDIA.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(super) fn host_nvidia() -> bool {
+    HOST_NVIDIA.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The bits of [`super::rdna`] whose host forms are used on this host: on
+/// RDNA [`host_rdna`]'s, elsewhere [`super::host_float`]'s.
+pub(super) fn host_float() -> u32 {
+    #[cfg(test)]
+    if let Some(bits) = TEST_HOST_FLOAT.get().or(TEST_RDNA.get()) {
+        return bits;
+    }
+    if HOST_RDNA.load(std::sync::atomic::Ordering::Relaxed) { host_rdna() } else { super::host_float() }
 }
 
 static HOST_RDNA4: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -3789,7 +3819,7 @@ impl<'a> Lower<'a> {
     fn max_min(&mut self, max: bool, a: V, b: V) -> V {
         let c = self.cur;
         let r = self.binary(if max { 35 } else { 36 }, a, b);
-        if host_rdna() & super::rdna::MAX_MIN != 0 {
+        if host_float() & super::rdna::MAX_MIN != 0 {
             return r;
         }
         let (ia, ib) = (self.as_int(a), self.as_int(b));
@@ -3926,7 +3956,7 @@ impl<'a> Lower<'a> {
     fn med3(&mut self, a: V, b: V, third: V) -> V {
         let c = self.cur;
         // Between two constants in order: the lower one for a NaN either way.
-        if host_rdna() & super::rdna::MED3 != 0 {
+        if host_float() & super::rdna::MED3 != 0 {
             let k = [a, b, third].map(|x| self.s.m.float_k(x));
             let ordered = match k {
                 [None, Some(x), Some(y)] => Some((a, b, third, x, y)),

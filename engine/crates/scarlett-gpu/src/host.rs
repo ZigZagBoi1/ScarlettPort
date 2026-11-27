@@ -940,6 +940,7 @@ fn create() -> windows::core::Result<Host> {
             // (RDNA has waves of 32 and 64, the vendor's older cards of 64 alone.)
             let amd = crate::indirect::amd(&device);
             scarlett_shader::emit::set_host_rdna(amd && o1.WaveLaneCountMin == 32 && o1.WaveLaneCountMax == 64);
+            scarlett_shader::emit::set_host_nvidia(crate::indirect::nvidia(&device));
         }
         // RDNA 4 (Navi 48: RX 9070, 9070 XT, Radeon AI PRO R9700; Navi 44:
         // RX 9060 XT) are AMD's device ids 0x7550-0x75ff; RDNA 3 lies below
