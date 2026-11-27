@@ -22,6 +22,8 @@ mod census;
 mod inspect;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod replay;
+#[cfg(windows)]
+mod pipeline_cache;
 mod run;
 mod shader;
 mod translate;
@@ -164,6 +166,18 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    /// Decode the title's precompiled pipeline cache (in `shaders.rpf`)
+    /// offline and write each record's key as the runtime names the
+    /// pipeline (state text, shader hashes, title pipeline key) to a file
+    /// outside the repository.
+    #[cfg(windows)]
+    PipelineCache {
+        /// The game folder (or its `shaders.rpf`).
+        game: PathBuf,
+        /// Where the keys go (default: the cache's `pipelines` folder).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Print the shader translator's fingerprint (`translator <hex>`): the
     /// shader cache is valid for one fingerprint, so a launcher re-prepares
     /// only when it changes.
@@ -267,6 +281,10 @@ fn main() -> Result<()> {
         Command::Warm { jobs, limit, again, used, these } => warm::run(jobs, limit, again, used, these),
         #[cfg(windows)]
         Command::Prepare { jobs, all } => warm::prepare(jobs, all),
+        #[cfg(windows)]
+        Command::PipelineCache { game, out } => {
+            pipeline_cache::run(game, pipeline_cache::Options { out })
+        }
         Command::Fingerprint => {
             println!("translator {}", scarlett_hle::SHADER_TRANSLATOR);
             Ok(())
