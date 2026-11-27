@@ -7,6 +7,8 @@
 
 #[path = "console_insn_decode.rs"]
 mod decode;
+#[path = "console_insn_sse4a.rs"]
+mod sse4a;
 
 use decode::ConsoleOnly;
 use std::cell::Cell;
@@ -74,6 +76,54 @@ fn wait_patch(what: ConsoleOnly) -> Option<[u8; 3]> {
 fn patches_clzero() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("SCARLETT_PATCH_CLZERO").is_none_or(|v| v != "0"))
+}
+
+/// Whether an `insertq` / `extrq` site is replaced the first time it faults by a jump to the
+/// same operation in SSE2 code ([`sse4a::stub`]), on a CPU without SSE4a. Every pass of the
+/// title's half-float packing loop was an exception on an Intel CPU. On by default;
+/// `SCARLETT_SSE4A_PATCH=0` emulates each time, as before.
+fn patches_sse4a() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let max = std::arch::x86_64::__cpuid(0x8000_0000).eax;
+        let has = max >= 0x8000_0001 && std::arch::x86_64::__cpuid(0x8000_0001).ecx & (1 << 6) != 0;
+        !has && std::env::var_os("SCARLETT_SSE4A_PATCH").is_none_or(|v| v != "0")
+    })
+}
+
+/// Replaces the `insertq` / `extrq` at `at`, `len` bytes that are `code`: whether it did. Only
+/// the instruction's own bytes change (its first five, by the jump; the rest are never run), so
+/// one shorter than a jump (the register forms without a REX, 4 bytes) keeps the trap.
+///
+/// # Safety
+/// `at` is in the title's code, which stays mapped.
+unsafe fn patch_sse4a(at: usize, code: &[u8], what: ConsoleOnly, len: usize) -> bool {
+    if len < 5 || (at & 15) + 5 > 16 {
+        return false;
+    }
+    let mut stubs = STUBS.lock().unwrap_or_else(|e| e.into_inner());
+    if stubs.is_none() {
+        *stubs = near(at).map(|place| (place, 0));
+    }
+    let Some((place, used)) = stubs.as_mut() else {
+        return false;
+    };
+    let stub = *place + *used;
+    let Some((body, entry)) = sse4a::stub(what, stub, at + len) else {
+        return false;
+    };
+    let Some(jump) = jump(at, stub + entry) else {
+        return false;
+    };
+    if *used + body.len() > STUBS_LEN {
+        return false;
+    }
+    // SAFETY: inside the memory made for it, which nothing runs yet; then the title's code.
+    unsafe {
+        std::ptr::copy_nonoverlapping(body.as_ptr(), stub as *mut u8, body.len());
+        *used += body.len().next_multiple_of(16);
+        patch(at, [code[0], code[1], code[2], code[3], code[4]], jump)
+    }
 }
 
 /// `jmp rel32` at `at` to `to`, if it reaches.
@@ -497,6 +547,35 @@ pub(crate) unsafe fn emulate(ctx: &mut CONTEXT) -> i32 {
             *regs[r as usize & 15] = cpu;
         }
         // the low quadword changes; the high one is zeroed, as a Zen 5 does
+        // (and the site is replaced: the next time it runs as SSE2 code, without a fault)
+        ConsoleOnly::Extrq { .. } | ConsoleOnly::Insertq { .. }
+            if patches_sse4a()
+                // SAFETY: the title's code, where the instruction just faulted.
+                && unsafe { patch_sse4a(rip, code, what, len) } =>
+        {
+            #[cfg(feature = "diagnostics")]
+            sites::patched();
+            emulate_sse4a(ctx, what);
+        }
+        ConsoleOnly::Extrq { .. } | ConsoleOnly::Insertq { .. } => emulate_sse4a(ctx, what),
+    }
+    ctx.Rip += len as u64;
+    // How often this runs at all (each one is an exception: a trip into Windows and back).
+    let emulated = EMULATED.fetch_add(1, Relaxed) + 1;
+    if emulated >= 1 << 16 && emulated.is_power_of_two() {
+        tracing::info!(
+            emulated,
+            asked = ASKED.load(Relaxed),
+            zeroed_mb = ZEROED.load(Relaxed) >> 20,
+            "console CPU instructions emulated so far, the times Windows was asked about memory for them, and what clzero loops zeroed"
+        );
+    }
+    CONTINUE_EXECUTION
+}
+
+/// `insertq` / `extrq` on the faulting thread's registers.
+fn emulate_sse4a(ctx: &mut CONTEXT, what: ConsoleOnly) {
+    match what {
         ConsoleOnly::Extrq { dst, src, len, idx } => {
             // SAFETY: the context's XMM registers (CONTEXT_FLOATING_POINT is captured for exceptions).
             let x = unsafe { &mut ctx.Anonymous.FltSave.XmmRegisters };
@@ -520,19 +599,8 @@ pub(crate) unsafe fn emulate(ctx: &mut CONTEXT) -> i32 {
             d.Low = decode::insertq(d.Low, s.Low, len, idx);
             d.High = 0;
         }
+        _ => {}
     }
-    ctx.Rip += len as u64;
-    // How often this runs at all (each one is an exception: a trip into Windows and back).
-    let emulated = EMULATED.fetch_add(1, Relaxed) + 1;
-    if emulated >= 1 << 16 && emulated.is_power_of_two() {
-        tracing::info!(
-            emulated,
-            asked = ASKED.load(Relaxed),
-            zeroed_mb = ZEROED.load(Relaxed) >> 20,
-            "console CPU instructions emulated so far, the times Windows was asked about memory for them, and what clzero loops zeroed"
-        );
-    }
-    CONTINUE_EXECUTION
 }
 
 #[cfg(test)]
@@ -648,6 +716,108 @@ mod tests {
             }
         }
         assert!(clzero_stub(0x1000, 0x2000, [0x48, 0x39, 0xc0]).is_none(), "against rax itself");
+    }
+
+    /// The reported site, `insertq xmm0, xmm1, 16, 16`, patched as a CPU without SSE4a would
+    /// have it (the patch forced here): the jump is there, and running the site gives what the
+    /// instruction gives. A 4-byte register form and one over its sixteen bytes keep the trap.
+    #[test]
+    fn an_insertq_site_is_replaced_by_a_jump_to_sse2_code() {
+        use std::arch::asm;
+        use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_EXECUTE_READWRITE, VirtualAlloc, VirtualFree};
+        // SAFETY: memory of our own, written and run inside it.
+        unsafe {
+            let page = VirtualAlloc(std::ptr::null(), 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE) as usize;
+            assert_ne!(page, 0);
+            let at = page + 0x21;
+            let insn = [0xf2, 0x0f, 0x78, 0xc1, 0x10, 0x10];
+            std::ptr::copy_nonoverlapping(insn.as_ptr(), at as *mut u8, 6);
+            *((at + 6) as *mut u8) = 0xc3;
+            let (what, len) = decode::decode(&insn).unwrap();
+            assert!(patch_sse4a(at, &insn, what, len));
+            assert_eq!(*(at as *const u8), 0xe9, "a jump");
+            let rel = std::ptr::read_unaligned((at + 1) as *const i32) as i64;
+            let entry = (at as i64 + 5 + rel) as usize;
+            assert!(entry.abs_diff(at) < 1 << 31);
+            use std::arch::x86_64::{_mm_set_epi64x, _mm_storeu_si128};
+            let mut d = _mm_set_epi64x(0xa5a5_5a5a_c3c3_3c3cu64 as i64, 0x0123_4567_89ab_cdef);
+            let s = _mm_set_epi64x(0x1111, 0xfedc_ba98_7654_3210u64 as i64);
+            asm!("call {site}", site = in(reg) at, inout("xmm0") d, in("xmm1") s);
+            let mut o = [0u64; 2];
+            _mm_storeu_si128(o.as_mut_ptr().cast(), d);
+            assert_eq!(o, [0x0123_4567_3210_cdef, 0], "bits 16..31 from xmm1, the rest kept, the high half zeroed");
+            // extrq xmm1, xmm2 (4 bytes): no room for a jump
+            let short = [0x66, 0x0f, 0x79, 0xca];
+            let (what, len) = decode::decode(&short).unwrap();
+            assert!(!patch_sse4a(page + 0x40, &short, what, len));
+            // over the end of its sixteen bytes
+            let (what, len) = decode::decode(&insn).unwrap();
+            std::ptr::copy_nonoverlapping(insn.as_ptr(), (page + 0x5c) as *mut u8, 6);
+            assert!(!patch_sse4a(page + 0x5c, &insn, what, len));
+            assert_eq!(*((page + 0x5c) as *const u8), 0xf2);
+            VirtualFree(page as *mut _, 0, MEM_RELEASE);
+        }
+    }
+
+    /// Calls a second of `insertq xmm0, xmm1, 16, 16`: run natively (on a CPU with SSE4a), as
+    /// the trap emulation (a fault and the vectored handler each time) and as the patched stub.
+    /// `cargo test --release -- --ignored --nocapture sse4a_speed`.
+    #[test]
+    #[ignore]
+    fn sse4a_speed() {
+        use std::sync::atomic::AtomicUsize;
+        use windows_sys::Win32::Foundation::EXCEPTION_ILLEGAL_INSTRUCTION;
+        use windows_sys::Win32::System::Diagnostics::Debug::{AddVectoredExceptionHandler, EXCEPTION_POINTERS, RemoveVectoredExceptionHandler};
+        use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_EXECUTE_READWRITE, VirtualAlloc, VirtualFree};
+        static TRAP: AtomicUsize = AtomicUsize::new(0);
+        static INSN: AtomicUsize = AtomicUsize::new(0);
+        // A `ud2` at TRAP stands for the instruction this CPU has: the handler emulates the
+        // real bytes at INSN, as the loader's handler does on an Intel CPU.
+        unsafe extern "system" fn handler(info: *mut EXCEPTION_POINTERS) -> i32 {
+            // SAFETY: the exception being dispatched.
+            unsafe {
+                let ctx = &mut *(*info).ContextRecord;
+                if (*(*info).ExceptionRecord).ExceptionCode != EXCEPTION_ILLEGAL_INSTRUCTION || ctx.Rip as usize != TRAP.load(Relaxed) {
+                    return 0;
+                }
+                ctx.Rip = INSN.load(Relaxed) as u64;
+                let r = emulate(ctx);
+                ctx.Rip = TRAP.load(Relaxed) as u64 + 2;
+                r
+            }
+        }
+        // SAFETY: memory of our own, written and run inside it.
+        unsafe {
+            let page = VirtualAlloc(std::ptr::null(), 1 << 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE) as usize;
+            let put = |off: usize, b: &[u8]| std::ptr::copy_nonoverlapping(b.as_ptr(), (page + off) as *mut u8, b.len());
+            let insn = [0xf2, 0x0f, 0x78, 0xc1, 0x10, 0x10];
+            // loop: <6 bytes>; dec rcx; jnz loop; ret
+            let tail = [0x48, 0xff, 0xc9, 0x75, 0xf5, 0xc3];
+            put(0x000, &insn);
+            put(0x006, &tail);
+            put(0x100, &[0x0f, 0x0b, 0x90, 0x90, 0x90, 0x90]);
+            put(0x106, &tail);
+            put(0x200, &insn);
+            put(0x206, &tail);
+            put(0x300, &insn);
+            TRAP.store(page + 0x100, Relaxed);
+            INSN.store(page + 0x300, Relaxed);
+            let (what, len) = decode::decode(&insn).unwrap();
+            assert!(patch_sse4a(page + 0x200, &insn, what, len), "patched (forced)");
+            let h = AddVectoredExceptionHandler(1, Some(handler));
+            let time = |off: usize, n: u64| {
+                let f: extern "win64" fn(u64) = std::mem::transmute(page + off);
+                let t = std::time::Instant::now();
+                f(n);
+                n as f64 / t.elapsed().as_secs_f64()
+            };
+            let native = if std::is_x86_feature_detected!("sse4a") { time(0, 100_000_000) } else { f64::NAN };
+            let trap = time(0x100, 200_000);
+            let stub = time(0x200, 100_000_000);
+            RemoveVectoredExceptionHandler(h);
+            eprintln!("insertq xmm0, xmm1, 16, 16 a second: native {native:.3e}, trap emulation {trap:.3e}, patched stub {stub:.3e} ({:.0}x the trap)", stub / trap);
+            VirtualFree(page as *mut _, 0, MEM_RELEASE);
+        }
         assert!(jump(0x1000, 0x9000_0000_0000).is_none(), "out of reach");
     }
 }
