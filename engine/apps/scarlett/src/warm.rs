@@ -91,7 +91,7 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
     std::fs::create_dir_all(&dir)?;
     let chunks: Vec<&[usize]> = all.chunks(AT_ONCE).collect();
     let next = AtomicUsize::new(0);
-    let state = Mutex::new((Vec::<f64>::new(), 0usize, 0usize));
+    let state = Mutex::new((Vec::<f64>::new(), 0usize, 0usize, 0usize));
     let done_out = Mutex::new(std::fs::OpenOptions::new().create(true).append(true).open(&done_file)?);
     // (Read back by the runs: these are made beside the others, not before.)
     let slow_out = Mutex::new(std::fs::OpenOptions::new().create(true).append(true).open(dir.join("slow-pipelines.txt"))?);
@@ -99,30 +99,39 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
     std::thread::scope(|s| {
         for _ in 0..jobs.min(chunks.len()) {
             s.spawn(|| {
+                let mut noted = |n: usize, ms: f64, there: bool| {
+                    if ms >= SLOW_MS {
+                        let _ = writeln!(lock(&slow_out), "\n{} {ms:.0}", keys[n]);
+                    }
+                    let mut state = lock(&state);
+                    state.0.push(ms);
+                    state.1 += usize::from(!there);
+                    let count = state.0.len();
+                    if count % 1000 == 0 {
+                        println!("{count} of {}, {:.0} s", all.len(), began.elapsed().as_secs_f64());
+                    }
+                    drop(state);
+                    let _ = writeln!(lock(&done_out), "{fingerprint} {}", keys[n]);
+                };
                 while let Some(&chunk) = chunks.get(next.fetch_add(1, Ordering::Relaxed)) {
                     let mut rest = chunk;
                     while !rest.is_empty() {
-                        let (made, ended) = child(rest, |n, ms, there| {
-                            if ms >= SLOW_MS {
-                                let _ = writeln!(lock(&slow_out), "\n{} {ms:.0}", keys[n]);
-                            }
-                            let mut state = lock(&state);
-                            state.0.push(ms);
-                            state.1 += usize::from(!there);
-                            let count = state.0.len();
-                            if count % 1000 == 0 {
-                                println!("{count} of {}, {:.0} s", all.len(), began.elapsed().as_secs_f64());
-                            }
-                            drop(state);
-                            let _ = writeln!(lock(&done_out), "{fingerprint} {}", keys[n]);
-                        });
+                        let (made, ended) = child(rest, &mut noted);
                         rest = &rest[made.min(rest.len())..];
                         match (ended, rest.split_first()) {
                             (Some(why), Some((&n, after))) => {
-                                // The one it was at.
-                                println!("pipeline {n} {}: {why}", keys[n]);
-                                let _ = writeln!(lock(&bad_out), "{}", known::format_bad_entry(&keys[n], &fingerprint, &why));
-                                lock(&state).2 += 1;
+                                // The one it was at, made again in a process of
+                                // its own ([`retry_alone`]): named only if that
+                                // ends too.
+                                let alone = retry_alone().then(|| child(&[n], &mut noted));
+                                if let Some((1, None)) = alone {
+                                    println!("pipeline {n} {}: {why} in a batch, made alone", keys[n]);
+                                    lock(&state).3 += 1;
+                                } else {
+                                    println!("pipeline {n} {}: {why}", keys[n]);
+                                    let _ = writeln!(lock(&bad_out), "{}", known::format_bad_entry(&keys[n], &fingerprint, &why));
+                                    lock(&state).2 += 1;
+                                }
                                 rest = after;
                             }
                             _ => break,
@@ -132,11 +141,11 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
             });
         }
     });
-    let (mut times, refused, crashed) = state.into_inner().unwrap_or_else(|e| e.into_inner());
+    let (mut times, refused, crashed, alone) = state.into_inner().unwrap_or_else(|e| e.into_inner());
     times.sort_by(f64::total_cmp);
     let at = |q: f64| times.get((times.len() as f64 * q) as usize).copied().unwrap_or(0.0);
     println!(
-        "{} made in {:.0} s ({refused} have no host pipeline, {crashed} ended their process); ms each: median {:.1}, p90 {:.1}, p99 {:.1}, most {:.0}, sum {:.0} s",
+        "{} made in {:.0} s ({refused} have no host pipeline, {crashed} ended their process, {alone} more ended one in a batch and were made alone); ms each: median {:.1}, p90 {:.1}, p99 {:.1}, most {:.0}, sum {:.0} s",
         times.len(),
         began.elapsed().as_secs_f64(),
         at(0.5),
@@ -204,6 +213,19 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// Has a process make `these`; how many it made, and how it ended if not well.
+/// Whether a pipeline that ended a process of a batch is made once more in a
+/// process of its own before it is named in `warm-bad.txt`
+/// (`SCARLETT_WARM_RETRY=0`: named at once, as before).
+///
+/// On an RX 9060 XT (amdxc64 32.0.32029.2010) every one of the pipelines that
+/// ended a batch's process in two full warms (6 of 83,577 each time, 12 keys,
+/// among them the skin pipeline whose draws went black, issue #92) was made
+/// alone, twice each: the compiler ends a process some way into a batch of
+/// [`AT_ONCE`], not on one pipeline. Named, each stayed unmade in every run.
+fn retry_alone() -> bool {
+    std::env::var_os("SCARLETT_WARM_RETRY").is_none_or(|v| v != "0")
+}
+
 fn child(these: &[usize], mut each: impl FnMut(usize, f64, bool)) -> (usize, Option<String>) {
     let list: Vec<String> = these.iter().map(usize::to_string).collect();
     let spawned = std::env::current_exe().and_then(|exe| {
