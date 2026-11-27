@@ -317,6 +317,29 @@ fn in_order() -> bool {
 /// Indirect executions clamped alone for [`in_order`] since the start.
 pub(crate) static IN_ORDER_ALONE: AtomicU64 = AtomicU64::new(0);
 
+/// Indirect executions since the start, and of them those whose arguments
+/// shaders of their list were declared to write ([`in_order_note`]).
+static IN_ORDER_SEEN: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Counts an indirect execution for [`in_order`], and every 16,384th logs
+/// how many there were, how many read arguments their list's shaders wrote,
+/// and how many were clamped alone.
+fn in_order_note(alone: bool, written: impl FnOnce() -> bool) {
+    let all = IN_ORDER_SEEN[0].fetch_add(1, Ordering::Relaxed) + 1;
+    if alone || written() {
+        IN_ORDER_SEEN[1].fetch_add(1, Ordering::Relaxed);
+    }
+    if all % 16_384 == 0 {
+        tracing::info!(
+            target: "scarlett_gpu::ab",
+            "indirect executions so far: {all}, {} reading arguments shaders of their list wrote, {} clamped              alone as written after their batch or window (SCARLETT_INDIRECT_ORDER {})",
+            IN_ORDER_SEEN[1].load(Ordering::Relaxed),
+            IN_ORDER_ALONE.load(Ordering::Relaxed),
+            if in_order() { "on" } else { "off" }
+        );
+    }
+}
+
 /// The most records clamped in one pass ([`windows`]).
 const WINDOW_MOST: u64 = 64;
 
@@ -4332,7 +4355,7 @@ impl State {
         // Arguments written since the open batch or window was clamped, or
         // read in place: clamped alone, right before they run (`in_order`).
         let alone = in_order() && {
-            let since = |opened: u64| list.shader_written_since(&args, arguments, len, opened);
+            let since = |opened: u64| list.shader_written_since(arguments, len, opened);
             args.in_place()
                 || counter.as_ref().is_some_and(|(s, _)| s.in_place())
                 || self.batch.as_ref().is_some_and(|b| since(b.opened))
@@ -4343,6 +4366,7 @@ impl State {
             self.window = None;
             IN_ORDER_ALONE.fetch_add(1, Ordering::Relaxed);
         }
+        in_order_note(alone, || list.shader_written_since(arguments, len, 0));
         // One record without a count: clamped in a batch (`batches`).
         let batch = if !alone && batches() > 0 && max == 1 && count.is_none() {
             args.refresh(list, arguments, len);
