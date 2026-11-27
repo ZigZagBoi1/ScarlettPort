@@ -15,7 +15,7 @@ pub const ALL: [&str; 4] = [STABLE, LOOK, EXPERIMENTAL, CUSTOM];
 pub const LOOK_ON: [(&str, &str); 2] = [("SCARLETT_LOOK", "1"), ("SCARLETT_SHADER_FIXES", "1")];
 
 /// The runtime build the bundled runtime folder is made from (see the repository's runtime/).
-pub const BUNDLED_BUILD: &str = "v0.5.0 runtime";
+pub const BUNDLED_BUILD: &str = concat!("v", env!("CARGO_PKG_VERSION"), " runtime");
 /// The build the Experimental switches were merged into (fx-cand2); older builds ignore them.
 pub const EXPERIMENTAL_BUILD: &str = "fx-cand2";
 

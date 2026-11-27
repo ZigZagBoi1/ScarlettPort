@@ -32,21 +32,40 @@ fn reg_str(root: windows_sys::Win32::System::Registry::HKEY, key: &str, value: &
     (r == 0).then(|| d.to_string())
 }
 
+/// How much an adapter is preferred when naming the machine's GPU: 0 never (software or
+/// virtual adapters), 2 a discrete card, 1 anything else (integrated graphics).
+pub fn adapter_rank(name: &str) -> u8 {
+    let n = name.to_ascii_lowercase();
+    if n.contains("microsoft") || n.contains("virtual") || n.contains("basic display") {
+        0
+    } else if n.contains("nvidia") || n.contains("geforce") || n.contains("radeon rx") || n.contains("radeon pro") || n.contains("arc a") || n.contains("arc b") {
+        2
+    } else {
+        1
+    }
+}
+
 /// Reads the machine's details from the registry and the memory status.
 #[cfg(windows)]
 pub fn system() -> System {
     use windows_sys::Win32::System::Registry::HKEY_LOCAL_MACHINE as HKLM;
     let mut s = System::default();
-    // Display adapters: the first one that is not Microsoft's software adapter.
+    // Display adapters: a discrete card (NVIDIA, AMD) before an integrated one, so laptops and
+    // desktops with the CPU's graphics enabled report the card the game runs on; never
+    // Microsoft's software adapter.
+    let mut best: Option<(u8, String, String)> = None;
     for i in 0..10 {
         let key = format!(r"SYSTEM\CurrentControlSet\Control\Class\{{4d36e968-e325-11ce-bfc1-08002be10318}}\{i:04}");
         let Some(name) = reg_str(HKLM, &key, "DriverDesc") else { continue };
-        if name.contains("Microsoft") || name.contains("Virtual") {
+        let rank = adapter_rank(&name);
+        if rank == 0 || best.as_ref().is_some_and(|b| b.0 >= rank) {
             continue;
         }
-        s.driver = reg_str(HKLM, &key, "DriverVersion").unwrap_or_default();
+        best = Some((rank, name, reg_str(HKLM, &key, "DriverVersion").unwrap_or_default()));
+    }
+    if let Some((_, name, driver)) = best {
         s.gpu = name;
-        break;
+        s.driver = driver;
     }
     s.cpu = reg_str(HKLM, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0", "ProcessorNameString").unwrap_or_default();
     let cv = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
@@ -188,6 +207,14 @@ pub fn as_text(fields: &[(&str, String)]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_discrete_card_is_named_before_integrated_graphics() {
+        assert_eq!(super::adapter_rank("Intel(R) UHD Graphics 770"), 1);
+        assert_eq!(super::adapter_rank("NVIDIA GeForce RTX 4070 SUPER"), 2);
+        assert_eq!(super::adapter_rank("AMD Radeon RX 6600"), 2);
+        assert_eq!(super::adapter_rank("Microsoft Basic Display Adapter"), 0);
+    }
+
     use super::*;
 
     #[test]
