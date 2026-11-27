@@ -2,13 +2,14 @@
 //! runtime would name them: a decoded record's state as the
 //! [`GraphicsState`] a stream with the same fields gives, so that its
 //! `describe()` text, and the title pipeline key made from it and the
-//! shaders (`make::Pending::new`), are the ones the runtime gives the
-//! pipeline when the title creates it from a stream. The keys depend on
-//! the adapter: target formats go through `resource::target_format`,
-//! which asks the host D3D12 device whether it renders to some formats
-//! (so a device is made).
+//! shaders (`make::Pending::new`), can be set beside those of the pipelines
+//! a run wrote down (`known`). The keys depend on the adapter: target
+//! formats go through `resource::target_format`, which asks the host
+//! D3D12 device whether it renders to some formats (so a device is made).
 
+use std::collections::HashMap;
 use std::ffi::CString;
+use std::path::Path;
 
 use scarlett_game::pso_state::{GraphicsDesc, StencilFace, TargetBlend};
 use windows::Win32::Graphics::Direct3D12::*;
@@ -346,6 +347,90 @@ pub fn title_key(shaders: &[(&str, [u8; 32])], describe: Option<&str>) -> String
     key.finalize().to_hex()[..32].to_owned()
 }
 
+/// A pipeline a run wrote down (`known-pipelines.bin`).
+#[derive(Debug, Clone)]
+pub struct BookPipeline {
+    /// The title pipeline key, hex.
+    pub key: String,
+    /// The shaders' stages and container hashes, in the title's order.
+    pub shaders: Vec<(&'static str, [u8; 32])>,
+    /// The graphics state, if the title gave one as a stream.
+    pub state: Option<StateText>,
+    /// The entry did not read whole.
+    pub torn: bool,
+}
+
+/// Every pipeline written down in `dir` (the folder of
+/// `known-pipelines.bin`).
+pub fn book(dir: &Path) -> Vec<BookPipeline> {
+    let mut out = Vec::new();
+    super::known::walk_pipelines(dir, |_, entry| out.push(book_entry(entry)));
+    out
+}
+
+fn book_entry(entry: &[u8]) -> BookPipeline {
+    let key: String = entry
+        .get(..16)
+        .unwrap_or_default()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let mut p = BookPipeline {
+        key,
+        shaders: Vec::new(),
+        state: None,
+        torn: true,
+    };
+    let Some((&count, mut rest)) = entry.get(16..).and_then(|r| r.split_first()) else {
+        return p;
+    };
+    for _ in 0..count {
+        let Some((head, after)) = rest.split_first_chunk::<33>() else {
+            return p;
+        };
+        rest = after;
+        let mut hash = [0; 32];
+        hash.copy_from_slice(&head[1..]);
+        let stage = super::known::STAGES
+            .get(usize::from(head[0]))
+            .copied()
+            .unwrap_or("?");
+        p.shaders.push((stage, hash));
+    }
+    let Some((&graphics, rest)) = rest.split_first() else {
+        return p;
+    };
+    if graphics != 0 {
+        let Some(g) = GraphicsState::get(rest) else {
+            return p;
+        };
+        p.state = Some(text_of(&g));
+    }
+    p.torn = false;
+    p
+}
+
+/// The fields two states differ in.
+pub fn differing<'a>(a: &'a StateText, b: &StateText) -> Vec<&'a str> {
+    let theirs: HashMap<&str, &str> = b
+        .fields
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let mut out: Vec<&str> = a
+        .fields
+        .iter()
+        .filter(|(k, v)| theirs.get(k.as_str()) != Some(&v.as_str()))
+        .map(|(k, _)| k.as_str())
+        .collect();
+    // Fields only the other has (more input elements).
+    let ours: std::collections::HashSet<&str> = a.fields.iter().map(|(k, _)| k.as_str()).collect();
+    if b.fields.iter().any(|(k, _)| !ours.contains(k.as_str())) && !out.contains(&"inputs.count") {
+        out.push("inputs.count");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,6 +498,34 @@ mod tests {
     }
 
     #[test]
+    fn a_decoded_state_reads_back_from_the_book_as_it_was() {
+        let g = state_of(&desc());
+        let mut bytes = Vec::new();
+        g.put(&mut bytes);
+        let back = GraphicsState::get(&bytes).expect("whole");
+        assert_eq!(text_of(&back), text_of(&g));
+        assert_eq!(state_text(&desc()).describe, g.describe());
+    }
+
+    #[test]
+    fn fields_name_where_two_states_differ() {
+        let a = state_text(&desc());
+        let mut other = desc();
+        other.cull_mode = 1;
+        other.target_formats[0] = 10;
+        let b = state_text(&other);
+        assert_ne!(a.describe, b.describe);
+        assert_eq!(
+            differing(&a, &b),
+            ["rasterizer.CullMode", "targets.RTFormats0"]
+        );
+        assert!(differing(&a, &a).is_empty());
+        let mut fewer = desc();
+        fewer.inputs.clear();
+        assert!(differing(&state_text(&fewer), &a).contains(&"inputs.count"));
+    }
+
+    #[test]
     fn the_title_key_is_the_runtime_s() {
         let h = *blake3::hash(b"container").as_bytes();
         let mut want = blake3::Hasher::new();
@@ -466,5 +579,24 @@ mod tests {
         };
         assert_eq!(field("blend.rt0.BlendEnable"), "BOOL(1)");
         assert_eq!(field("blend.rt1.BlendEnable"), "BOOL(0)");
+    }
+
+    #[test]
+    fn a_book_entry_reads_back() {
+        let g = state_of(&desc());
+        let mut entry = vec![0xab; 16];
+        entry.push(2);
+        for (stage, fill) in [(0u8, 1u8), (1, 2)] {
+            entry.push(stage);
+            entry.extend([fill; 32]);
+        }
+        entry.push(1);
+        g.put(&mut entry);
+        let p = book_entry(&entry);
+        assert!(!p.torn);
+        assert_eq!(p.key, "ab".repeat(16));
+        assert_eq!(p.shaders, [("vertex", [1; 32]), ("pixel", [2; 32])]);
+        assert_eq!(p.state.unwrap().describe, g.describe());
+        assert!(book_entry(&entry[..entry.len() - 1]).torn);
     }
 }

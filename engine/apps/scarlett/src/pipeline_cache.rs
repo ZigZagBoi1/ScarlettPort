@@ -2,10 +2,11 @@
 //! (`v2.d3d12PipelineCache`, the last file of `shaders.rpf`) decoded
 //! offline, each record named the way the runtime names the pipeline the
 //! title creates from a stream instead (state text and shader hashes, and
-//! the title pipeline key made of them). It makes a D3D12 device (but no
-//! pipelines) to ask what formats it renders to, as the runtime does: keys
-//! are per adapter. The file written holds the title's state and shader
-//! hashes: it must stay outside the repository.
+//! the title pipeline key made of them), optionally set beside the
+//! pipelines a run wrote down (`known-pipelines.bin`). It makes a D3D12
+//! device (but no pipelines) to ask what formats it renders to, as the
+//! runtime does: keys are per adapter. The files written hold the
+//! title's state and shader hashes: they must stay outside the repository.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
@@ -39,6 +40,13 @@ struct Record {
 impl Record {
     fn whole(&self) -> bool {
         self.failed.is_empty()
+    }
+
+    /// Its shaders as a set (stage and hash, sorted).
+    fn set(&self) -> Vec<(&'static str, [u8; 32])> {
+        let mut s = self.shaders.clone();
+        s.sort();
+        s
     }
 
     fn key(&self) -> String {
@@ -269,10 +277,11 @@ fn archive_path(path: &Path) -> PathBuf {
 #[derive(Default)]
 pub struct Options {
     pub out: Option<PathBuf>,
+    pub book: Option<PathBuf>,
 }
 
 pub fn run(game: PathBuf, o: Options) -> Result<()> {
-    let Options { out } = o;
+    let Options { out, book } = o;
     let began = std::time::Instant::now();
     let path = archive_path(&game);
     let archive = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -359,6 +368,10 @@ pub fn run(game: PathBuf, o: Options) -> Result<()> {
     };
     write_keys(&out, &records)?;
     println!("keys written to {}", out.display());
+
+    if let Some(book) = book {
+        compare(&book, &records, &out)?;
+    }
     Ok(())
 }
 
@@ -401,4 +414,257 @@ fn write_keys(path: &Path, records: &[Record]) -> Result<()> {
     }
     f.flush()?;
     Ok(())
+}
+
+/// The book's pipelines against the records.
+fn compare(book: &Path, records: &[Record], out: &Path) -> Result<()> {
+    let dir = if book.is_dir() {
+        book.to_owned()
+    } else {
+        book.parent().map(Path::to_owned).unwrap_or_default()
+    };
+    let pipelines = pre::book(&dir);
+    anyhow::ensure!(!pipelines.is_empty(), "no pipelines in {}", dir.display());
+    let mut by_set: HashMap<Vec<(&'static str, [u8; 32])>, Vec<usize>> = HashMap::new();
+    let mut record_shaders: HashSet<[u8; 32]> = HashSet::new();
+    for (i, r) in records.iter().enumerate() {
+        record_shaders.extend(r.shaders.iter().map(|s| s.1));
+        if r.whole() {
+            by_set.entry(r.set()).or_default().push(i);
+        }
+    }
+    let mut counts = BTreeMap::<String, usize>::new();
+    let mut fields = BTreeMap::<String, usize>::new();
+    let mut patterns = BTreeMap::<String, usize>::new();
+    let mut orders = BTreeMap::<String, usize>::new();
+    let mut matched_records = HashSet::new();
+    let mut other_fields = BTreeMap::<String, usize>::new();
+    let mut other_patterns = BTreeMap::<String, usize>::new();
+    let mut same_records = HashSet::new();
+    // The pipelines runs drew with (`early-pipelines.txt` beside the book).
+    let used: HashSet<String> = std::fs::read_to_string(dir.join("early-pipelines.txt"))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_owned())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let in_book: HashSet<&str> = pipelines.iter().map(|p| p.key.as_str()).collect();
+    let used_missing = used
+        .iter()
+        .filter(|k| !in_book.contains(k.as_str()))
+        .count();
+    let mut detail = create(&out.with_extension("book.txt"))?;
+    writeln!(detail, "# book-key status record differing-fields")?;
+    let mut count = |what: &str| *counts.entry(what.to_owned()).or_default() += 1;
+    for p in &pipelines {
+        if p.torn {
+            count("book entries that do not read whole");
+            continue;
+        }
+        let describe = p.state.as_ref().map(|s| s.describe.as_str());
+        if pre::title_key(&p.shaders, describe) == p.key {
+            count("book keys the key function gives again (self-check)");
+        }
+        let stages: Vec<&str> = p.shaders.iter().map(|s| s.0).collect();
+        *orders.entry(stages.join(",")).or_default() += 1;
+        let kind = match (p.state.is_some(), stages.as_slice()) {
+            (false, ["compute"]) => "compute",
+            (false, _) => "graphics without stream state",
+            (true, _) if stages.contains(&"mesh") => "graphics mesh",
+            (true, _) => "graphics vertex",
+        };
+        count(&format!("{kind}: in the book"));
+        let mut set = p.shaders.clone();
+        set.sort();
+        let candidates = by_set.get(&set).map(Vec::as_slice).unwrap_or_default();
+        let (status, record, diff) = if candidates.is_empty() {
+            let why = if p
+                .shaders
+                .iter()
+                .any(|s| !matches!(s.0, "vertex" | "pixel" | "mesh" | "compute"))
+            {
+                "no record: a stage records do not have"
+            } else if p.shaders.iter().any(|s| !record_shaders.contains(&s.1)) {
+                "no record: a shader no record names"
+            } else {
+                "no record: shaders of records, not together"
+            };
+            (why, String::from("-"), Vec::new())
+        } else if kind == "compute" || kind == "graphics without stream state" {
+            matched_records.extend(candidates.iter().map(|&c| base(&records[c])));
+            (
+                "same shader (no state to compare)",
+                records[candidates[0]].name.clone(),
+                Vec::new(),
+            )
+        } else {
+            let theirs = p.state.as_ref().expect("graphics");
+            let state = |c: usize| {
+                records[c]
+                    .state
+                    .as_ref()
+                    .expect("whole graphics records have a state")
+            };
+            let value = |s: &pre::StateText, f: &str| {
+                s.fields
+                    .iter()
+                    .find(|(k, _)| k == f)
+                    .map_or("-".to_owned(), |(_, v)| v.replace(' ', ""))
+            };
+            let tally = |into: &mut BTreeMap<String, usize>,
+                         sets: &mut BTreeMap<String, usize>,
+                         c: usize| {
+                let d = pre::differing(state(c), theirs);
+                let mut pattern: Vec<String> = d.iter().map(|f| normalise(f)).collect();
+                pattern.sort();
+                pattern.dedup();
+                for f in &pattern {
+                    *into.entry(f.clone()).or_default() += 1;
+                }
+                *sets.entry(pattern.join(" ")).or_default() += 1;
+                d.iter()
+                    .map(|f| format!("{f}={}/{}", value(state(c), f), value(theirs, f)))
+                    .collect::<Vec<_>>()
+            };
+            if let Some(&c) = candidates
+                .iter()
+                .find(|&&c| state(c).describe == theirs.describe)
+            {
+                matched_records.insert(base(&records[c]));
+                if records[c].key() == p.key {
+                    count(&format!("{kind}: identical, record key equals book key"));
+                }
+                ("identical", records[c].name.clone(), Vec::new())
+            } else if let Some(&c) = candidates
+                .iter()
+                .find(|&&c| state(c).semantic == theirs.semantic)
+            {
+                same_records.insert(base(&records[c]));
+                let shown = tally(&mut fields, &mut patterns, c);
+                (
+                    "same pipeline, other describe()",
+                    records[c].name.clone(),
+                    shown,
+                )
+            } else {
+                let c = *candidates
+                    .iter()
+                    .min_by_key(|&&c| pre::differing(state(c), theirs).len())
+                    .expect("a candidate");
+                let shown = tally(&mut other_fields, &mut other_patterns, c);
+                (
+                    "same shaders, another pipeline",
+                    records[c].name.clone(),
+                    shown,
+                )
+            }
+        };
+        count(&format!("{kind}: {status}"));
+        if used.contains(&p.key) {
+            count(&format!("early list, {kind}: {status}"));
+        }
+        let shaders: Vec<String> = p
+            .shaders
+            .iter()
+            .map(|(s, h)| format!("{s}={}", hex(&h[..8])))
+            .collect();
+        writeln!(
+            detail,
+            "{} {} {record} {} {} | {}",
+            p.key,
+            status.replace(' ', "_"),
+            if diff.is_empty() {
+                "-".to_owned()
+            } else {
+                diff.join(",")
+            },
+            shaders.join(","),
+            describe.unwrap_or("-")
+        )?;
+    }
+    detail.flush()?;
+    println!("book {} ({} pipelines):", dir.display(), pipelines.len());
+    for (k, v) in &counts {
+        println!("  {v:>7}  {k}");
+    }
+    println!(
+        "  {:>7}  records identical to a book pipeline (in one of their choices of containers)",
+        matched_records.len()
+    );
+    println!(
+        "  {:>7}  graphics records equal to a book pipeline in what they do only",
+        same_records.difference(&matched_records).count()
+    );
+    println!(
+        "  {:>7}  pipelines in early-pipelines.txt (requested by draws or dispatches in any run on this cache, made or not), {used_missing} of them not in the book",
+        used.len()
+    );
+    println!("stage orders in the book:");
+    for (k, v) in &orders {
+        println!("  {v:>7}  {k}");
+    }
+    let top = |m: BTreeMap<String, usize>, title: &str, n: usize| {
+        println!("{title}");
+        let mut v: Vec<_> = m.into_iter().collect();
+        v.sort_by_key(|x| std::cmp::Reverse(x.1));
+        for (k, c) in v.into_iter().take(n) {
+            println!("  {c:>7}  {k}");
+        }
+    };
+    top(
+        fields,
+        "same pipeline, other describe(): fields that differ (N as *):",
+        30,
+    );
+    top(patterns, "same pipeline, other describe(): field sets:", 15);
+    top(
+        other_fields,
+        "same shaders, another pipeline: fields that differ from the nearest record:",
+        20,
+    );
+    top(
+        other_patterns,
+        "same shaders, another pipeline: field sets:",
+        10,
+    );
+    println!(
+        "per book pipeline: {}",
+        out.with_extension("book.txt").display()
+    );
+    Ok(())
+}
+
+/// A record's name without its choice of containers.
+fn base(r: &Record) -> &str {
+    r.name.split('v').next().unwrap_or(&r.name)
+}
+
+/// A field name with its target or element number taken out.
+fn normalise(field: &str) -> String {
+    let mut out = String::new();
+    let mut digits = false;
+    for c in field.chars() {
+        if c.is_ascii_digit() {
+            if !digits {
+                out.push('*');
+            }
+            digits = true;
+        } else {
+            digits = false;
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn field_numbers_are_taken_out() {
+        assert_eq!(normalise("blend.rt3.SrcBlend"), "blend.rt*.SrcBlend");
+        assert_eq!(normalise("targets.RTFormats12"), "targets.RTFormats*");
+        assert_eq!(normalise("sample_mask"), "sample_mask");
+    }
 }

@@ -169,7 +169,7 @@ enum Command {
     /// Decode the title's precompiled pipeline cache (in `shaders.rpf`)
     /// offline and write each record's key as the runtime names the
     /// pipeline (state text, shader hashes, title pipeline key) to a file
-    /// outside the repository.
+    /// outside the repository; with --book, set a recorded book beside it.
     #[cfg(windows)]
     PipelineCache {
         /// The game folder (or its `shaders.rpf`).
@@ -177,6 +177,9 @@ enum Command {
         /// Where the keys go (default: the cache's `pipelines` folder).
         #[arg(long)]
         out: Option<PathBuf>,
+        /// A `known-pipelines.bin` (or its folder) to compare with.
+        #[arg(long)]
+        book: Option<PathBuf>,
     },
     /// Print the shader translator's fingerprint (`translator <hex>`): the
     /// shader cache is valid for one fingerprint, so a launcher re-prepares
@@ -282,8 +285,8 @@ fn main() -> Result<()> {
         #[cfg(windows)]
         Command::Prepare { jobs, all } => warm::prepare(jobs, all),
         #[cfg(windows)]
-        Command::PipelineCache { game, out } => {
-            pipeline_cache::run(game, pipeline_cache::Options { out })
+        Command::PipelineCache { game, out, book } => {
+            pipeline_cache::run(game, pipeline_cache::Options { out, book })
         }
         Command::Fingerprint => {
             println!("translator {}", scarlett_hle::SHADER_TRANSLATOR);

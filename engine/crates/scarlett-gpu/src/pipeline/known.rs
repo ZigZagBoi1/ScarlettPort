@@ -36,7 +36,7 @@ const PIPELINES: &str = "known-pipelines.bin";
 /// Compiler crashes and hangs recorded by `scarlett warm` and the runtime guard.
 pub const WARM_BAD_FILE: &str = "warm-bad.txt";
 /// Stages by their number in the files.
-const STAGES: [&str; 8] =
+pub(super) const STAGES: [&str; 8] =
     ["vertex", "pixel", "domain", "hull", "geometry", "compute", "amplification", "mesh"];
 
 /// `SCARLETT_PIPELINE_BOOK=1`: the pipelines the title creates are kept.
@@ -171,7 +171,7 @@ fn walk_shaders(dir: &Path, mut f: impl FnMut(u8, [u8; 32], u64, u32)) -> u64 {
 
 /// Calls `f` with each pipeline's number and entry; where the last whole one
 /// ends.
-fn walk_pipelines(dir: &Path, mut f: impl FnMut(usize, &[u8])) -> u64 {
+pub(super) fn walk_pipelines(dir: &Path, mut f: impl FnMut(usize, &[u8])) -> u64 {
     let bytes = std::fs::read(dir.join(PIPELINES)).unwrap_or_default();
     let (mut at, mut n) = (0, 0);
     while let Some(head) = bytes.get(at..at + 4) {
@@ -456,7 +456,7 @@ macro_rules! numbers {
 
 impl GraphicsState {
     /// The state as bytes.
-    fn put(&self, out: &mut Vec<u8>) {
+    pub(super) fn put(&self, out: &mut Vec<u8>) {
         out.push(u8::from(self.depth_bounds));
         for f in [self.rasterizer.DepthBiasClamp, self.rasterizer.SlopeScaledDepthBias] {
             out.extend(f.to_le_bytes());
@@ -497,7 +497,7 @@ impl GraphicsState {
         }
     }
 
-    fn get(bytes: &[u8]) -> Option<GraphicsState> {
+    pub(super) fn get(bytes: &[u8]) -> Option<GraphicsState> {
         let mut g = GraphicsState::default();
         let (&bounds, mut rest) = bytes.split_first()?;
         g.depth_bounds = bounds != 0;
