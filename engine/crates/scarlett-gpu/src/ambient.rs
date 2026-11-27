@@ -33,6 +33,19 @@
 //! The air of a room is lit by the same probes: without rays they hold the
 //! sky's light indoors too, a brown veil at sunset. `SCARLETT_AMBIENT_AIR`
 //! bounds what the air scatters by a multiple of the light around.
+//!
+//! Translucent surfaces (the material that lets light through: paper,
+//! posters, lamp shades) get a light of their own from the program that
+//! gathers the probes' light at each pixel (`CS_FinalGather_*`): what the
+//! lamps and the sun send through them from behind, kept in an image of its
+//! own (R32_UINT holding R9G9B9E5, or floats) that the tiled lighting adds.
+//! With the title's ray-traced light (`SCARLETT_BVH_BUILDER=1`) such surfaces
+//! look right; without it that light reaches them through walls too, a
+//! violet glow indoors. So without rays that image is cleared right after
+//! the program, whether the stand-in is set or not. The cost: translucent
+//! surfaces get no light from behind (lamp shades, curtains against the
+//! sun); what falls on their front stays. `SCARLETT_TRANSLUCENT_BACKLIGHT=1`
+//! keeps the title's.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -51,6 +64,9 @@ pub(crate) enum Role {
     /// Adds the lamps' light to what the air scatters (the last program
     /// that writes that volume before it is summed up along the view).
     Air,
+    /// Gathers the probes' light at each pixel, and the light translucent
+    /// surfaces get from behind.
+    Gather,
 }
 
 /// The program's part in this, by its name in the container.
@@ -62,6 +78,8 @@ pub(crate) fn role(container: &[u8]) -> Option<Role> {
         Some(Role::Radiance)
     } else if has(b"CS_AccumulateLocalLightInscatteringVolume") {
         Some(Role::Air)
+    } else if has(b"CS_FinalGather") {
+        Some(Role::Gather)
     } else {
         None
     }
@@ -75,6 +93,31 @@ pub(crate) const DEPTH: (u8, u32) = (0, 464);
 pub(crate) const RADIANCE: (u8, u32) = (1, 16);
 /// Where the light the air scatters is.
 pub(crate) const AIR: (u8, u32) = (1, 32);
+/// Where the gather writes the light translucent surfaces get from behind:
+/// root parameter, place in its table, and the program's register for it.
+/// Packed (R9G9B9E5 in an R32_UINT image) at the first when the title's
+/// setting asks for it, as in the frames seen; as floats at the second when
+/// it does not. Both name the same image in those frames, and the program
+/// writes nothing but zeros or that light at either.
+pub(crate) const BACKLIGHT: [(u8, u32, u32); 2] = [(1, 120, 32), (1, 112, 36)];
+
+/// How the image at a place of [`BACKLIGHT`] (its dword in the table) is
+/// cleared, by its format: as integers, as floats, or not at all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Form {
+    Packed,
+    Float,
+}
+
+pub(crate) fn backlight_form(dword: u32, format: i32) -> Option<Form> {
+    match (dword, format) {
+        // R32_UINT
+        (120 | 112, 42) => Some(Form::Packed),
+        // R32G32B32A32_FLOAT, R16G16B16A16_FLOAT, R11G11B10_FLOAT, R32_FLOAT
+        (112, 2 | 10 | 26 | 41) => Some(Form::Float),
+        _ => None,
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Set {
@@ -97,9 +140,31 @@ fn set() -> Set {
     *SET.get_or_init(|| parse(&std::env::var("SCARLETT_AMBIENT").unwrap_or_default()))
 }
 
-/// Whether the stand-in is on: set, and the title's rays find nothing.
-pub(crate) fn on() -> bool {
+/// Whether there is something to do after a program of that role: the
+/// title's rays find nothing, and the stand-in is set (after the gather:
+/// the title's light from behind is not asked for).
+pub(crate) fn on(role: Role) -> bool {
+    if role == Role::Gather {
+        return !backlight_kept() && !crate::pipeline::builder_runs();
+    }
     set() != Set::Off && !crate::pipeline::builder_runs() && !off_now()
+}
+
+/// `SCARLETT_TRANSLUCENT_BACKLIGHT=1`: translucent surfaces keep the light
+/// the title gives them from behind, though without rays it comes through walls
+/// (live with `SCARLETT_AB=<s>,SCARLETT_TRANSLUCENT_BACKLIGHT`, diagnostics:
+/// on, the title's).
+fn backlight_kept() -> bool {
+    #[cfg(feature = "diagnostics")]
+    if let Some(on) = crate::ab::pick("SCARLETT_TRANSLUCENT_BACKLIGHT") {
+        return on;
+    }
+    static SET: OnceLock<bool> = OnceLock::new();
+    *SET.get_or_init(|| kept_by(&std::env::var("SCARLETT_TRANSLUCENT_BACKLIGHT").unwrap_or_default()))
+}
+
+fn kept_by(set: &str) -> bool {
+    matches!(set.trim(), "1" | "on")
 }
 
 /// `SCARLETT_AB=<s>,SCARLETT_AMBIENT_OFF` (diagnostics): the stand-in and the
@@ -528,6 +593,10 @@ pub(crate) struct Views {
 /// if it recorded nothing.
 pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     use std::sync::atomic::Ordering;
+    // (The gather has its own pass, [`clear_backlight`].)
+    if role == Role::Gather {
+        return false;
+    }
     let Some(pass) = pass() else {
         return false;
     };
@@ -590,6 +659,7 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
                 run(&pass.mean, 1, 1, 1);
                 KEPT.store(true, Ordering::Relaxed);
             }
+            Role::Gather => {}
             Role::Air => run(&pass.air, views.size[0].div_ceil(8), views.size[1].div_ceil(8), views.slices.div_ceil(2)),
             Role::Resolve => {
                 if constant == 0.0 {
@@ -599,6 +669,101 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
                 run(&pass.raise, views.size[0].div_ceil(8), views.size[1].div_ceil(8), 1);
             }
         }
+    }
+    true
+}
+
+/// Clears the light translucent surfaces get from behind: its own small
+/// pass, so that the stand-in's are not made for it when the stand-in is off.
+const CLEAR_SOURCE: &str = r#"
+#define RS "RootConstants(num32BitConstants=2, b0), DescriptorTable(UAV(u0))"
+cbuffer Set : register(b0) { uint width; uint height; };
+#ifdef PACKED
+RWTexture2D<uint> image : register(u0);
+#else
+RWTexture2D<float4> image : register(u0);
+#endif
+[RootSignature(RS)]
+[numthreads(8, 8, 1)]
+void clear(uint3 at : SV_DispatchThreadID) {
+    if (at.x < width && at.y < height) image[at.xy] = 0;
+}
+"#;
+
+struct Clear {
+    root: ID3D12RootSignature,
+    packed: ID3D12PipelineState,
+    float: ID3D12PipelineState,
+}
+// SAFETY: D3D12 objects are free-threaded.
+unsafe impl Send for Clear {}
+// SAFETY: as above.
+unsafe impl Sync for Clear {}
+
+fn make_clear(device: &ID3D12Device) -> windows::core::Result<Clear> {
+    let mut root: Option<ID3D12RootSignature> = None;
+    let mut pipeline = |defines: &str| -> windows::core::Result<ID3D12PipelineState> {
+        let code = crate::host::compile(&format!("{defines}\n{CLEAR_SOURCE}"), s!("clear"), s!("cs_5_1"))?;
+        // SAFETY: the root signature is inside the shader; plain creations.
+        unsafe {
+            if root.is_none() {
+                root = Some(device.CreateRootSignature(0, &code)?);
+            }
+            let desc = D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                pRootSignature: std::mem::transmute_copy(&root),
+                CS: D3D12_SHADER_BYTECODE { pShaderBytecode: code.as_ptr().cast(), BytecodeLength: code.len() },
+                ..Default::default()
+            };
+            device.CreateComputePipelineState(&desc)
+        }
+    };
+    let packed = pipeline("#define PACKED")?;
+    let float = pipeline("")?;
+    Ok(Clear { root: root.ok_or_else(windows::core::Error::empty)?, packed, float })
+}
+
+/// After the gather, in `list` with the program's view heap set: `image` (a
+/// view in that heap, of `size`) to zeros. Replaces the list's compute root
+/// signature and pipeline; false if it recorded nothing.
+pub(crate) fn clear_backlight(
+    list: &HostList,
+    image: D3D12_GPU_DESCRIPTOR_HANDLE,
+    size: [u32; 2],
+    form: Form,
+    dword: u32,
+) -> bool {
+    static CLEAR: OnceLock<Option<Clear>> = OnceLock::new();
+    let made = || {
+        let made = make_clear(&host()?.device);
+        made.inspect_err(|e| tracing::warn!(error = %e, "translucent surfaces' light from behind is not cleared")).ok()
+    };
+    let Some(clear) = CLEAR.get_or_init(made).as_ref() else {
+        return false;
+    };
+    static SAID: Mutex<Vec<(u32, Form)>> = Mutex::new(Vec::new());
+    {
+        let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+        if !said.contains(&(dword, form)) && said.len() < 4 {
+            said.push((dword, form));
+            tracing::info!(
+                ?form,
+                dword,
+                ?size,
+                "translucent surfaces' light from behind cleared after the final gather: without rays it comes through walls (SCARLETT_TRANSLUCENT_BACKLIGHT=1 keeps it)"
+            );
+        }
+    }
+    let l = &list.list;
+    // SAFETY: an open list with the heap of the view set; the title's program
+    // has just written through that view, so the image is in the state it needs.
+    unsafe {
+        uav_barrier(l);
+        l.SetComputeRootSignature(&clear.root);
+        l.SetComputeRoot32BitConstants(0, 2, size.as_ptr().cast(), 0);
+        l.SetComputeRootDescriptorTable(1, image);
+        l.SetPipelineState(if form == Form::Packed { &clear.packed } else { &clear.float });
+        l.Dispatch(size[0].div_ceil(8), size[1].div_ceil(8), 1);
+        uav_barrier(l);
     }
     true
 }
@@ -623,6 +788,33 @@ mod tests {
         assert_eq!(role(b"..CS_CacheScreenSpaceRadiance_eed2fc35.."), Some(Role::Radiance));
         assert_eq!(role(b"CS_AccumulateLocalLightInscatteringVolume_7e2f5eef"), Some(Role::Air));
         assert_eq!(role(b"CS_TemporalResolve"), None);
+        // The two programs seen with the light from behind are listed as
+        // CS_FinalGather_1_1_1_0 and _0_1_1_0; the names in their containers
+        // end _1_1_1_1 and _0_1_1_1.
+        for name in ["1_1_1_0", "0_1_1_0", "1_1_1_1", "0_1_1_1"] {
+            let container = format!("indirect_diffuse_lighting:CS_FinalGather_{name}_a1d0fa7d_Wrapped");
+            assert_eq!(role(container.as_bytes()), Some(Role::Gather));
+        }
+    }
+
+    #[test]
+    fn backlight_forms() {
+        assert_eq!(backlight_form(120, 42), Some(Form::Packed));
+        assert_eq!(backlight_form(112, 42), Some(Form::Packed));
+        assert_eq!(backlight_form(112, 10), Some(Form::Float));
+        assert_eq!(backlight_form(112, 2), Some(Form::Float));
+        // Only integers where the packed light goes; nothing else anywhere.
+        assert_eq!(backlight_form(120, 10), None);
+        assert_eq!(backlight_form(112, 28), None);
+        assert_eq!(backlight_form(176, 42), None);
+    }
+
+    #[test]
+    fn backlight_switch() {
+        assert!(!kept_by(""));
+        assert!(!kept_by("0"));
+        assert!(kept_by("1"));
+        assert!(kept_by(" on "));
     }
 
     /// The passes compile with the system's compiler and the host takes them.
@@ -632,5 +824,6 @@ mod tests {
             return;
         };
         make(&host.device, |bytes| host.uav_buffer(bytes)).expect("the passes");
+        make_clear(&host.device).expect("the clears");
     }
 }

@@ -159,8 +159,22 @@ fork's constant.
 | `SCARLETT_AMBIENT=constant:<level>` | the same light everywhere |
 | `SCARLETT_AMBIENT_SHADE=<strength>,<metres>` | the creases (1,0.6) |
 | `SCARLETT_AMBIENT_AIR=<multiple>` | what the air scatters is bounded by a multiple of the light around (off: the brown veil in the day room stays with it, light-14) |
+| `SCARLETT_TRANSLUCENT_BACKLIGHT=1` | translucent surfaces keep the title's light from behind (unset: cleared, below) |
 
 It is off while the builder runs.
+
+Translucent surfaces (paper, posters, lamp shades: material 5 in the
+G-buffer) also get light from behind: the program that gathers the probes'
+light at each pixel (`CS_FinalGather_*`, dispatched indirectly) adds what the
+lamps and the sun send through them into an image of its own (R32_UINT holding
+R9G9B9E5, or floats when the title's setting says so) that the tiled lighting
+reads. With the title's ray-traced light (`SCARLETT_BVH_BUILDER=1`) such
+surfaces look right; without it that light reaches them through walls, and
+they glow violet indoors. So while the builder does not run that image is
+cleared right after the program, whether `SCARLETT_AMBIENT` is set or not.
+The cost: without ray tracing translucent surfaces get no light from behind
+(lamp shades, curtains against the sun); light that falls on their front
+stays. `SCARLETT_TRANSLUCENT_BACKLIGHT=1` keeps the title's.
 
 ## Where to look
 

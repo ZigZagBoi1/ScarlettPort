@@ -3259,7 +3259,7 @@ impl State {
         self.buffers_written();
         DISPATCHED.fetch_add(1, Ordering::Relaxed);
         if let Some(role) = p.stages.first().and_then(|s| s.shader.ambient)
-            && crate::ambient::on()
+            && crate::ambient::on(role)
             && self.ambient(list, p, role)
         {
             self.host_pipeline = 0;
@@ -3296,19 +3296,53 @@ impl State {
             let host = crate::resource::host_resource(resource as This)?;
             // SAFETY: a live resource.
             let desc = unsafe { host.GetDesc() };
-            Some((desc, heap.gpu_handle((start + offset * 4) / 32)))
+            Some((desc, heap.gpu_handle((start + offset * 4) / 32), resource))
         };
+        if role == Role::Gather {
+            // Each place the light from behind may be written to, once an
+            // image: the program's own register there, and an image of a
+            // format that form of the light can have.
+            let mut cleared: Vec<usize> = Vec::new();
+            let mut recorded = false;
+            for (slot, offset, register) in crate::ambient::BACKLIGHT {
+                let ours = t.used.iter().any(|u| {
+                    u.kind == ResourceType::Uav
+                        && u.root == RootType::Table
+                        && (u.slot, u.table_offset_dwords, u.lower_bound) == (slot, offset, register)
+                });
+                let Some((of, image, resource)) = entry(ResourceType::Uav, (slot, offset)).filter(|_| ours) else {
+                    continue;
+                };
+                let plane = of.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+                let Some(form) = crate::ambient::backlight_form(offset, of.Format.0).filter(|_| plane) else {
+                    continue;
+                };
+                if cleared.contains(&resource) {
+                    continue;
+                }
+                cleared.push(resource);
+                if !crate::ambient::clear_backlight(list, image, [of.Width as u32, of.Height], form, offset) {
+                    break;
+                }
+                recorded = true;
+            }
+            if !recorded {
+                once!("translucent surfaces' light from behind left as it is: another image or other tables");
+            }
+            return recorded;
+        }
         let at = match role {
             Role::Resolve => LIGHT,
             Role::Radiance => RADIANCE,
             Role::Air => AIR,
+            Role::Gather => return false,
         };
         let image = entry(ResourceType::Uav, at);
         let depth = match role {
             Role::Resolve => entry(ResourceType::Srv, DEPTH),
-            Role::Radiance | Role::Air => image,
+            Role::Radiance | Role::Air | Role::Gather => image,
         };
-        let (Some((of, image)), Some((seen, depth))) = (image, depth) else {
+        let (Some((of, image, _)), Some((seen, depth, _))) = (image, depth) else {
             once!(?role, "no stand-in for the indirect light: other tables");
             return false;
         };
@@ -4507,6 +4541,18 @@ impl State {
             DISPATCHED.fetch_add(1, Ordering::Relaxed);
         } else {
             DRAWN.fetch_add(1, Ordering::Relaxed);
+        }
+        // The final gather is dispatched this way: its light from behind is
+        // cleared here too (`crate::ambient`; the stand-in's own passes follow
+        // direct dispatches only, as before).
+        let role = p.stages.first().and_then(|s| s.shader.ambient);
+        if kind == DISPATCH
+            && role == Some(crate::ambient::Role::Gather)
+            && crate::ambient::on(crate::ambient::Role::Gather)
+            && self.ambient(list, p, crate::ambient::Role::Gather)
+        {
+            self.host_pipeline = 0;
+            self.host_roots[1] = 0;
         }
         true
     }
