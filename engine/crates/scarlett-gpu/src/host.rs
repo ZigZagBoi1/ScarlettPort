@@ -941,6 +941,14 @@ fn create() -> windows::core::Result<Host> {
             let amd = crate::indirect::amd(&device);
             scarlett_shader::emit::set_host_rdna(amd && o1.WaveLaneCountMin == 32 && o1.WaveLaneCountMax == 64);
         }
+        // RDNA 4 (Navi 48: RX 9070, 9070 XT, Radeon AI PRO R9700; Navi 44:
+        // RX 9060 XT) are AMD's device ids 0x7550-0x75ff; RDNA 3 lies below
+        // (0x744c: RX 7900 XTX). Its shader compiler faults on a raw view's
+        // size asked through the handle of a load (#73; ported from
+        // avatarmanz/VIctory-7900XTX#357, GPL-3.0).
+        let rdna4 = crate::indirect::rdna4(&device);
+        scarlett_shader::emit::set_host_rdna4(rdna4);
+        tracing::info!(rdna4, "host RDNA 4 check");
         let messages = debug
             .then(|| device.cast::<ID3D12InfoQueue>().ok())
             .flatten();

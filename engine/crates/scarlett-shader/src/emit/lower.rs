@@ -1123,9 +1123,60 @@ fn own_bits_on() -> bool {
 
 /// What the translator was told of the host, for a cache's key: the widest
 /// wave, the view heap's limit, where the raw twins of its views start, and
-/// what it writes for the console's own hardware.
-pub fn host_settings() -> [u32; 4] {
-    [host_max_wave(), super::shader::view_heap_limit(), super::shader::raw_views(), host_rdna()]
+/// what it writes for the console's own hardware, and whether a raw view's
+/// size is asked through a handle of its own.
+pub fn host_settings() -> [u32; 5] {
+    [
+        host_max_wave(),
+        super::shader::view_heap_limit(),
+        super::shader::raw_views(),
+        host_rdna(),
+        u32::from(raw_size_own_handle()),
+    ]
+}
+
+static HOST_RDNA4: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tells the translator that the host is an AMD RDNA 4 card
+/// ([`raw_size_own_handle`]).
+pub fn set_host_rdna4(on: bool) {
+    HOST_RDNA4.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's choice for [`raw_size_own_handle`], for its thread only.
+    pub(super) static TEST_RAW_SIZE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// What `SCARLETT_RAW_SIZE_HANDLE` (or `VICTORY_RAW_SIZE_HANDLE`) asks:
+/// `1` on, `0` off, anything else the host's default.
+fn raw_size_asked(value: Option<&str>) -> Option<bool> {
+    match value.map(str::trim) {
+        Some("1") => Some(true),
+        Some("0") => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether a raw view's size is asked through a handle of its own (see
+/// `GetDimensions` of a raw view in [`Lower`]): on RDNA 4 hosts, where AMD's
+/// compiler faults without it (#73); `SCARLETT_RAW_SIZE_HANDLE=0` / `=1` off
+/// or on on any host. Part of the translation: the shader cache keys on it
+/// ([`host_settings`]). Ported from avatarmanz/VIctory-7900XTX#357 (GPL-3.0).
+pub(super) fn raw_size_own_handle() -> bool {
+    #[cfg(test)]
+    if let Some(on) = TEST_RAW_SIZE.get() {
+        return on;
+    }
+    static ASKED: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    let asked = *ASKED.get_or_init(|| {
+        let value = std::env::var("SCARLETT_RAW_SIZE_HANDLE")
+            .or_else(|_| std::env::var("VICTORY_RAW_SIZE_HANDLE"))
+            .ok();
+        raw_size_asked(value.as_deref())
+    });
+    asked.unwrap_or_else(|| HOST_RDNA4.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// The spin-wait cut of fx-shaderperf (`SCARLETT_SPIN_LIMIT`) is not taken on
@@ -6560,7 +6611,6 @@ impl<'a> Lower<'a> {
         };
         let src = Source::Loaded { load: site, first };
         let h = self.handle(site, &src, false, props)?;
-        let c = self.cur;
         let i32t = self.s.t.i32;
         let dims = self.s.m.named_struct("dx.types.Dimensions", vec![i32t; 4]);
         let mip = if image.is_some() && !uav {
@@ -6568,6 +6618,34 @@ impl<'a> Lower<'a> {
         } else {
             self.s.m.undef(i32t)
         };
+        // On RDNA 4 ([`raw_size_own_handle`]) a raw view's size is asked through
+        // a handle of its own, from an index value of its own, marked
+        // NonUniformResourceIndex. AMD's compiler (RX 9060 XT, RX 9070 XT,
+        // drivers 26.10.1 and 26.11.2: amdxc64.dll+0x861b9f, a read of 0x8)
+        // faults in CreateComputePipelineState on a program whose
+        // `getDimensions` and load of one heap buffer take their handles from
+        // the same index value (#73). The mark changes no value; the index is
+        // uniform. Ported from avatarmanz/VIctory-7900XTX#357 (GPL-3.0).
+        let h = match &src {
+            // (A waterfall's per-lane handle is marked already.)
+            Source::Loaded { load, first }
+                if image.is_none() && raw_size_own_handle() && !self.x.res.waterfall.loads.contains(load) =>
+            {
+                // Its index computed anew, and kept so: with one index value
+                // for both handles (the clean-up's REUSE merges equal ones) it
+                // faults still.
+                let mark = self.s.m.mark();
+                let index = self.heap_index(*load, *first, false)?;
+                let (index, bounded) = self.raw_twin(&src, index, false, props);
+                let h = self.s.heap_handle_at(self.cur, index, false, true, props, bounded);
+                self.s.m.keep_since(mark);
+                // (Not an access of each lane's own: the count is of those.)
+                self.s.nonuniform_handles -= 1;
+                h
+            }
+            _ => h,
+        };
+        let c = self.cur;
         let d = self
             .s
             .op(c, "getDimensions", Attr::ReadOnly, dims, 72, &[h, mip]);
@@ -13247,6 +13325,14 @@ mod tests {
     #[test]
     fn perm_constant_selector_needs_no_int64() {
         assert_eq!(perm_features(128) & 0x8000, 0);
+    }
+
+    #[test]
+    fn the_raw_size_switch_reads_one_and_zero() {
+        assert_eq!(super::raw_size_asked(Some("1")), Some(true));
+        assert_eq!(super::raw_size_asked(Some(" 0 ")), Some(false));
+        assert_eq!(super::raw_size_asked(Some("yes")), None);
+        assert_eq!(super::raw_size_asked(None), None);
     }
 
     #[test]

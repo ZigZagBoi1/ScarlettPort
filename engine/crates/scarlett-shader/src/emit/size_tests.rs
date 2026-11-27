@@ -15,6 +15,12 @@ use crate::{ShaderError, io, ir, resource, structure};
 /// s0 and the view heap at s1; `srv`: the dwords and the stride of the used
 /// resource at the table's first entry (the third is a raw UAV).
 fn build(words: &[u32], srv: (u8, u32)) -> Result<HostShader, ShaderError> {
+    build_with(words, srv, true)
+}
+
+/// [`build`], with a raw view's size asked through a handle of its own or not
+/// (`raw_size_own_handle`).
+fn build_with(words: &[u32], srv: (u8, u32), own_size_handle: bool) -> Result<HostShader, ShaderError> {
     let param = |root, user_data| RootParam {
         root,
         table_offset_dwords: 0,
@@ -48,6 +54,10 @@ fn build(words: &[u32], srv: (u8, u32)) -> Result<HostShader, ShaderError> {
         }),
         code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
     };
+    // The size queries as RDNA 4 hosts have them (`raw_size_own_handle`): the
+    // tests read sizes on the host's GPU, and on RDNA 4 the other form faults
+    // AMD's compiler (the record count of a buffer read by index did).
+    super::lower::TEST_RAW_SIZE.set(Some(own_size_handle));
     let p = ir::build(&native.code, native.wave64, native.vgprs)?;
     let st = structure::structure(&p)?;
     let res = resource::track(&p, &native.layout, native.stage, Some(&st))?;
@@ -223,6 +233,24 @@ fn the_record_count_of_a_structured_buffer_read_by_index() {
     for (label, got) in run(&shader, &views) {
         assert_eq!(got[..2], [3, 77], "{label}");
     }
+}
+
+/// The program of [`the_record_count_of_a_structured_buffer_read_by_index`]
+/// translates (and validates) either way, and the RDNA 4 form asks the size
+/// through a handle of its own: the two translations differ. Offline: nothing
+/// runs on the GPU.
+#[test]
+fn a_raw_size_through_its_own_handle_is_a_translation_of_its_own() {
+    let load = [
+        0x7E06_0280, // v_mov_b32 v3, 0
+        0xE030_2000, // buffer_load_dword v5, v3, s[8:11], 0 idxen
+        0x8002_0503,
+        0x7E0A_0505, // v_readfirstlane_b32 s5, v5
+    ];
+    let words = [TABLE, COUNT, &load, STORE].concat();
+    let shared = build_with(&words, (4, 16), false).expect("translates with one handle");
+    let own = build_with(&words, (4, 16), true).expect("translates with a handle of its own");
+    assert_ne!(shared.dxil, own.dxil);
 }
 
 /// An upscaler counts its groups in a texture with atomics and sets the
