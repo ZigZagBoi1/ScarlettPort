@@ -172,10 +172,31 @@ pub fn prepare(jobs: Option<usize>, all: bool) -> Result<()> {
     let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
     let jobs = jobs.unwrap_or(cores).max(1);
     let steps = if all { 3 } else { 2 };
-    println!("prepare step 1/{steps} shaders");
-    crate::translate::precompile(Vec::new(), Some(jobs))?;
-    println!("prepare step 2/{steps} library");
     let dir = folder()?;
+    // The shipped pipeline list: its shaders are picked up from the game
+    // files on the way through them.
+    let list = shipped_list();
+    let seed = list.as_deref().and_then(|l| known::plan_seed(&dir, l));
+    if list.is_some() && seed.is_none() {
+        println!(
+            "prepare note the pipeline list is not one this build reads; pipelines are made as runs record them"
+        );
+    }
+    println!("prepare step 1/{steps} shaders");
+    let found = crate::translate::precompile_collect(
+        Vec::new(),
+        Some(jobs),
+        seed.as_ref().map(|s| &s.wanted),
+    )?;
+    if let Some(seed) = &seed {
+        let s = known::finish_seed(&dir, seed, &found).context("pipeline list")?;
+        println!("prepare progress seed {} {}", s.resolved, s.listed);
+        println!(
+            "seed         {} of {} listed pipelines have their shaders in the game files ({} shaders not found)",
+            s.resolved, s.listed, s.missing_shaders
+        );
+    }
+    println!("prepare step 2/{steps} library");
     scarlett_hle::known_pipelines::use_translations(dir.with_file_name("shaders"));
     let keys = known::keys(&dir);
     let early = std::fs::read_to_string(dir.join("early-pipelines.txt")).unwrap_or_default();
@@ -205,6 +226,43 @@ pub fn prepare(jobs: Option<usize>, all: bool) -> Result<()> {
         run(Some(jobs), None, false, false, None)?;
     }
     println!("prepare done {:.0}", began.elapsed().as_secs_f64());
+    Ok(())
+}
+
+/// The pipeline list shipped with the engine (pipelines with shaders named by
+/// hash, no shader code; see `known::write_list`), so that a first run's
+/// pipelines are made before it, not while it draws.
+/// `SCARLETT_PIPELINE_LIST=<file>` reads another, `=0` none.
+const SHIPPED_LIST: &[u8] = include_bytes!("../data/pipelines.list");
+
+fn shipped_list() -> Option<Vec<u8>> {
+    let var = std::env::var_os("SCARLETT_PIPELINE_LIST")
+        .or_else(|| std::env::var_os("VICTORY_PIPELINE_LIST"));
+    match var {
+        Some(v) if v == "0" => None,
+        Some(v) => std::fs::read(&v).ok(),
+        None => (!SHIPPED_LIST.is_empty()).then(|| SHIPPED_LIST.to_vec()),
+    }
+}
+
+/// `scarlett pipeline-list <out> <cache folder>...`: writes the pipeline list
+/// of the pipelines the runs on those caches drew with (their early lists),
+/// from their pipeline books (`SCARLETT_PIPELINE_BOOK=1`).
+pub fn write_list(out: &Path, caches: &[PathBuf]) -> Result<()> {
+    let dirs: Vec<PathBuf> = caches.iter().map(|c| c.join("pipelines")).collect();
+    let mut keys = HashSet::new();
+    for d in &dirs {
+        let text = std::fs::read_to_string(d.join(known::EARLY_FILE)).unwrap_or_default();
+        keys.extend(text.lines().filter(|l| !l.is_empty()).map(str::to_owned));
+    }
+    let refs: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
+    let (bytes, n) = known::write_list(&refs, &keys);
+    std::fs::write(out, &bytes)?;
+    println!(
+        "{n} of {} drawn pipelines written ({} bytes)",
+        keys.len(),
+        bytes.len()
+    );
     Ok(())
 }
 

@@ -578,10 +578,14 @@ fn pipelines(job: &Job, base: &dyn Fn(&mut Command), p: &mut Progress, share: f3
             p.current = if t == 0 { "no recorded pipelines to make".into() } else { format!("{t} pipelines (the engine reports every 1,000)") };
             p.current_since = Instant::now();
         }
+        if let Some(what) = engine::parse_prepare_step(l) {
+            p.current = what.into();
+            p.current_since = Instant::now();
+        }
         if let Some(n) = engine::parse_warm_made(l) {
             p.done = n.min(p.total);
         }
-        if let Some((n, t)) = engine::parse_prepare_named(l).filter(|(s, _, _)| *s != "shaders").map(|(_, d, t)| (d, t)) {
+        if let Some((n, t)) = engine::parse_prepare_named(l).filter(|(s, _, _)| *s != "shaders" && *s != "seed").map(|(_, d, t)| (d, t)) {
             if *planned != Some(t) {
                 *planned = Some(t);
                 p.total = t;

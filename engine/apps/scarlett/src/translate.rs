@@ -401,6 +401,17 @@ pub fn run(
 
 /// Every shader found into the cache runs translate from.
 pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
+    precompile_collect(paths, jobs, None).map(drop)
+}
+
+/// As [`precompile`]; also hands back the containers (hash, bytes) whose
+/// full hash is in `wanted`, met on the way.
+pub fn precompile_collect(
+    paths: Vec<PathBuf>,
+    jobs: Option<usize>,
+    wanted: Option<&std::collections::HashMap<[u8; 32], u8>>,
+) -> Result<Vec<([u8; 32], Vec<u8>)>> {
+    let collected = Mutex::new(Vec::new());
     let cfg = scarlett_core::Config::load()?;
     scarlett_hle::modules::d3d12x::use_shader_cache(cfg.cache_subdir("shaders")?);
     let paths = crate::default_paths(paths)?;
@@ -433,6 +444,9 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
                                 if !lock(&seen).insert(hash) {
                                     continue;
                                 }
+                                if wanted.is_some_and(|w| w.contains_key(hash.as_bytes())) {
+                                    lock(&collected).push((*hash.as_bytes(), bytes.to_vec()));
+                                }
                                 match scarlett_hle::modules::d3d12x::precompile(&bytes) {
                                     Ok(_) => {
                                         let n = done.fetch_add(1, Ordering::Relaxed) + 1;
@@ -461,7 +475,7 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
     for (why, (n, hash)) in failed {
         println!("  {n:>5}  {why}  (e.g. {hash})");
     }
-    Ok(())
+    Ok(collected.into_inner().unwrap_or_else(|e| e.into_inner()))
 }
 
 fn translate(

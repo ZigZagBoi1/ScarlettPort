@@ -519,6 +519,256 @@ impl GraphicsState {
     }
 }
 
+/// The start of a pipeline list ([`write_list`]).
+const LIST_MAGIC: &[u8; 8] = b"SPPL\x01\0\0\0";
+/// The title pipelines that draws asked for first, beside the library.
+pub const EARLY_FILE: &str = "early-pipelines.txt";
+
+/// A pipeline list: pipelines with their shaders named by hash alone, and
+/// their graphics states, no shader code. Valid on any machine (a key is
+/// made of the containers' hashes and the state, as [`keys`] has it); the
+/// containers come from the game files of whoever reads it ([`plan_seed`]).
+///
+/// `LIST_MAGIC`, then the distinct graphics states (count, then length and
+/// bytes each), then the pipelines (count, then each: key, shader count,
+/// stage and hash per shader, and the state's number, `u32::MAX` for none).
+/// Of the pipelines in the books in `dirs` whose key is in `keys`; how many.
+pub fn write_list(dirs: &[&Path], keys: &HashSet<String>) -> (Vec<u8>, usize) {
+    let mut states: Vec<Vec<u8>> = Vec::new();
+    let mut state_at: HashMap<Vec<u8>, u32> = HashMap::new();
+    let mut pipes = Vec::new();
+    let mut seen = HashSet::new();
+    for dir in dirs {
+        walk_pipelines(dir, |_, e| {
+            let Some(key) = e.first_chunk::<16>() else {
+                return;
+            };
+            let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+            if !keys.contains(&hex) || !seen.insert(*key) {
+                return;
+            }
+            let Some(&count) = e.get(16) else { return };
+            let shaders_end = 17 + 33 * usize::from(count);
+            let (Some(head), Some(&graphics)) = (e.get(..shaders_end), e.get(shaders_end)) else {
+                return;
+            };
+            let state = if graphics == 0 {
+                u32::MAX
+            } else {
+                let g = e[shaders_end + 1..].to_vec();
+                *state_at.entry(g.clone()).or_insert_with(|| {
+                    states.push(g);
+                    states.len() as u32 - 1
+                })
+            };
+            let mut p = head.to_vec();
+            p.extend(state.to_le_bytes());
+            pipes.push(p);
+        });
+    }
+    let mut out = LIST_MAGIC.to_vec();
+    out.extend((states.len() as u32).to_le_bytes());
+    for s in &states {
+        out.extend((s.len() as u32).to_le_bytes());
+        out.extend(s);
+    }
+    out.extend((pipes.len() as u32).to_le_bytes());
+    for p in &pipes {
+        out.extend(p);
+    }
+    (out, pipes.len())
+}
+
+/// A pipeline list read back as entries of `known-pipelines.bin`.
+fn read_list(list: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let mut rest = list.strip_prefix(LIST_MAGIC)?;
+    let u32_ = |rest: &mut &[u8]| -> Option<u32> {
+        let (h, after) = rest.split_first_chunk::<4>()?;
+        *rest = after;
+        Some(u32::from_le_bytes(*h))
+    };
+    let n_states = u32_(&mut rest)? as usize;
+    let mut states = Vec::with_capacity(n_states.min(1 << 16));
+    for _ in 0..n_states {
+        let len = u32_(&mut rest)? as usize;
+        let (s, after) = rest.split_at_checked(len)?;
+        states.push(s);
+        rest = after;
+    }
+    let n = u32_(&mut rest)? as usize;
+    let mut entries = Vec::with_capacity(n.min(1 << 20));
+    for _ in 0..n {
+        let count = usize::from(*rest.get(16)?);
+        let (head, after) = rest.split_at_checked(17 + 33 * count)?;
+        rest = after;
+        let state = u32_(&mut rest)?;
+        let mut e = head.to_vec();
+        if state == u32::MAX {
+            e.push(0);
+        } else {
+            e.push(1);
+            e.extend(*states.get(state as usize)?);
+        }
+        entries.push(e);
+    }
+    rest.is_empty().then_some(entries)
+}
+
+/// What a pipeline list needs from the game files ([`plan_seed`]).
+pub struct Seed {
+    entries: Vec<Vec<u8>>,
+    /// Containers not yet in `known-shaders.bin`, by hash: their stage.
+    pub wanted: HashMap<[u8; 32], u8>,
+}
+
+impl Seed {
+    /// Pipelines on the list.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// The shaders the pipelines of `list` need and `dir` does not have yet;
+/// None when `list` is not a pipeline list.
+pub fn plan_seed(dir: &Path, list: &[u8]) -> Option<Seed> {
+    let entries = read_list(list)?;
+    let mut have = HashSet::new();
+    walk_shaders(dir, |_, hash, _, _| {
+        have.insert(hash);
+    });
+    let mut wanted = HashMap::new();
+    for e in &entries {
+        let count = usize::from(e[16]);
+        for s in e[17..17 + 33 * count].chunks_exact(33) {
+            let mut hash = [0; 32];
+            hash.copy_from_slice(&s[1..]);
+            if !have.contains(&hash) {
+                wanted.insert(hash, s[0]);
+            }
+        }
+    }
+    Some(Seed { entries, wanted })
+}
+
+/// What came of a seed: pipelines on the list, those whose every shader is
+/// in the game files (now in `known-pipelines.bin` and the early list), and
+/// the containers the game files did not have.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Seeded {
+    pub listed: usize,
+    pub resolved: usize,
+    pub missing_shaders: usize,
+}
+
+/// Writes the containers `found` (hash and bytes, from the game files) to
+/// `known-shaders.bin`, then every pipeline of `seed` whose shaders are all
+/// there now to `known-pipelines.bin` (if not there yet) and to the early
+/// list, so that `prepare` builds them into the library. Both files are only
+/// added to: a stop in between is taken up by the next run.
+pub fn finish_seed(
+    dir: &Path,
+    seed: &Seed,
+    found: &[([u8; 32], Vec<u8>)],
+) -> std::io::Result<Seeded> {
+    std::fs::create_dir_all(dir)?;
+    // A torn end is cut off first, as the book does.
+    let mut have = HashSet::new();
+    let ends = [
+        walk_shaders(dir, |_, hash, _, _| {
+            have.insert(hash);
+        }),
+        walk_pipelines(dir, |_, _| ()),
+    ];
+    for (file, end) in [SHADERS, PIPELINES].iter().zip(ends) {
+        let path = dir.join(file);
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > end) {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)?
+                .set_len(end)?;
+        }
+    }
+    let mut shaders = Vec::new();
+    for (hash, bytes) in found {
+        let Some(&stage) = seed.wanted.get(hash) else {
+            continue;
+        };
+        if *blake3::hash(bytes).as_bytes() != *hash || !have.insert(*hash) {
+            continue;
+        }
+        shaders.push(stage);
+        shaders.extend(hash);
+        shaders.extend((bytes.len() as u32).to_le_bytes());
+        shaders.extend(bytes);
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(SHADERS))?
+        .write_all(&shaders)?;
+    let mut known = HashSet::new();
+    walk_pipelines(dir, |_, e| known.extend(e.first_chunk::<16>().copied()));
+    let early_path = dir.join(EARLY_FILE);
+    let early_text = std::fs::read_to_string(&early_path).unwrap_or_default();
+    let mut early: HashSet<String> = early_text
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let (mut pipelines, mut added_early) = (Vec::new(), Vec::new());
+    let mut seeded = Seeded {
+        listed: seed.entries.len(),
+        ..Default::default()
+    };
+    let mut missing = HashSet::new();
+    for e in &seed.entries {
+        let count = usize::from(e[16]);
+        let mut whole = true;
+        for s in e[17..17 + 33 * count].chunks_exact(33) {
+            let mut hash = [0; 32];
+            hash.copy_from_slice(&s[1..]);
+            if !have.contains(&hash) {
+                whole = false;
+                missing.insert(hash);
+            }
+        }
+        if !whole {
+            continue;
+        }
+        seeded.resolved += 1;
+        let mut key = [0; 16];
+        key.copy_from_slice(&e[..16]);
+        if known.insert(key) {
+            pipelines.extend((e.len() as u32).to_le_bytes());
+            pipelines.extend(e);
+        }
+        let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+        if early.insert(hex.clone()) {
+            added_early.push(hex);
+        }
+    }
+    seeded.missing_shaders = missing.len();
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(PIPELINES))?
+        .write_all(&pipelines)?;
+    if !added_early.is_empty() {
+        let mut text = early_text;
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&added_early.join("\n"));
+        let tmp = dir.join("early-pipelines.tmp");
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, &early_path)?;
+    }
+    Ok(seeded)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,6 +806,65 @@ mod tests {
         assert!(GraphicsState::get(&bytes[..9]).is_none());
     }
 
+    #[test]
+    fn a_list_seeds_the_book_from_the_game_files_alone() {
+        let root = std::env::temp_dir().join(format!("scarlett-seed-{}", std::process::id()));
+        let (rec, user) = (root.join("rec"), root.join("user"));
+        std::fs::create_dir_all(&rec).unwrap();
+        let (a, b) = (b"container a".to_vec(), b"container b".to_vec());
+        let (ha, hb) = (*blake3::hash(&a).as_bytes(), *blake3::hash(&b).as_bytes());
+        let mut book = Vec::new();
+        for (n, shaders, state) in [
+            (1u8, vec![(0u8, ha), (1, hb)], Some(vec![7u8; 9])),
+            (2, vec![(5, hb)], None),
+            (3, vec![(0, ha)], Some(vec![7; 9])),
+        ] {
+            let mut e = vec![n; 16];
+            e.push(shaders.len() as u8);
+            for (stage, h) in shaders {
+                e.push(stage);
+                e.extend(h);
+            }
+            e.push(u8::from(state.is_some()));
+            e.extend(state.unwrap_or_default());
+            book.extend((e.len() as u32).to_le_bytes());
+            book.extend(e);
+        }
+        std::fs::write(rec.join(PIPELINES), &book).unwrap();
+        let drawn: HashSet<String> = ["01", "02"].iter().map(|k| k.repeat(16)).collect();
+        let (list, n) = write_list(&[&rec], &drawn);
+        assert_eq!(n, 2);
+        assert!(
+            !list.windows(a.len()).any(|w| w == a.as_slice()),
+            "no shader code in a list"
+        );
+        let seed = plan_seed(&user, &list).expect("a list");
+        assert_eq!(seed.wanted.len(), 2);
+        // The game files have b only: the pipeline of b alone is seeded.
+        let s = finish_seed(&user, &seed, &[(hb, b.clone()), (ha, b"not a".to_vec())]).unwrap();
+        assert_eq!(
+            s,
+            Seeded {
+                listed: 2,
+                resolved: 1,
+                missing_shaders: 1
+            }
+        );
+        assert_eq!(keys(&user), ["02".repeat(16)]);
+        assert_eq!(
+            std::fs::read_to_string(user.join(EARLY_FILE)).unwrap(),
+            "02".repeat(16)
+        );
+        // Again with a too: the other is added, nothing twice.
+        let seed = plan_seed(&user, &list).unwrap();
+        let s = finish_seed(&user, &seed, &[(ha, a.clone())]).unwrap();
+        assert_eq!(s.resolved, 2);
+        let mut got = keys(&user);
+        got.sort();
+        assert_eq!(got, ["01".repeat(16), "02".repeat(16)]);
+        assert!(plan_seed(&user, b"not a list").is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
     #[test]
     fn a_torn_end_is_not_read() {
         let dir = std::env::temp_dir().join(format!("scarlett-known-{}", std::process::id()));

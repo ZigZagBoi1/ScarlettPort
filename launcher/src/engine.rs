@@ -115,6 +115,19 @@ pub fn parse_prepare_named(line: &str) -> Option<(&str, u64, u64)> {
     Some((name, done.parse().ok()?, total.parse().ok()?))
 }
 
+/// `scarlett prepare` step lines, as the status under the bar: `prepare step 1/2 shaders`
+/// -> "finding the shipped pipelines' shaders in the game files".
+pub fn parse_prepare_step(line: &str) -> Option<&'static str> {
+    let mut w = line.trim().strip_prefix("prepare step ")?.split_whitespace();
+    let _n = w.next()?;
+    Some(match w.next()? {
+        "shaders" => "finding the shipped pipelines' shaders in the game files",
+        "library" => "building the pipelines into the pipeline library",
+        "driver" => "building every other recorded pipeline for the driver's cache",
+        _ => "preparing",
+    })
+}
+
 /// Translated shaders in a shader cache folder (`<cache>/shaders/xx/<rest of hash>`), counted
 /// while the translation runs so the number moves between the engine's progress lines.
 /// Temporary files (`.tmp-*`) are not counted.
@@ -253,6 +266,13 @@ pub fn parse_fps(line: &str) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepare_steps_read_as_status() {
+        assert_eq!(parse_prepare_step("prepare step 1/2 shaders"), Some("finding the shipped pipelines' shaders in the game files"));
+        assert_eq!(parse_prepare_step("prepare step 2/2 library"), Some("building the pipelines into the pipeline library"));
+        assert_eq!(parse_prepare_step("prepare progress seed 3 4"), None);
+    }
 
     fn get(v: &[(&'static str, String)], k: &str) -> Option<String> {
         v.iter().find(|(n, _)| *n == k).map(|(_, x)| x.clone())

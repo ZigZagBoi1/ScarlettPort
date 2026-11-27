@@ -161,6 +161,15 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    /// Write the pipeline list prepare builds a first run's pipelines from:
+    /// the pipelines runs on these caches drew with, shaders named by hash.
+    #[cfg(windows)]
+    #[command(hide = true)]
+    PipelineList {
+        out: PathBuf,
+        #[arg(required = true)]
+        caches: Vec<PathBuf>,
+    },
     /// Print the shader translator's fingerprint (`translator <hex>`): the
     /// shader cache is valid for one fingerprint, so a launcher re-prepares
     /// only when it changes.
@@ -265,6 +274,8 @@ fn main() -> Result<()> {
         Command::Warm { jobs, limit, again, used, these } => warm::run(jobs, limit, again, used, these),
         #[cfg(windows)]
         Command::Prepare { jobs, all } => warm::prepare(jobs, all),
+        #[cfg(windows)]
+        Command::PipelineList { out, caches } => warm::write_list(&out, &caches),
         Command::Fingerprint => {
             println!("translator {}", scarlett_hle::SHADER_TRANSLATOR);
             Ok(())
