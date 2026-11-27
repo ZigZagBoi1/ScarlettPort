@@ -91,8 +91,11 @@ pub const MANAGED: [(&str, &str); 10] = [
 /// FidelityFX DLLs the runtime loads for FSR (either the loader or an MIT-built API DLL).
 pub const FSR_DLLS: [&str; 2] = ["amd_fidelityfx_loader_dx12.dll", "amd_fidelityfx_dx12.dll"];
 
-pub fn fsr_available(runtime_dir: &Path) -> bool {
+/// FSR can run: a FidelityFX DLL beside the runtime, or the game's own AMD upscaler
+/// (`amd_fidelityfx_upscaler*`) in the game folder, which is where the engine looks.
+pub fn fsr_available(runtime_dir: &Path, game_dir: &Path) -> bool {
     FSR_DLLS.iter().any(|d| runtime_dir.join(d).is_file())
+        || std::fs::read_dir(game_dir).is_ok_and(|entries| entries.flatten().any(|e| e.file_name().to_string_lossy().to_ascii_lowercase().starts_with("amd_fidelityfx_upscaler")))
 }
 
 fn num(x: f32) -> String {
@@ -258,6 +261,18 @@ pub fn write_toml(path: &Path, keys: &[(&str, &str, String)]) -> std::io::Result
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fsr_found_in_the_game_folder() {
+        let base = std::env::temp_dir().join(format!("sp-fsr-{}", std::process::id()));
+        let (rt, game) = (base.join("rt"), base.join("game"));
+        std::fs::create_dir_all(&rt).unwrap();
+        std::fs::create_dir_all(&game).unwrap();
+        assert!(!super::fsr_available(&rt, &game));
+        std::fs::write(game.join("amd_fidelityfx_upscaler_xbox.dll"), b"x").unwrap();
+        assert!(super::fsr_available(&rt, &game));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     use super::*;
 
     #[test]

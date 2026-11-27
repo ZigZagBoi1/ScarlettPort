@@ -207,7 +207,7 @@ impl Launcher {
     }
 
     pub(crate) fn settings_features(&mut self, ui: &mut Ui, c: Rect) {
-        let fsr = tuning::fsr_available(&self.scarlett_dir());
+        let fsr = tuning::fsr_available(&self.scarlett_dir(), std::path::Path::new(&self.config.game_path));
         self.scrolled(ui, c, "ft-scroll", |me, ui, w| {
             let w = w.min(720.);
             let p = ui.painter().clone();
@@ -270,7 +270,7 @@ impl Launcher {
                 let r = Self::take(ui, w, 40.);
                 card(&p, r, fade(WARNING, 0.6));
                 icon(&p, Icon::Warning, pos2(r.min.x + 20., r.center().y), 16., WARNING);
-                let note = format!("FSR is unavailable: no FidelityFX DLL ({} or {}) next to {}.", tuning::FSR_DLLS[0], tuning::FSR_DLLS[1], me.scarlett_path().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+                let note = format!("FSR is unavailable: no amd_fidelityfx_upscaler DLL in the game folder, and no {} or {} next to {}.", tuning::FSR_DLLS[0], tuning::FSR_DLLS[1], me.scarlett_path().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
                 p.text(pos2(r.min.x + 38., r.center().y), Align2::LEFT_CENTER, fit(ui, &note, font(12., "regular"), w - 60.), font(12., "regular"), TEXT_MUTED);
             }
             let r = me.feature_row(ui, w, "Upscaler", "Default keeps the runtime's choice. Title: the game's own; Stretch: plain scaling; FSR: AMD FidelityFX (SCARLETT_UPSCALER).", true, ch(&|x| x.upscaler.clone()), 360.);

@@ -1094,7 +1094,7 @@ impl Launcher {
             _ => presets::stable_env(game, &cache),
         };
         let t = &self.config.tuning;
-        let fsr = tuning::fsr_available(&self.scarlett_dir());
+        let fsr = tuning::fsr_available(&self.scarlett_dir(), std::path::Path::new(&self.config.game_path));
         for (k, v) in t.env(fsr) {
             presets::set(&mut env, k, v);
         }
