@@ -504,6 +504,8 @@ fn library() -> Option<&'static Library> {
             let library = open(&device, blob);
             if library.is_none() {
                 tracing::warn!("no host pipeline library: pipelines are not kept");
+            } else {
+                start_saver();
             }
             library
         })
@@ -705,6 +707,58 @@ impl Why {
             ),
             Why::Other => format!("the library did not load it: {load}; {kept}"),
         }
+    }
+}
+
+/// How often the saver thread looks for pipelines not yet on disk
+/// (`SCARLETT_LIBRARY_SAVE_S`, seconds; 0 turns it off).
+fn saver_every() -> Option<std::time::Duration> {
+    let s = std::env::var("SCARLETT_LIBRARY_SAVE_S").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(30);
+    (s > 0).then(|| std::time::Duration::from_secs(s))
+}
+
+/// Whether the saver thread writes the library now: something was added and
+/// either enough pipelines are waiting or the last save is old enough.
+pub(crate) fn saver_due(added: u64, since_save: std::time::Duration, every: std::time::Duration) -> bool {
+    const ENOUGH: u64 = 64;
+    added > 0 && (added >= ENOUGH || since_save >= every)
+}
+
+/// A thread that keeps the library on disk while the title runs. The
+/// workers' saves skip pipelines added within 20 s of the last save and
+/// pipelines made off the workers, and the save at a clean exit never
+/// comes when the game is killed (bench, the launcher's Stop, a crash):
+/// those pipelines were made again on every start.
+fn start_saver() {
+    let Some(every) = saver_every() else { return };
+    let spawned = std::thread::Builder::new().name("scarlett-library-saver".into()).spawn(move || {
+        // SAFETY: a plain call on our own thread.
+        unsafe {
+            use windows::Win32::System::Threading::*;
+            let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+        }
+        let tick = std::time::Duration::from_secs(5).min(every);
+        let mut last = std::time::Instant::now();
+        loop {
+            std::thread::sleep(tick);
+            let Some(library) = library() else { return };
+            if saver_due(library.added.load(Ordering::Relaxed), last.elapsed(), every) {
+                save(true);
+                last = std::time::Instant::now();
+            }
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "no pipeline library saver");
+    }
+}
+
+/// Saves what the library holds once the host device is removed: the
+/// process usually ends soon after, without a clean exit.
+pub(crate) fn save_on_removal() {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !DONE.swap(true, Ordering::Relaxed) {
+        save(true);
     }
 }
 
@@ -981,6 +1035,19 @@ mod tests {
         assert_ne!(a, name("mesh", b"root", &[b"vs", b"ps"], "state"));
         // Parts do not run into each other.
         assert_ne!(a, name("graphics", b"root", &[b"vsp", b"s"], "state"));
+    }
+
+    #[test]
+    fn the_saver_writes_what_a_killed_run_would_lose() {
+        use std::time::Duration;
+        let every = Duration::from_secs(30);
+        // Nothing new: never written, however long ago the last save was.
+        assert!(!saver_due(0, Duration::from_secs(3600), every));
+        // A few new pipelines: written once the interval has passed.
+        assert!(!saver_due(3, Duration::from_secs(10), every));
+        assert!(saver_due(3, every, every));
+        // Many new pipelines: written without waiting for the interval.
+        assert!(saver_due(64, Duration::ZERO, every));
     }
 
     #[test]

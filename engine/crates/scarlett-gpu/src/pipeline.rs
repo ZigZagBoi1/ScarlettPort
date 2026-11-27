@@ -762,7 +762,7 @@ pub mod known;
 #[cfg(windows)]
 pub mod precompiled;
 #[cfg(windows)]
-mod library;
+pub(crate) mod library;
 #[cfg(windows)]
 mod make;
 #[cfg(windows)]

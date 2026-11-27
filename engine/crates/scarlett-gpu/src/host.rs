@@ -612,6 +612,7 @@ pub(crate) fn removal_context() -> String {
 /// host device removed.
 pub(crate) fn log_removal_context() {
     static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    crate::pipeline::library::save_on_removal();
     if !(trail_on() || dred_any()) || SAID.swap(true, Ordering::Relaxed) {
         return;
     }
