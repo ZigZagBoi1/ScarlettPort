@@ -901,7 +901,17 @@ fn create() -> windows::core::Result<Host> {
             D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device)?;
             tracing::info!("host device on the software adapter (WARP)");
         } else {
-            D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
+            // The high-performance adapter, as Windows' graphics preference
+            // asks: the default adapter on an Optimus laptop is the iGPU.
+            match high_performance_adapter() {
+                Some((adapter, name)) if D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device).is_ok() => {
+                    tracing::info!(adapter = %name, "host device on the high-performance adapter");
+                }
+                _ => {
+                    device = None;
+                    D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
+                }
+            }
             // Whether a GPU hang ends the run or freezes the PC (#1054).
             crate::tdr::log();
         }
@@ -11188,3 +11198,22 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
     }
 }
 
+
+/// The first hardware adapter by high-performance preference, with its name;
+/// `None` when DXGI cannot rank adapters, which keeps the default adapter.
+fn high_performance_adapter() -> Option<(windows::Win32::Graphics::Dxgi::IDXGIAdapter1, String)> {
+    use windows::Win32::Graphics::Dxgi::*;
+    // SAFETY: plain DXGI factory and adapter queries.
+    unsafe {
+        let factory: IDXGIFactory6 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).ok()?;
+        (0..8).find_map(|i| {
+            let adapter: IDXGIAdapter1 = factory.EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE).ok()?;
+            let desc = adapter.GetDesc1().ok()?;
+            if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
+                return None;
+            }
+            let n = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
+            Some((adapter, String::from_utf16_lossy(&desc.Description[..n])))
+        })
+    }
+}
