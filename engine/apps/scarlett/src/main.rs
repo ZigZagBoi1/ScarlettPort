@@ -128,7 +128,10 @@ enum Command {
     ///
     /// Pipelines that crash or hang the compiler are listed in `warm-bad.txt`
     /// with the current fingerprint and retried automatically after a driver
-    /// or translator change. Set `SCARLETT_WARM_BAD=0` to ignore `warm-bad.txt`
+    /// or translator change. Every run first makes each listed pipeline again,
+    /// alone in a process of its own, and takes those it makes off the list
+    /// (`SCARLETT_WARM_RETRY=0`: not). Runs never read the list: a pipeline
+    /// the title draws with is always made. Set `SCARLETT_WARM_BAD=0` to ignore `warm-bad.txt`
     /// for this invocation.
     #[cfg(windows)]
     Warm {

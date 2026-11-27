@@ -270,6 +270,33 @@ pub fn parse_bad_keys(text: &str, fingerprint: &str) -> HashSet<String> {
     keys
 }
 
+/// The key a `warm-bad.txt` line names, as [`parse_bad_keys`] reads it.
+fn bad_line_key(line: &str) -> Option<&str> {
+    let line = line.trim_start();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let mut parts = line.split_whitespace();
+    let first = parts.next()?;
+    match parts.next() {
+        Some(second) if is_hex(first, 16) && is_hex(second, 32) => Some(second),
+        _ => Some(first),
+    }
+}
+
+/// `warm-bad.txt` without the lines that name one of `keys`.
+pub fn without_keys(text: &str, keys: &HashSet<String>) -> String {
+    let mut out = String::new();
+    for line in text.lines() {
+        if bad_line_key(line).is_some_and(|key| keys.contains(key)) {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 /// The translations of earlier runs are in `dir` (the pipeline library is
 /// not used: what is made here is the driver's to keep).
 pub fn use_translations(dir: PathBuf) {
@@ -644,5 +671,19 @@ mod tests {
                 k_bad_tag,
             ])
         );
+    }
+
+    #[test]
+    fn keys_made_alone_leave_the_bad_list() {
+        let (made, kept, fp_first) = ("a".repeat(32), "b".repeat(32), "c".repeat(32));
+        let text = format!(
+            "# comment\n{}\n{}\n8899aabbccddeeff {fp_first} legacy\n{made} legacy crash\n",
+            format_bad_entry(&made, "8899aabbccddeeff", "exit code: 0xc0000005"),
+            format_bad_entry(&kept, "8899aabbccddeeff", "hung for 180 s"),
+        );
+        let gone = HashSet::from([made.clone(), fp_first.clone()]);
+        let left = without_keys(&text, &gone);
+        assert_eq!(parse_bad_keys(&left, "8899aabbccddeeff"), HashSet::from([kept]));
+        assert!(left.starts_with("# comment\n"), "{left}");
     }
 }

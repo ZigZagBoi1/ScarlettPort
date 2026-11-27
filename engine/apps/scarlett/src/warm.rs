@@ -69,12 +69,36 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
             done.insert(key);
         }
     }
-    let bad: HashSet<String> = if known::bad_list_disabled() {
+    let mut bad: HashSet<String> = if known::bad_list_disabled() {
         HashSet::new()
     } else {
         let text = std::fs::read_to_string(&bad_file).unwrap_or_default();
         known::parse_bad_keys(&text, &fingerprint)
     };
+    // Nothing stays listed for good: each listed pipeline is made once more,
+    // alone in a process of its own, and one that is made leaves the list.
+    // A batch's crash names pipelines that are made fine alone (issue #92).
+    if !bad.is_empty() && !again && retry_alone() {
+        let listed: Vec<usize> = (0..keys.len()).filter(|&n| bad.contains(&keys[n])).collect();
+        let mut made = HashSet::new();
+        for &n in &listed {
+            if let (1, None) = child(&[n], |_, _, _| {}) {
+                made.insert(keys[n].clone());
+            }
+        }
+        if !made.is_empty() {
+            let text = std::fs::read_to_string(&bad_file).unwrap_or_default();
+            std::fs::write(&bad_file, known::without_keys(&text, &made))?;
+            bad.retain(|key| !made.contains(key));
+        }
+        println!(
+            "{} listed in {} made again alone: {} made and taken off the list, {} still end their process",
+            listed.len(),
+            known::WARM_BAD_FILE,
+            made.len(),
+            listed.len() - made.len()
+        );
+    }
     let early = std::fs::read_to_string(dir.join("early-pipelines.txt")).unwrap_or_default();
     let early: HashSet<&str> = early.lines().collect();
     let all = select_pipelines(&keys, &done, &bad, &early, again, used, limit);

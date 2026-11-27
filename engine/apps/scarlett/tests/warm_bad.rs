@@ -74,25 +74,23 @@ fn warm_bad_fingerprint_override_again_and_help() {
 
     let fp_entry = format!("{k_fp_bad} fp={fp_base} exit code: 0xc0000005");
     assert_eq!(fp_entry.split(' ').next(), Some(k_fp_bad.as_str()));
-    fs::write(
-        pipelines.join("warm-bad.txt"),
-        format!("\n# comment line\n   # indented comment\n{fp_entry}\n\t{k_legacy_bad}\tlegacy crash\n"),
-    )
-    .unwrap();
+    let bad_text = format!("\n# comment line\n   # indented comment\n{fp_entry}\n\t{k_legacy_bad}\tlegacy crash\n");
+    fs::write(pipelines.join("warm-bad.txt"), &bad_text).unwrap();
+    let no_retry = [("SCARLETT_WARM_RETRY", "0")];
 
-    let out_default = run_warm(root.path(), &cache, &[], &[]);
+    let out_default = run_warm(root.path(), &cache, &no_retry, &[]);
     assert!(
         out_default.contains(&format!("4 pipelines known, 0 made before ({fp_base}), 2 bad; 2 to make")),
         "{out_default}"
     );
 
-    let out_repeat = run_warm(root.path(), &cache, &[], &[]);
+    let out_repeat = run_warm(root.path(), &cache, &no_retry, &[]);
     assert!(
         out_repeat.contains(&format!("4 pipelines known, 2 made before ({fp_base}), 2 bad; 0 to make")),
         "{out_repeat}"
     );
 
-    let out_override = run_warm(root.path(), &cache, &[("SCARLETT_WARM_BAD", "0")], &[]);
+    let out_override = run_warm(root.path(), &cache, &[("SCARLETT_WARM_BAD", "0"), no_retry[0]], &[]);
     assert!(
         out_override.contains(&format!("4 pipelines known, 2 made before ({fp_base}), 0 bad; 2 to make")),
         "{out_override}"
@@ -104,8 +102,23 @@ fn warm_bad_fingerprint_override_again_and_help() {
         "{out_again}"
     );
 
+    // By default the listed ones are made again alone first; made, they
+    // leave the list (comments stay).
+    let out_retry = run_warm(root.path(), &cache, &[], &[]);
+    assert!(
+        out_retry.contains("2 listed in warm-bad.txt made again alone: 2 made and taken off the list, 0 still end their process"),
+        "{out_retry}"
+    );
+    assert!(
+        out_retry.contains(&format!("4 pipelines known, 4 made before ({fp_base}), 0 bad; 0 to make")),
+        "{out_retry}"
+    );
+    let left = fs::read_to_string(pipelines.join("warm-bad.txt")).unwrap();
+    assert!(!left.contains(&k_fp_bad) && !left.contains(&k_legacy_bad) && left.contains("# comment line"), "{left}");
+
     // Changing a translator switch rotates the fingerprint, expiring fp-tagged entries automatically.
-    let out_new_fp = run_warm(root.path(), &cache, &[("SCARLETT_WAVE_WIDE", "0")], &[]);
+    fs::write(pipelines.join("warm-bad.txt"), &bad_text).unwrap();
+    let out_new_fp = run_warm(root.path(), &cache, &[("SCARLETT_WAVE_WIDE", "0"), no_retry[0]], &[]);
     let fp_new = parse_fingerprint(&out_new_fp);
     assert_ne!(fp_new, fp_base);
     assert!(
