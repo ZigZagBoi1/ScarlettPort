@@ -4,10 +4,13 @@
 //! * [`policy`]: the runtime half of rule #1, refusing to write
 //!   game-derived data into the source tree.
 //! * [`logging`]: one tracing setup for all binaries.
+//! * [`oom`]: the allocator that says so when memory runs out.
 
 pub mod config;
 pub mod env;
 pub mod logging;
+#[cfg(windows)]
+pub mod oom;
 pub mod policy;
 pub mod saves;
 

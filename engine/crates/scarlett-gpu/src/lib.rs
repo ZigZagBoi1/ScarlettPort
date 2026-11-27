@@ -28,6 +28,12 @@ mod frametl;
 pub mod console;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod copystat;
+// The process's allocator, which says so when memory runs out
+// (`scarlett_core::oom`); in diagnostics builds `copystat`'s, which counts
+// blocks too.
+#[cfg(all(windows, not(feature = "diagnostics")))]
+#[global_allocator]
+static HEAP: scarlett_core::oom::Reporting = scarlett_core::oom::Reporting;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod faultbook;
 #[cfg(windows)]

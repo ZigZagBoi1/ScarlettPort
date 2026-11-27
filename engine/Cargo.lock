@@ -407,6 +407,7 @@ dependencies = [
  "thiserror",
  "toml",
  "tracing-subscriber",
+ "windows-sys",
 ]
 
 [[package]]
@@ -427,6 +428,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "scarlett-core",
  "scarlett-formats",
  "scarlett-pipeline",
  "scarlett-shader",

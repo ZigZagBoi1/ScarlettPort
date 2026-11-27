@@ -380,15 +380,16 @@ fn big_blocks() -> String {
 }
 
 /// The system's allocator with every block counted in [`OWN`] (two atomic
-/// additions per allocation and per release: diagnostics builds only).
+/// additions per allocation and per release: diagnostics builds only), which
+/// says so when memory runs out ([`scarlett_core::oom`]).
 struct Counting;
 
-// SAFETY: every call goes to the system's allocator unchanged; only
-// counters are kept beside it.
+// SAFETY: every call goes to the system's allocator unchanged (through
+// `Reporting`); only counters are kept beside it.
 unsafe impl std::alloc::GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
         // SAFETY: the caller's contract, passed on.
-        let at = unsafe { std::alloc::System.alloc(layout) };
+        let at = unsafe { scarlett_core::oom::Reporting.alloc(layout) };
         if !at.is_null() {
             own(layout.size(), true);
             big(at, layout.size(), true);
@@ -398,7 +399,7 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
 
     unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
         // SAFETY: the caller's contract, passed on.
-        let at = unsafe { std::alloc::System.alloc_zeroed(layout) };
+        let at = unsafe { scarlett_core::oom::Reporting.alloc_zeroed(layout) };
         if !at.is_null() {
             own(layout.size(), true);
             big(at, layout.size(), true);
@@ -415,7 +416,7 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
 
     unsafe fn realloc(&self, at: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
         // SAFETY: the caller's contract, passed on.
-        let moved = unsafe { std::alloc::System.realloc(at, layout, size) };
+        let moved = unsafe { scarlett_core::oom::Reporting.realloc(at, layout, size) };
         if !moved.is_null() {
             own(layout.size(), false);
             own(size, true);

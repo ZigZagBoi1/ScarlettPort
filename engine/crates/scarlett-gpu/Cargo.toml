@@ -12,6 +12,7 @@ blake3.workspace = true
 zlib-rs.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
+scarlett-core.workspace = true
 scarlett-formats.workspace = true
 scarlett-pipeline.workspace = true
 scarlett-shader.workspace = true
