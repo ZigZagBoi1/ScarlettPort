@@ -814,6 +814,15 @@ impl Launcher {
             self.settings_tab = 0;
             return;
         }
+        // The engine and its shader tools crash at once without the Agility SDK beside them:
+        // stop here with the fix instead (#390).
+        if self.world_selected() {
+            if let Err(e) = firstrun::ensure_d3d12(&self.scarlett_dir(), &runtime::runtime_dir()) {
+                self.status = e.clone();
+                self.log(e, LogKind::Error);
+                return;
+            }
+        }
         let game = PathBuf::from(&self.config.game_path);
         // The runtime's own folders under the cache too: a missing one stopped Prepare (#252).
         if let Err(e) = std::fs::create_dir_all(self.config.cache_dir.trim()).and_then(|_| std::fs::create_dir_all(self.scarlett_cache())) {
