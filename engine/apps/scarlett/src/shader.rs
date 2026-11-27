@@ -44,9 +44,14 @@ pub(crate) fn sources(data: &[u8]) -> Vec<Source<'_>> {
     }
     let raw = memchr::memmem::find_iter(data, b"DXBC")
         .filter(|&offset| Container::parse(&data[offset..]).is_ok())
-        .map(|offset| Source::Raw {
-            offset,
-            data: &data[offset..],
+        .map(|offset| {
+            // The container's own size (checked by the parse): what follows it in
+            // the carrier file is not part of the shader and must not reach its hash.
+            let size = u32::from_le_bytes(data[offset + 0x18..offset + 0x1c].try_into().expect("4 bytes")) as usize;
+            Source::Raw {
+                offset,
+                data: &data[offset..offset + size],
+            }
         });
     out.extend(raw);
     out
