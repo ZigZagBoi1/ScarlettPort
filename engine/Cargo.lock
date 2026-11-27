@@ -431,6 +431,7 @@ dependencies = [
  "blake3",
  "scarlett-core",
  "scarlett-formats",
+ "scarlett-game",
  "scarlett-pipeline",
  "scarlett-shader",
  "tempfile",

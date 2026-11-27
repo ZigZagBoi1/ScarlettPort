@@ -30,6 +30,8 @@ pub use scarlett_gpu::replay;
 
 #[cfg(windows)]
 pub use scarlett_gpu::pipeline::known as known_pipelines;
+#[cfg(windows)]
+pub use scarlett_gpu::pipeline::precompiled as precompiled_pipelines;
 
 use scarlett_loader::{ImportResolver, Provenance, Resolution};
 use scarlett_pe::ImportSymbol;
