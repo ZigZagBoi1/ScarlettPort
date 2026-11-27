@@ -31,8 +31,8 @@ use windows::core::PCSTR;
 use super::Shader;
 use super::host::{GraphicsState, HostPipeline};
 
-const SHADERS: &str = "known-shaders.bin";
-const PIPELINES: &str = "known-pipelines.bin";
+pub(super) const SHADERS: &str = "known-shaders.bin";
+pub(super) const PIPELINES: &str = "known-pipelines.bin";
 /// Compiler crashes and hangs recorded by `scarlett warm` and the runtime guard.
 pub const WARM_BAD_FILE: &str = "warm-bad.txt";
 /// Stages by their number in the files.
@@ -150,7 +150,7 @@ fn flush() {
 
 /// Calls `f` with each container's stage, hash, place and length; where the
 /// last whole one ends.
-fn walk_shaders(dir: &Path, mut f: impl FnMut(u8, [u8; 32], u64, u32)) -> u64 {
+pub(super) fn walk_shaders(dir: &Path, mut f: impl FnMut(u8, [u8; 32], u64, u32)) -> u64 {
     let Ok(file) = std::fs::File::open(dir.join(SHADERS)) else { return 0 };
     let len = file.metadata().map_or(0, |m| m.len());
     let mut file = std::io::BufReader::new(file);

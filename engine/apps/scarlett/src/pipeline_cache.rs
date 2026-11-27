@@ -4,9 +4,10 @@
 //! title creates from a stream instead (state text and shader hashes, and
 //! the title pipeline key made of them), optionally set beside the
 //! pipelines a run wrote down (`known-pipelines.bin`). It makes a D3D12
-//! device (but no pipelines) to ask what formats it renders to, as the
-//! runtime does: keys are per adapter. The files written hold the
-//! title's state and shader hashes: they must stay outside the repository.
+//! device (no pipelines, but with --fill) to ask what formats it renders
+//! to, as the runtime does: keys are per adapter. The files written hold
+//! the title's state and shader hashes: they must stay outside the
+//! repository.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
@@ -30,6 +31,8 @@ struct Record {
     kind: &'static str,
     shaders: Vec<(&'static str, [u8; 32])>,
     state: Option<pre::StateText>,
+    /// The decoded state, for seeding.
+    desc: Option<pso_state::GraphicsDesc>,
     /// Which of how many choices of containers this is (where stages name
     /// digests that more than one container of the archive has).
     variant: Option<(usize, usize)>,
@@ -187,6 +190,7 @@ fn graphics(
         kind: "graphics ?",
         shaders: Vec::new(),
         state: None,
+        desc: None,
         failed: Vec::new(),
         variant: None,
     };
@@ -221,6 +225,7 @@ fn graphics(
                         .push("state: formats disagree with SX_PS_DOWNCONVERT".into());
                 }
                 r.state = Some(pre::state_text(&d));
+                r.desc = Some(d);
             }
             Err(e) => r.failed.push(format!("state: {}", reason(&e))),
         },
@@ -248,6 +253,7 @@ fn compute(
         kind: "compute",
         shaders: Vec::new(),
         state: None,
+        desc: None,
         failed: Vec::new(),
         variant: None,
     };
@@ -278,10 +284,135 @@ fn archive_path(path: &Path) -> PathBuf {
 pub struct Options {
     pub out: Option<PathBuf>,
     pub book: Option<PathBuf>,
+    /// Write the records decoded whole into the book of the cache's
+    /// `pipelines` folder, for `scarlett warm` / `prepare` to make.
+    pub seed: bool,
+    /// Then make their host pipelines into the pipeline library runs load
+    /// from (as `scarlett prepare` does for the pipelines runs drew with).
+    pub fill: bool,
+    pub jobs: Option<usize>,
+}
+
+/// The containers of the records decoded whole, by BLAKE3.
+fn containers_of(archive: &[u8], records: &[Record]) -> HashMap<[u8; 32], Vec<u8>> {
+    let wanted: HashSet<[u8; 32]> = records
+        .iter()
+        .filter(|r| r.whole())
+        .flat_map(|r| r.shaders.iter().map(|s| s.1))
+        .collect();
+    let all: Vec<sgd5::Record<'_>> = sgd5::records(archive).collect();
+    let next = AtomicUsize::new(0);
+    let found = Mutex::new(HashMap::new());
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            s.spawn(|| {
+                while let Some(r) = all.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    let Some(bytes) = r.unpack() else { continue };
+                    let hash = *blake3::hash(&bytes).as_bytes();
+                    if wanted.contains(&hash) {
+                        lock(&found).insert(hash, bytes);
+                    }
+                }
+            });
+        }
+    });
+    found.into_inner().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Writes the records decoded whole into the book in `dir`.
+fn seed(archive: &[u8], records: &[Record], dir: &Path) -> Result<pre::Seeded> {
+    let began = std::time::Instant::now();
+    let bytes = containers_of(archive, records);
+    let seeds: Vec<pre::Seed<'_>> = records
+        .iter()
+        .filter(|r| r.whole())
+        .filter_map(|r| {
+            let shaders = r
+                .shaders
+                .iter()
+                .map(|(s, h)| Some((*s, bytes.get(h)?.as_slice())))
+                .collect::<Option<Vec<_>>>()?;
+            Some(pre::Seed {
+                shaders,
+                state: r.desc.as_ref(),
+            })
+        })
+        .collect();
+    scarlett_core::ensure_outside_repo(dir)?;
+    let seeded =
+        pre::seed(dir, &seeds).with_context(|| format!("writing the book in {}", dir.display()))?;
+    println!(
+        "seed: {} records decoded whole, {} written into the book in {} ({} with a key the book had already or an earlier record gave), {} containers added, {:.1} s",
+        seeds.len(),
+        seeded.added,
+        dir.display(),
+        seeded.known,
+        seeded.shaders,
+        began.elapsed().as_secs_f64()
+    );
+    Ok(seeded)
+}
+
+/// Makes the host pipelines of the book entries with `keys` into the
+/// pipeline library in `dir`, as `scarlett prepare` does for the ones runs
+/// drew with.
+fn fill(dir: &Path, keys: &HashSet<String>, jobs: Option<usize>) {
+    let began = std::time::Instant::now();
+    scarlett_hle::known_pipelines::use_translations(dir.with_file_name("shaders"));
+    let all = scarlett_hle::known_pipelines::keys(dir);
+    let which: Vec<usize> = (0..all.len()).filter(|&n| keys.contains(&all[n])).collect();
+    let jobs = jobs
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()))
+        .max(1);
+    let total = which.len();
+    println!("fill: {total} pipelines into the library, {jobs} threads");
+    let (count, failed) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    let times = Mutex::new(Vec::with_capacity(total));
+    scarlett_hle::known_pipelines::fill_library(dir, &which, jobs, |_, ms, made| {
+        failed.fetch_add(usize::from(!made), Ordering::Relaxed);
+        lock(&times).push(ms);
+        let n = count.fetch_add(1, Ordering::Relaxed) + 1;
+        if n % 1000 == 0 || n == total {
+            println!(
+                "fill: {n} of {total}, {:.0} s",
+                began.elapsed().as_secs_f64()
+            );
+        }
+    });
+    let mut times = times.into_inner().unwrap_or_else(|e| e.into_inner());
+    times.sort_by(f64::total_cmp);
+    let at = |q: f64| {
+        times
+            .get((times.len() as f64 * q) as usize)
+            .copied()
+            .unwrap_or(0.0)
+    };
+    let size = ["host-pipelines.next", "host-pipelines.bin"]
+        .iter()
+        .find_map(|f| std::fs::metadata(dir.join(f)).ok())
+        .map_or(0, |m| m.len());
+    println!(
+        "fill: {} made, {} without a host pipeline, {:.0} s; ms each: median {:.1}, p90 {:.1}, p99 {:.1}, most {:.0}; library {} MB",
+        count.load(Ordering::Relaxed),
+        failed.load(Ordering::Relaxed),
+        began.elapsed().as_secs_f64(),
+        at(0.5),
+        at(0.9),
+        at(0.99),
+        times.last().copied().unwrap_or(0.0),
+        size >> 20
+    );
 }
 
 pub fn run(game: PathBuf, o: Options) -> Result<()> {
-    let Options { out, book } = o;
+    let Options {
+        out,
+        book,
+        seed: seeding,
+        fill: filling,
+        jobs,
+    } = o;
     let began = std::time::Instant::now();
     let path = archive_path(&game);
     let archive = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -371,6 +502,13 @@ pub fn run(game: PathBuf, o: Options) -> Result<()> {
 
     if let Some(book) = book {
         compare(&book, &records, &out)?;
+    }
+    if seeding || filling {
+        let dir = cfg.cache_subdir("pipelines")?;
+        let seeded = seed(&archive, &records, &dir)?;
+        if filling {
+            fill(&dir, &seeded.keys.into_iter().collect(), jobs);
+        }
     }
     Ok(())
 }

@@ -169,7 +169,8 @@ enum Command {
     /// Decode the title's precompiled pipeline cache (in `shaders.rpf`)
     /// offline and write each record's key as the runtime names the
     /// pipeline (state text, shader hashes, title pipeline key) to a file
-    /// outside the repository; with --book, set a recorded book beside it.
+    /// outside the repository; with --book, set a recorded book beside it;
+    /// with --seed or --fill, have them made before a run.
     #[cfg(windows)]
     PipelineCache {
         /// The game folder (or its `shaders.rpf`).
@@ -180,6 +181,18 @@ enum Command {
         /// A `known-pipelines.bin` (or its folder) to compare with.
         #[arg(long)]
         book: Option<PathBuf>,
+        /// Write the records decoded whole into the book of the cache's
+        /// `pipelines` folder (as runs with `SCARLETT_PIPELINE_BOOK=1` write
+        /// the pipelines the title creates), for `scarlett warm` to make.
+        #[arg(long)]
+        seed: bool,
+        /// Seed, then make their host pipelines into the pipeline library
+        /// runs load from (needs the shader cache: `scarlett shaders` first).
+        #[arg(long)]
+        fill: bool,
+        /// Threads for --fill (default: every logical core).
+        #[arg(long, value_parser = parse_jobs)]
+        jobs: Option<usize>,
     },
     /// Print the shader translator's fingerprint (`translator <hex>`): the
     /// shader cache is valid for one fingerprint, so a launcher re-prepares
@@ -285,8 +298,8 @@ fn main() -> Result<()> {
         #[cfg(windows)]
         Command::Prepare { jobs, all } => warm::prepare(jobs, all),
         #[cfg(windows)]
-        Command::PipelineCache { game, out, book } => {
-            pipeline_cache::run(game, pipeline_cache::Options { out, book })
+        Command::PipelineCache { game, out, book, seed, fill, jobs } => {
+            pipeline_cache::run(game, pipeline_cache::Options { out, book, seed, fill, jobs })
         }
         Command::Fingerprint => {
             println!("translator {}", scarlett_hle::SHADER_TRANSLATOR);

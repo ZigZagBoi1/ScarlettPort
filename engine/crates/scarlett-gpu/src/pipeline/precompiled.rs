@@ -3,8 +3,9 @@
 //! [`GraphicsState`] a stream with the same fields gives, so that its
 //! `describe()` text, and the title pipeline key made from it and the
 //! shaders (`make::Pending::new`), can be set beside those of the pipelines
-//! a run wrote down (`known`). The keys depend on the adapter: target
-//! formats go through `resource::target_format`, which asks the host
+//! a run wrote down (`known`), and written into the book (`seed`) for
+//! `scarlett warm` / `prepare` to make. The keys depend on the adapter:
+//! target formats go through `resource::target_format`, which asks the host
 //! D3D12 device whether it renders to some formats (so a device is made).
 
 use std::collections::HashMap;
@@ -347,6 +348,110 @@ pub fn title_key(shaders: &[(&str, [u8; 32])], describe: Option<&str>) -> String
     key.finalize().to_hex()[..32].to_owned()
 }
 
+/// A decoded record to write into the book: its shaders (stage and
+/// container, in the title's order) and, for graphics, its state.
+pub struct Seed<'a> {
+    pub shaders: Vec<(&'static str, &'a [u8])>,
+    pub state: Option<&'a GraphicsDesc>,
+}
+
+/// What [`seed`] did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Seeded {
+    /// Entries appended to `known-pipelines.bin`.
+    pub added: usize,
+    /// Seeds whose key the book had (from a run or an earlier seed).
+    pub known: usize,
+    /// Containers appended to `known-shaders.bin`.
+    pub shaders: usize,
+    /// The keys of all the seeds, in their order.
+    pub keys: Vec<String>,
+}
+
+/// Appends `seeds` to the book in `dir` as a run with
+/// `SCARLETT_PIPELINE_BOOK=1` writes the pipelines the title creates
+/// (`known::note`): the same key (the title pipeline key), stages,
+/// container hashes and graphics state, so that `scarlett warm` and
+/// `scarlett prepare` make them like any other. Keys the book has are left
+/// out, as are containers it has. Not while a run writes the book: both
+/// append.
+pub fn seed(dir: &Path, seeds: &[Seed<'_>]) -> std::io::Result<Seeded> {
+    use std::collections::HashSet;
+    use std::io::Write;
+    std::fs::create_dir_all(dir)?;
+    let mut keys: HashSet<[u8; 16]> = HashSet::new();
+    let end = super::known::walk_pipelines(dir, |_, e| keys.extend(e.first_chunk::<16>().copied()));
+    let mut shaders: HashSet<[u8; 32]> = HashSet::new();
+    let shaders_end = super::known::walk_shaders(dir, |_, hash, _, _| {
+        shaders.insert(hash);
+    });
+    let mut out = Seeded::default();
+    let (mut new_shaders, mut new_pipelines) = (Vec::new(), Vec::new());
+    for s in seeds {
+        let hashed: Vec<(&str, [u8; 32])> = s
+            .shaders
+            .iter()
+            .map(|(st, c)| (*st, *blake3::hash(c).as_bytes()))
+            .collect();
+        let state = s.state.map(|d| {
+            let mut g = state_of(d);
+            title_convention(&mut g);
+            g
+        });
+        let key = title_key(&hashed, state.as_ref().map(|g| g.describe()).as_deref());
+        let mut id = [0u8; 16];
+        for (at, b) in id.iter_mut().enumerate() {
+            *b = u8::from_str_radix(&key[2 * at..2 * at + 2], 16).unwrap_or(0);
+        }
+        out.keys.push(key);
+        if s.shaders.is_empty() || !keys.insert(id) {
+            out.known += 1;
+            continue;
+        }
+        let mut entry = id.to_vec();
+        entry.push(s.shaders.len() as u8);
+        for ((stage, container), (_, hash)) in s.shaders.iter().zip(&hashed) {
+            let stage = super::known::STAGES
+                .iter()
+                .position(|x| x == stage)
+                .unwrap_or(0) as u8;
+            entry.push(stage);
+            entry.extend(hash);
+            if shaders.insert(*hash) {
+                new_shaders.push(stage);
+                new_shaders.extend(hash);
+                new_shaders.extend((container.len() as u32).to_le_bytes());
+                new_shaders.extend(*container);
+                out.shaders += 1;
+            }
+        }
+        entry.push(u8::from(state.is_some()));
+        if let Some(g) = &state {
+            g.put(&mut entry);
+        }
+        new_pipelines.extend((entry.len() as u32).to_le_bytes());
+        new_pipelines.extend(entry);
+        out.added += 1;
+    }
+    // Shaders first (an entry never names a container not written), each
+    // file cut to its last whole entry first, as a run's book does.
+    for (file, at, bytes) in [
+        (super::known::SHADERS, shaders_end, &new_shaders),
+        (super::known::PIPELINES, end, &new_pipelines),
+    ] {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(dir.join(file))?;
+        f.set_len(at)?;
+        use std::io::Seek;
+        f.seek(std::io::SeekFrom::End(0))?;
+        f.write_all(bytes)?;
+    }
+    Ok(out)
+}
+
 /// A pipeline a run wrote down (`known-pipelines.bin`).
 #[derive(Debug, Clone)]
 pub struct BookPipeline {
@@ -579,6 +684,62 @@ mod tests {
         };
         assert_eq!(field("blend.rt0.BlendEnable"), "BOOL(1)");
         assert_eq!(field("blend.rt1.BlendEnable"), "BOOL(0)");
+    }
+
+    #[test]
+    fn seeds_are_written_as_the_book_has_its_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = desc();
+        let (vs, ps, cs) = (
+            b"vertex container".to_vec(),
+            b"pixel container".to_vec(),
+            b"compute".to_vec(),
+        );
+        let seeds = [
+            Seed {
+                shaders: vec![("vertex", &vs[..]), ("pixel", &ps[..])],
+                state: Some(&d),
+            },
+            Seed {
+                shaders: vec![("compute", &cs[..])],
+                state: None,
+            },
+        ];
+        let first = seed(dir.path(), &seeds).unwrap();
+        assert_eq!((first.added, first.known, first.shaders), (2, 0, 3));
+        let book = book(dir.path());
+        assert_eq!(book.len(), 2);
+        assert!(book.iter().all(|p| !p.torn));
+        assert_eq!(
+            book.iter().map(|p| p.key.clone()).collect::<Vec<_>>(),
+            first.keys
+        );
+        assert_eq!(
+            book[0].state.as_ref().unwrap().describe,
+            state_text(&d).describe
+        );
+        assert_eq!(book[0].shaders[1], ("pixel", *blake3::hash(&ps).as_bytes()));
+        assert_eq!(super::super::known::keys(dir.path()), first.keys);
+        // The keys a run would give them.
+        let hashed = [
+            ("vertex", *blake3::hash(&vs).as_bytes()),
+            ("pixel", *blake3::hash(&ps).as_bytes()),
+        ];
+        assert_eq!(
+            first.keys[0],
+            title_key(&hashed, Some(&state_text(&d).describe))
+        );
+        // Seeding again adds nothing; a torn end is cut off first.
+        let path = dir.path().join(super::super::known::PIPELINES);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend([9, 0, 0]);
+        std::fs::write(&path, &bytes).unwrap();
+        let again = seed(dir.path(), &seeds).unwrap();
+        assert_eq!((again.added, again.known, again.shaders), (0, 2, 0));
+        assert_eq!(std::fs::read(&path).unwrap().len(), bytes.len() - 3);
+        let mut shaders = 0;
+        super::super::known::walk_shaders(dir.path(), |_, _, _, _| shaders += 1);
+        assert_eq!(shaders, 3);
     }
 
     #[test]
