@@ -1112,6 +1112,10 @@ impl Launcher {
         for (k, v) in t.env(fsr) {
             presets::set(&mut env, k, v);
         }
+        // Of the display settings, the World engine reads only the window mode.
+        for (k, v) in display::env(&self.config.display, 0).into_iter().filter(|(k, _)| *k == "XCL_WINDOW_MODE") {
+            presets::set(&mut env, k, v);
+        }
         // Every run logs the GPU host at info, so a report has enough to diagnose a black or slow
         // picture; the rest stays at the preset's level.
         let level = env.iter().find(|(k, _)| *k == "SCARLETT_LOG").map(|(_, v)| v.clone()).unwrap_or_else(|| "warn".into());
