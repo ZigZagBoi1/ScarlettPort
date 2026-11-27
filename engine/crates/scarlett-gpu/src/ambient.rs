@@ -484,6 +484,13 @@ void raise(uint3 at : SV_DispatchThreadID) {
     found = clamp(found, 0.2 * all, 2.5 * all);
     found = lerp(found, cells[CELLS].rgb, 0.2) * level * open;
     float3 was = unpack(light[p]);
+    // Magenta/violet garbage the probes' memory held (green far under red and
+    // blue): dropped (a purple-blue glow on a lit sheet of paper indoors).
+    if (was.g < 0.5 * min(was.r, was.b) && max(was.r, was.b) > 0.02) was = 0.0;
+    // And the bluer kind of it (blue over 2.5x green and over red), which the
+    // line above leaves as a faint violet. The sky's light keeps green above
+    // 0.4x blue and sunsets keep blue low, so neither is touched.
+    if (was.b > 2.5 * was.g && was.b > was.r && was.b > 0.02) was = 0.0;
     // What the program left counts as far as it can be true: the sky's light
     // outdoors, not the blocks of other memory.
     // For `fresh` seconds after the light around jumped (a new room) the
