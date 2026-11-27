@@ -34,6 +34,8 @@ The source in `engine` is the ScarlettPort runtime; its fork point is in `engine
 
 Tests that do not need a GPU: `cargo test --release --locked --lib -p scarlett-core -p scarlett-formats -p scarlett-pe -p scarlett-loader -p scarlett-shader -p scarlett-pipeline`. Tests in `scarlett-gpu` and `scarlett-hle` need a Shader Model 6.6 device. With `SCARLETT_TEST_NO_GPU=1` they run as on a machine without a card (device tests are skipped).
 
+`scarlett-shader`'s tests validate the DXIL they make with `dxil.dll` 1.6 or newer (shader model 6.6). They use the newest Windows SDK that has one, or `SCARLETT_DXIL` if set, and skip validation when there is none. Older SDKs, such as 10.0.19041, only have an older one. Then use a newer SDK, or set `SCARLETT_DXIL` to the `bin\x64\dxil.dll` of a [DirectXShaderCompiler release](https://github.com/microsoft/DirectXShaderCompiler/releases).
+
 ## Agility SDK
 
 Windows 10 needs the D3D12 Agility SDK (1.614.1) next to the executable, in a `D3D12` folder containing `D3D12Core.dll` and `d3d12SDKLayers.dll`. `setup-scarlett.ps1` downloads it from NuGet (`Microsoft.Direct3D.D3D12`) into `engine\target\release\D3D12`. To do it by hand, download the package, unzip it, and copy both DLLs from `build\native\bin\x64`. Do not commit these DLLs.
