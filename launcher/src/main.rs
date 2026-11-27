@@ -811,7 +811,14 @@ impl Launcher {
             return;
         }
         let game = PathBuf::from(&self.config.game_path);
-        let _ = std::fs::create_dir_all(self.config.cache_dir.trim());
+        // The runtime's own folders under the cache too: a missing one stopped Prepare (#252).
+        if let Err(e) = std::fs::create_dir_all(self.config.cache_dir.trim()).and_then(|_| std::fs::create_dir_all(self.scarlett_cache())) {
+            self.status = format!("Cannot create the cache folder {}: {e}. Check that its drive is connected, or pick another cache folder in Settings.", self.config.cache_dir.trim());
+            let status = self.status.clone();
+            self.log(status, LogKind::Error);
+            self.go(Page::Settings);
+            return;
+        }
         if kind == RunKind::Precompile {
             return self.start_build(game);
         }

@@ -135,7 +135,12 @@ fn subdir(root: &Path, store: &str, sub: &str) -> Result<PathBuf> {
         // Migration can change what the destination resolves to.
         ensure_outside_repo(&dir)?;
     }
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| {
+        format!(
+            "cannot create the {store} folder {}: check that its drive is connected and              writable, or pick another {store} folder",
+            dir.display()
+        )
+    })?;
     Ok(dir)
 }
 
@@ -145,7 +150,9 @@ fn default_dir(name: &str) -> Result<PathBuf> {
         .or_else(|| std::env::var_os("XDG_CACHE_HOME"))
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .context("cannot determine a user directory; set SCARLETT_CACHE_DIR and SCARLETT_DATA_DIR")?;
+        .context(
+            "cannot determine a user directory; set SCARLETT_CACHE_DIR and SCARLETT_DATA_DIR",
+        )?;
     Ok(base.join("ScarlettPort").join(name))
 }
 
@@ -173,13 +180,19 @@ fn migrate_legacy_store(root: &Path, store: &str) -> Result<bool> {
         return Ok(false);
     }
     ensure_outside_repo(&old)?;
-    std::fs::create_dir_all(&destination).with_context(|| format!("creating {}", destination.display()))?;
+    std::fs::create_dir_all(&destination)
+        .with_context(|| format!("creating {}", destination.display()))?;
     match std::fs::rename(&old, root) {
         Ok(()) => Ok(()),
         // Another process may have migrated this store while we were opening it.
         Err(_) if root.is_dir() => Ok(()),
-        Err(error) => copy_legacy_store(&old, root)
-            .with_context(|| format!("renaming {} to {} failed: {error}", old.display(), root.display())),
+        Err(error) => copy_legacy_store(&old, root).with_context(|| {
+            format!(
+                "renaming {} to {} failed: {error}",
+                old.display(),
+                root.display()
+            )
+        }),
     }?;
     Ok(true)
 }
@@ -187,9 +200,13 @@ fn migrate_legacy_store(root: &Path, store: &str) -> Result<bool> {
 /// Stage a fallback copy beside the final directory so a partial copy never
 /// looks like an initialized store. The original remains intact.
 fn copy_legacy_store(from: &Path, to: &Path) -> Result<()> {
-    let parent = to.parent().context("legacy store destination has no parent")?;
-    let stage = tempfile::tempdir_in(parent).with_context(|| format!("staging {}", to.display()))?;
-    copy_tree(from, stage.path()).with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
+    let parent = to
+        .parent()
+        .context("legacy store destination has no parent")?;
+    let stage =
+        tempfile::tempdir_in(parent).with_context(|| format!("staging {}", to.display()))?;
+    copy_tree(from, stage.path())
+        .with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
     match std::fs::rename(stage.path(), to) {
         Ok(()) => {
             let _ = stage.keep();
@@ -218,6 +235,16 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
 
+    #[test]
+    fn subdir_creates_a_missing_cache_folder() {
+        // #252: a cache folder that does not exist yet, two levels deep.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("not-yet").join("scarlett");
+        let dir = subdir(&root, "cache", "shaders").unwrap();
+        assert!(dir.is_dir());
+        assert_eq!(dir, root.join("shaders"));
+    }
+
     #[cfg(windows)]
     #[test]
     fn legacy_migration_copy_failure_does_not_publish_an_empty_store() {
@@ -236,14 +263,24 @@ mod tests {
             .unwrap();
 
         let error = copy_legacy_store(&legacy, &dest).unwrap_err();
-        assert!(error.downcast_ref::<std::io::Error>().is_some_and(|e| e.raw_os_error() == Some(32)));
-        assert!(!dest.exists(), "a failed copy must not be treated as an initialized store");
+        assert!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.raw_os_error() == Some(32))
+        );
+        assert!(
+            !dest.exists(),
+            "a failed copy must not be treated as an initialized store"
+        );
         assert_eq!(std::fs::read(legacy.join("open")).unwrap(), b"profile data");
         drop(lock);
 
         copy_legacy_store(&legacy, &dest).unwrap();
         for entry in ["open", "locked"] {
-            assert_eq!(std::fs::read(dest.join(entry)).unwrap(), std::fs::read(legacy.join(entry)).unwrap());
+            assert_eq!(
+                std::fs::read(dest.join(entry)).unwrap(),
+                std::fs::read(legacy.join(entry)).unwrap()
+            );
         }
     }
 

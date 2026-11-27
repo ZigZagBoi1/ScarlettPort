@@ -97,6 +97,13 @@ fn resolve(path: &Path) -> Result<PathBuf, PolicyError> {
                     rest.push("..".into());
                     existing = parent;
                 }
+                // Nothing of it exists, not even the root (a drive that is
+                // not connected): no source tree can be there, and whoever
+                // creates the folder reports why it cannot (#252).
+                _ if absolute.is_absolute() => {
+                    let _ = source;
+                    return Ok(normalize(&absolute));
+                }
                 _ => {
                     return Err(PolicyError::Io {
                         path: path.to_path_buf(),
@@ -126,6 +133,24 @@ fn normalize(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn a_path_on_a_drive_that_is_not_there_is_outside_the_repo() {
+        // #252: resolving used to fail with "cannot resolve" (os error 3).
+        let Some(drive) = (b'D'..=b'Z')
+            .rev()
+            .map(|d| format!("{}:\\", d as char))
+            .find(|d| !Path::new(d).exists())
+        else {
+            return;
+        };
+        let path = Path::new(&drive)
+            .join("cache")
+            .join("scarlett")
+            .join("shaders");
+        assert!(ensure_outside_repo(&path).is_ok());
+    }
 
     #[test]
     fn rejects_paths_inside_this_repo() {
