@@ -348,14 +348,20 @@ fn feature_levels(data: *mut c_void) -> HRESULT {
 
 /// Device methods 0x1c8 and 0x218 (`SLOT`). The title calls both
 /// (title+0x2477578 and title+0x24800d5) as `(this, description, interface
-/// id, out)`, asks for `ID3D12PipelineState`, and on success keeps the
-/// object `out` names and draws with it; on failure it goes without that
-/// pipeline, silently. What the descriptions hold is not known: the calls
-/// fail as they always did, with `out` null, and the first ones log the
-/// description's words and what its first word points at, so that the two
-/// methods can be written.
-/// shortcut: not implemented. Answering `S_OK` here without making the
-/// pipeline would hand the title whatever its stack held as an object.
+/// id, out)` and asks for `ID3D12PipelineState`. Neither is the only way a
+/// pipeline is made, so nothing is drawn without one when they fail:
+/// - 0x218 is tried first for a compute pipeline the title has a cached
+///   description of (looked up by a 64-bit key); when it fails the title
+///   makes the same pipeline at once through 0x1f0 (`create_compute_x`)
+///   from its root signature and shader, and keeps and dispatches that one.
+/// - 0x1c8 registers cached descriptions while the title loads; one that
+///   fails is not registered, and nothing waits on it.
+///
+/// Both fail, with `out` null; the first calls log the description's words
+/// once, at debug level.
+/// shortcut: not implemented, as the title has its own way round. Answering
+/// `S_OK` here without making the pipeline would hand the title whatever
+/// its stack held as an object.
 extern "system" fn unknown_pipeline<const SLOT: usize>(
     _: This,
     desc: *const u8,
@@ -388,12 +394,18 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
         let first = description
             .as_ref()
             .and_then(|w| words(w[0] as usize));
-        tracing::warn!(
+        if calls == 1 {
+            tracing::info!(
+                slot = format_args!("{:#x}", SLOT),
+                "a cached-pipeline creation method that is not implemented: the title makes these pipelines its usual way"
+            );
+        }
+        tracing::debug!(
             slot = format_args!("{:#x}", SLOT),
             calls,
             description = format_args!("{description:x?}"),
             first_points_at = format_args!("{first:x?}"),
-            "a pipeline creation method that is not implemented: the title goes without this pipeline"
+            "cached-pipeline creation not implemented"
         );
     }
     E_NOTIMPL
