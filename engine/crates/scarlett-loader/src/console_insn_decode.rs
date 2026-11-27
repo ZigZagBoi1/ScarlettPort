@@ -61,6 +61,16 @@ pub fn insertq(dst: u64, src: u64, len: u8, idx: u8) -> u64 {
     (dst & !mask) | ((src & ones).checked_shl(idx).unwrap_or(0) & mask)
 }
 
+/// The destination's high quadword after INSERTQ (undefined by AMD's manual).
+pub fn insertq_high(_old: u64) -> u64 {
+    0
+}
+
+/// The destination's high quadword after EXTRQ (undefined by AMD's manual).
+pub fn extrq_high(_old: u64) -> u64 {
+    0
+}
+
 /// The length of a ModRM-encoded operand (ModRM, SIB and displacement) at `b[0]`, None when the
 /// bytes run out.
 fn modrm_len(b: &[u8]) -> Option<usize> {
@@ -229,5 +239,77 @@ mod tests {
         assert_eq!(decode(&[0x48, 0x8B, 0x01]), None);
         assert_eq!(decode(&[0x66, 0x0F, 0xAE, 0x74, 0x24]), None);
         assert_eq!(decode(&[0x0F]), None);
+    }
+}
+
+/// EXTRQ / INSERTQ checked against the CPU running the tests, when it has SSE4a (an AMD one):
+/// every length and index, the register forms (fields in a register) and a spread of immediates.
+#[cfg(all(test, target_arch = "x86_64"))]
+mod hardware {
+    use super::*;
+    use core::arch::asm;
+    use core::arch::x86_64::{__m128i, _mm_set_epi64x, _mm_storeu_si128};
+
+    fn sse4a() -> bool {
+        // SAFETY: cpuid is always there on x86_64.
+        let max = core::arch::x86_64::__cpuid(0x8000_0000).eax;
+        max >= 0x8000_0001 && core::arch::x86_64::__cpuid(0x8000_0001).ecx & (1 << 6) != 0
+    }
+    fn v(hi: u64, lo: u64) -> __m128i {
+        // SAFETY: SSE2 is baseline on x86_64.
+        unsafe { _mm_set_epi64x(hi as i64, lo as i64) }
+    }
+    fn parts(x: __m128i) -> (u64, u64) {
+        let mut o = [0u64; 2];
+        // SAFETY: 16 writable bytes.
+        unsafe { _mm_storeu_si128(o.as_mut_ptr().cast(), x) };
+        (o[1], o[0])
+    }
+    const D: (u64, u64) = (0xA5A5_5A5A_C3C3_3C3C, 0x0123_4567_89AB_CDEF);
+    const S: u64 = 0xFEDC_BA98_7654_3210;
+
+    #[test]
+    fn insertq_and_extrq_match_the_cpu() {
+        if !sse4a() {
+            eprintln!("no SSE4a on this CPU: the hardware check is skipped");
+            return;
+        }
+        for len in 0u8..64 {
+            for idx in 0u8..64 {
+                if len != 0 && len as u32 + idx as u32 > 64 || len == 0 && idx != 0 {
+                    continue; // undefined by AMD's manual
+                }
+                let mut d = v(D.0, D.1);
+                let f = u64::from(len) | u64::from(idx) << 8;
+                // SAFETY: SSE4a is there (checked above).
+                unsafe { asm!("insertq {d}, {s}", d = inout(xmm_reg) d, s = in(xmm_reg) v(f, S)) };
+                assert_eq!(parts(d).1, insertq(D.1, S, len, idx), "insertq low, len {len} idx {idx}");
+                assert_eq!(parts(d).0, insertq_high(D.0), "insertq high, len {len} idx {idx}");
+                let mut d = v(D.0, D.1);
+                // SAFETY: as above.
+                unsafe { asm!("extrq {d}, {s}", d = inout(xmm_reg) d, s = in(xmm_reg) v(0x77, f)) };
+                assert_eq!(parts(d).1, extrq(D.1, len, idx), "extrq low, len {len} idx {idx}");
+                assert_eq!(parts(d).0, extrq_high(D.0), "extrq high, len {len} idx {idx}");
+            }
+        }
+        // the reported site (#350, #351, #353): insertq xmm0, xmm1, 16, 16
+        let mut d = v(D.0, D.1);
+        // SAFETY: as above.
+        unsafe { asm!("insertq xmm0, xmm1, 16, 16", inout("xmm0") d, in("xmm1") v(0x1111, S)) };
+        assert_eq!(parts(d), (0, 0x0123_4567_3210_CDEF), "bits 16..31 from xmm1, the rest kept, the high half zeroed");
+        assert_eq!(parts(d), (insertq_high(D.0), insertq(D.1, S, 16, 16)));
+        macro_rules! imm {
+            ($($l:literal, $i:literal);*) => {$(
+                let mut d = v(D.0, D.1);
+                // SAFETY: as above.
+                unsafe { asm!(concat!("insertq {d}, {s}, ", $l, ", ", $i), d = inout(xmm_reg) d, s = in(xmm_reg) v(0x3F3F, S)) };
+                assert_eq!(parts(d), (insertq_high(D.0), insertq(D.1, S, $l, $i)), "insertq imm {} {}", $l, $i);
+                let mut d = v(D.0, D.1);
+                // SAFETY: as above.
+                unsafe { asm!(concat!("extrq {d}, ", $l, ", ", $i), d = inout(xmm_reg) d) };
+                assert_eq!(parts(d), (extrq_high(D.0), extrq(D.1, $l, $i)), "extrq imm {} {}", $l, $i);
+            )*};
+        }
+        imm!(16, 16; 0, 0; 1, 0; 1, 63; 8, 16; 16, 48; 32, 32; 63, 1; 63, 0; 12, 20; 4, 60; 64, 0; 65, 3);
     }
 }

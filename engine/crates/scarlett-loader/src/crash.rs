@@ -467,9 +467,12 @@ unsafe fn sse4a(code: *const u8, xmm: &mut [M128A; 16]) -> Option<usize> {
         }
         let target = if immediate { src } else { dst };
         xmm[target].Low = (xmm[target].Low >> at_bit) & mask;
+        // the high quadword is zeroed, as AMD CPUs do (and `console_insn`)
+        xmm[target].High = 0;
     } else {
         let value = (xmm[src].Low & mask) << at_bit;
         xmm[dst].Low = xmm[dst].Low & !(mask << at_bit) | value;
+        xmm[dst].High = 0;
     }
     Some(len)
 }
