@@ -3497,12 +3497,10 @@ fn relay_wait(why: usize, done: impl Fn(&Line) -> bool) {
     blamed(why, us);
 }
 
-/// Diagnostic ceilings only, never for play (`SCARLETT_DIAG_NO_BACK`,
-/// `SCARLETT_DIAG_NO_SNAP`; `VICTORY_` names too; A/B-able): what a frame
-/// costs without the copy-back of what shaders wrote (title memory keeps the
-/// bytes it last had; the card's compares still run), or without the
-/// snapshots before a submission (that one breaks state: run rb-snap1 ended
-/// in a fault once it was off again).
+/// Diagnostic ceiling only, never for play (`SCARLETT_DIAG_NO_BACK`,
+/// A/B-able): what a frame costs without the copy-back of what shaders
+/// wrote (title memory keeps the bytes it last had, so the picture is
+/// wrong; the card's compares still run).
 pub(crate) fn diag_bypass(name: &'static str) -> bool {
     #[cfg(feature = "diagnostics")]
     if let Some(on) = crate::ab::pick(name) {
@@ -3513,7 +3511,7 @@ pub(crate) fn diag_bypass(name: &'static str) -> bool {
     if let Some(&(_, on)) = known.iter().find(|k| k.0 == name) {
         return on;
     }
-    let on = crate::switch::on(name) || crate::switch::on(&name.replacen("SCARLETT_", "VICTORY_", 1));
+    let on = crate::switch::on(name);
     known.push((name, on));
     on
 }
@@ -5837,9 +5835,7 @@ impl Host {
         {
             #[cfg(feature = "diagnostics")]
             let snapshots = std::time::Instant::now();
-            if !diag_bypass("SCARLETT_DIAG_NO_SNAP") {
-                crate::shadow::take_snapshots();
-            }
+            crate::shadow::take_snapshots();
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::SnapshotUs, snapshots.elapsed().as_micros() as u64);
         }
