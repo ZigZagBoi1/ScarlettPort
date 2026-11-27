@@ -265,7 +265,7 @@ pub(crate) fn read_shader_carrier(path: &Path) -> Option<Vec<u8>> {
 
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
-    if len < 0x20 || len > MAX_FILE {
+    if !(0x20..=MAX_FILE).contains(&len) {
         return None;
     }
     let mut head = [0u8; 4];
@@ -308,95 +308,102 @@ pub fn run(paths: Vec<PathBuf>, verbose: bool, disasm: bool) -> Result<()> {
             continue;
         };
         let mut found_here = 0;
-            for source in sources(&data) {
-                let Some(bytes) = source.bytes() else {
-                    eprintln!("corrupt record {}{}", path.display(), source.label());
-                    continue;
-                };
-                let Ok(container) = Container::parse(&bytes) else {
-                    continue;
-                };
-                found_here += 1;
-                t.containers += 1;
-                let dxil = container.part(FourCC::DXIL).or(container.part(FourCC::ACCC));
-                t.with_dxil_part += usize::from(dxil.is_some());
-                let program = dxil.and_then(|p| DxilProgram::parse(p.data).ok());
-                let mut listing = Vec::new();
-                // Independent of the bitcode: titles may strip it.
-                let native = match dxil.map(|p| native_programs(p.data)) {
-                    Some(Ok(programs)) if !programs.is_empty() => {
-                        t.with_native += 1;
-                        let mut list = Vec::new();
-                        for n in &programs {
-                            *t.native_stages.entry(n.stage).or_default() += 1;
-                            list.push(format!("{:?} {} B", n.stage, n.code.len()));
-                            if disasm {
-                                listing.push(format!("    {:?} stage I/O: {:?}", n.stage, n.io));
-                                listing.extend(n.layout.iter().map(|p| format!("    {p:?}")));
-                                listing.extend(n.used.iter().map(|u| format!("    {u:?}")));
+        for source in sources(&data) {
+            let Some(bytes) = source.bytes() else {
+                eprintln!("corrupt record {}{}", path.display(), source.label());
+                continue;
+            };
+            let Ok(container) = Container::parse(&bytes) else {
+                continue;
+            };
+            found_here += 1;
+            t.containers += 1;
+            let dxil = container
+                .part(FourCC::DXIL)
+                .or(container.part(FourCC::ACCC));
+            t.with_dxil_part += usize::from(dxil.is_some());
+            let program = dxil.and_then(|p| DxilProgram::parse(p.data).ok());
+            let mut listing = Vec::new();
+            // Independent of the bitcode: titles may strip it.
+            let native = match dxil.map(|p| native_programs(p.data)) {
+                Some(Ok(programs)) if !programs.is_empty() => {
+                    t.with_native += 1;
+                    let mut list = Vec::new();
+                    for n in &programs {
+                        *t.native_stages.entry(n.stage).or_default() += 1;
+                        list.push(format!("{:?} {} B", n.stage, n.code.len()));
+                        if disasm {
+                            listing.push(format!("    {:?} stage I/O: {:?}", n.stage, n.io));
+                            listing.extend(n.layout.iter().map(|p| format!("    {p:?}")));
+                            listing.extend(n.used.iter().map(|u| format!("    {u:?}")));
+                        }
+                        match gfx10::decode(&n.code) {
+                            Ok(insts) => {
+                                t.decoded += 1;
+                                t.instructions += insts.len();
+                                for i in insts.iter().filter(|i| i.name().is_none()) {
+                                    let key = format!("{:?} {:#x}", i.encoding, i.opcode);
+                                    *t.unnamed.entry(key).or_default() += 1;
+                                }
+                                if disasm {
+                                    listing.extend(
+                                        insts.iter().map(|i| format_instruction(i, n.wave64)),
+                                    );
+                                }
                             }
-                            match gfx10::decode(&n.code) {
-                                Ok(insts) => {
-                                    t.decoded += 1;
-                                    t.instructions += insts.len();
-                                    for i in insts.iter().filter(|i| i.name().is_none()) {
-                                        let key = format!("{:?} {:#x}", i.encoding, i.opcode);
-                                        *t.unnamed.entry(key).or_default() += 1;
-                                    }
-                                    if disasm {
-                                        listing.extend(
-                                            insts.iter().map(|i| format_instruction(i, n.wave64)),
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    let reason = match e {
-                                        ShaderError::Isa { reason, .. } => reason,
-                                        _ => "other",
-                                    };
-                                    *t.decode_errors.entry(reason).or_default() += 1;
-                                    list.push(format!("({e})"));
-                                }
+                            Err(e) => {
+                                let reason = match e {
+                                    ShaderError::Isa { reason, .. } => reason,
+                                    _ => "other",
+                                };
+                                *t.decode_errors.entry(reason).or_default() += 1;
+                                list.push(format!("({e})"));
                             }
                         }
-                        format!(", native {}", list.join(" "))
                     }
-                    Some(Err(e)) => {
-                        *t.native_errors.entry(e.to_string()).or_default() += 1;
-                        format!(", native: {e}")
-                    }
-                    _ => String::new(),
-                };
-                let line = match &program {
-                    Some(p) => {
-                        t.with_bitcode += 1;
-                        let x = p.xbox_extras();
-                        t.standard_layout += usize::from(p.is_standard_layout());
-                        t.xdat += usize::from(x.xdat);
-                        t.xbop += usize::from(x.xbop);
-                        *t.kinds.entry(format!("{:?}", p.kind)).or_default() += 1;
-                        format!(
-                            "{:?} sm{}.{} bitcode {} B, xdat {}, xbop {}",
-                            p.kind,
-                            p.shader_model.0,
-                            p.shader_model.1,
-                            p.bitcode.len(),
-                            x.xdat,
-                            x.xbop
-                        )
-                    }
-                    None => "no parsable DXIL program".to_owned(),
-                } + &native;
-                if verbose {
-                    // As a run's log and a replay name it (`hash=`).
-                    let hash = blake3::hash(&bytes).to_hex();
-                    println!("{}{} #{}: {line}", path.display(), source.label(), &hash[..16]);
-                    for l in &listing {
-                        println!("{l}");
-                    }
+                    format!(", native {}", list.join(" "))
+                }
+                Some(Err(e)) => {
+                    *t.native_errors.entry(e.to_string()).or_default() += 1;
+                    format!(", native: {e}")
+                }
+                _ => String::new(),
+            };
+            let line = match &program {
+                Some(p) => {
+                    t.with_bitcode += 1;
+                    let x = p.xbox_extras();
+                    t.standard_layout += usize::from(p.is_standard_layout());
+                    t.xdat += usize::from(x.xdat);
+                    t.xbop += usize::from(x.xbop);
+                    *t.kinds.entry(format!("{:?}", p.kind)).or_default() += 1;
+                    format!(
+                        "{:?} sm{}.{} bitcode {} B, xdat {}, xbop {}",
+                        p.kind,
+                        p.shader_model.0,
+                        p.shader_model.1,
+                        p.bitcode.len(),
+                        x.xdat,
+                        x.xbop
+                    )
+                }
+                None => "no parsable DXIL program".to_owned(),
+            } + &native;
+            if verbose {
+                // As a run's log and a replay name it (`hash=`).
+                let hash = blake3::hash(&bytes).to_hex();
+                println!(
+                    "{}{} #{}: {line}",
+                    path.display(),
+                    source.label(),
+                    &hash[..16]
+                );
+                for l in &listing {
+                    println!("{l}");
                 }
             }
-            t.files_with_shaders += usize::from(found_here > 0);
+        }
+        t.files_with_shaders += usize::from(found_here > 0);
     }
     println!(
         "containers found       {} (in {} files)",

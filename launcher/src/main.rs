@@ -921,44 +921,6 @@ impl Launcher {
         firstrun::shader_key(t.as_deref(), self.effective_world_hash())
     }
 
-    /// Reuses an existing CLI shader cache (e.g. `%LOCALAPPDATA%\ScarlettPort\cache\shaders`)
-    /// if the launcher's cache is empty, and recognizes a populated shader cache without
-    /// conflating shader translation with pipeline warming.
-    pub fn adopt_existing_shader_cache(&mut self) {
-        if !self.world_selected() || !self.game_ok {
-            return;
-        }
-        let cache = self.scarlett_cache();
-        if let Some(msg) = shaderbuild::ensure_reused_shader_cache(&cache) {
-            self.log(msg, LogKind::Info);
-        }
-        let already_recorded = if self.local_selected() {
-            !self.config.local_shaders_hash.is_empty()
-        } else {
-            !self.config.world_shaders_hash.is_empty()
-        };
-        if already_recorded {
-            return;
-        }
-        let key = self.shader_key();
-        if key.is_empty() {
-            return;
-        }
-        let count = engine::count_cached_shaders(&cache.join("shaders"));
-        if count >= engine::SHADERS_TOTAL * 3 / 4 {
-            if self.local_selected() {
-                self.config.local_shaders_hash = key;
-            } else {
-                self.config.world_shaders_hash = key;
-            }
-            self.save();
-            self.log(
-                format!("Recognized {count} existing cached shaders in {}; shader translation marked complete.", cache.join("shaders").display()),
-                LogKind::Info,
-            );
-        }
-    }
-
     /// Starts the automatic game folder search on a worker thread (`firstrun::search`).
     pub fn start_search(&mut self) {
         if self.search.is_some() {
@@ -1613,7 +1575,6 @@ impl Launcher {
                 }
                 Message::Translator(local, t) => {
                     if local { self.local_translator = t } else { self.world_translator = t }
-                    self.adopt_existing_shader_cache();
                 }
                 Message::GameFound(p) => {
                     if !self.found_games.contains(&p) {
