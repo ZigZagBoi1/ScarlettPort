@@ -189,7 +189,11 @@ pub fn prepare(jobs: Option<usize>, all: bool) -> Result<()> {
         seed.as_ref().map(|s| &s.wanted),
     )?;
     if let Some(seed) = &seed {
-        let s = known::finish_seed(&dir, seed, &found).context("pipeline list")?;
+        // Built into the library, not started while the title loads
+        // (`SCARLETT_SEED_EARLY=1`: in the early list, started then too).
+        let early = switch("SCARLETT_SEED_EARLY", "VICTORY_SEED_EARLY");
+        let file = if early { known::EARLY_FILE } else { known::SEEDED_FILE };
+        let s = known::finish_seed(&dir, seed, &found, file).context("pipeline list")?;
         println!("prepare progress seed {} {}", s.resolved, s.listed);
         println!(
             "seed         {} of {} listed pipelines have their shaders in the game files ({} shaders not found)",
@@ -199,8 +203,10 @@ pub fn prepare(jobs: Option<usize>, all: bool) -> Result<()> {
     println!("prepare step 2/{steps} library");
     scarlett_hle::known_pipelines::use_translations(dir.with_file_name("shaders"));
     let keys = known::keys(&dir);
-    let early = std::fs::read_to_string(dir.join("early-pipelines.txt")).unwrap_or_default();
-    let early: HashSet<&str> = early.lines().collect();
+    let mut early = std::fs::read_to_string(dir.join(known::EARLY_FILE)).unwrap_or_default();
+    early.push('\n');
+    early.push_str(&std::fs::read_to_string(dir.join(known::SEEDED_FILE)).unwrap_or_default());
+    let early: HashSet<&str> = early.lines().filter(|l| !l.is_empty()).collect();
     let used: Vec<usize> = (0..keys.len()).filter(|&n| early.contains(keys[n].as_str())).collect();
     let total = used.len();
     if keys.is_empty() {
@@ -234,6 +240,10 @@ pub fn prepare(jobs: Option<usize>, all: bool) -> Result<()> {
 /// pipelines are made before it, not while it draws.
 /// `SCARLETT_PIPELINE_LIST=<file>` reads another, `=0` none.
 const SHIPPED_LIST: &[u8] = include_bytes!("../data/pipelines.list");
+
+fn switch(name: &str, old: &str) -> bool {
+    std::env::var_os(name).or_else(|| std::env::var_os(old)).is_some_and(|v| v == "1")
+}
 
 fn shipped_list() -> Option<Vec<u8>> {
     let var = std::env::var_os("SCARLETT_PIPELINE_LIST")

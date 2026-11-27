@@ -523,6 +523,9 @@ impl GraphicsState {
 const LIST_MAGIC: &[u8; 8] = b"SPPL\x01\0\0\0";
 /// The title pipelines that draws asked for first, beside the library.
 pub const EARLY_FILE: &str = "early-pipelines.txt";
+/// The pipelines a pipeline list seeded ([`finish_seed`]): built into the
+/// library by `prepare`, loaded from it when a draw first wants one.
+pub const SEEDED_FILE: &str = "seeded-pipelines.txt";
 
 /// A pipeline list: pipelines with their shaders named by hash alone, and
 /// their graphics states, no shader code. Valid on any machine (a key is
@@ -666,13 +669,14 @@ pub struct Seeded {
 
 /// Writes the containers `found` (hash and bytes, from the game files) to
 /// `known-shaders.bin`, then every pipeline of `seed` whose shaders are all
-/// there now to `known-pipelines.bin` (if not there yet) and to the early
-/// list, so that `prepare` builds them into the library. Both files are only
+/// there now to `known-pipelines.bin` (if not there yet) and to `list_file` (the early
+/// list or [`SEEDED_FILE`]), so that `prepare` builds them into the library. Both files are only
 /// added to: a stop in between is taken up by the next run.
 pub fn finish_seed(
     dir: &Path,
     seed: &Seed,
     found: &[([u8; 32], Vec<u8>)],
+    list_file: &str,
 ) -> std::io::Result<Seeded> {
     std::fs::create_dir_all(dir)?;
     // A torn end is cut off first, as the book does.
@@ -712,7 +716,7 @@ pub fn finish_seed(
         .write_all(&shaders)?;
     let mut known = HashSet::new();
     walk_pipelines(dir, |_, e| known.extend(e.first_chunk::<16>().copied()));
-    let early_path = dir.join(EARLY_FILE);
+    let early_path = dir.join(list_file);
     let early_text = std::fs::read_to_string(&early_path).unwrap_or_default();
     let mut early: HashSet<String> = early_text
         .lines()
@@ -763,7 +767,7 @@ pub fn finish_seed(
             text.push('\n');
         }
         text.push_str(&added_early.join("\n"));
-        let tmp = dir.join("early-pipelines.tmp");
+        let tmp = dir.join(format!("{list_file}.tmp"));
         std::fs::write(&tmp, text)?;
         std::fs::rename(&tmp, &early_path)?;
     }
@@ -841,7 +845,7 @@ mod tests {
         let seed = plan_seed(&user, &list).expect("a list");
         assert_eq!(seed.wanted.len(), 2);
         // The game files have b only: the pipeline of b alone is seeded.
-        let s = finish_seed(&user, &seed, &[(hb, b.clone()), (ha, b"not a".to_vec())]).unwrap();
+        let s = finish_seed(&user, &seed, &[(hb, b.clone()), (ha, b"not a".to_vec())], EARLY_FILE).unwrap();
         assert_eq!(
             s,
             Seeded {
@@ -857,7 +861,7 @@ mod tests {
         );
         // Again with a too: the other is added, nothing twice.
         let seed = plan_seed(&user, &list).unwrap();
-        let s = finish_seed(&user, &seed, &[(ha, a.clone())]).unwrap();
+        let s = finish_seed(&user, &seed, &[(ha, a.clone())], EARLY_FILE).unwrap();
         assert_eq!(s.resolved, 2);
         let mut got = keys(&user);
         got.sort();
