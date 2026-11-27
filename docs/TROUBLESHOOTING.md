@@ -32,6 +32,8 @@ The title ships tens of thousands of GPU programs. Each is translated for your c
 - World engine (default, ScarlettPort runtime): `%LOCALAPPDATA%\ScarlettPort\data\<title id>\saves\`.
 - Classic engine (XCL): `%LOCALAPPDATA%\XCL\<package name>\`, in the `saves` and `pls` folders (or under `%XCL_DATA_ROOT%` if you set it).
 
+The runtime CLI only migrates a missing default `cache` or `data` store when it opens that store. Help and inspection do not move legacy files. Other folders under `%LOCALAPPDATA%\victory` stay in place; if a store has to be copied instead of moved, its original stays in place too.
+
 **Back up:**
 
 - The launcher's **Saves** page backs up both folders to `<cache>\save-backups\<date>` and keeps the newest 10.

@@ -131,7 +131,10 @@ fn explicit_config_path(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Opt
 fn subdir(root: &Path, store: &str, sub: &str) -> Result<PathBuf> {
     let dir = root.join(sub);
     ensure_outside_repo(&dir)?;
-    migrate_legacy_store(root, store)?;
+    if migrate_legacy_store(root, store)? {
+        // Migration can change what the destination resolves to.
+        ensure_outside_repo(&dir)?;
+    }
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     Ok(dir)
 }
@@ -151,29 +154,34 @@ const LEGACY_DATA_DIR: &str = "victory"; // rename:keep
 
 /// Migrate only the default store a caller is about to use. Resolving paths
 /// alone must not touch another runtime's files.
-fn migrate_legacy_store(root: &Path, store: &str) -> Result<()> {
+fn migrate_legacy_store(root: &Path, store: &str) -> Result<bool> {
     let Some(base) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) else {
-        return Ok(());
+        return Ok(false);
     };
     let destination = base.join("ScarlettPort");
     if root != destination.join(store) || root.exists() {
-        return Ok(());
+        return Ok(false);
     }
     // Different subdirectories can be opened concurrently at startup.
     static MIGRATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = MIGRATION.lock().unwrap_or_else(|e| e.into_inner());
     let old = base.join(LEGACY_DATA_DIR).join(store);
-    if root.exists() || !old.is_dir() {
-        return Ok(());
+    if root.exists() {
+        return Ok(true);
     }
+    if !old.is_dir() {
+        return Ok(false);
+    }
+    ensure_outside_repo(&old)?;
     std::fs::create_dir_all(&destination).with_context(|| format!("creating {}", destination.display()))?;
     match std::fs::rename(&old, root) {
         Ok(()) => Ok(()),
         // Another process may have migrated this store while we were opening it.
         Err(_) if root.is_dir() => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => copy_legacy_store(&old, root),
-        Err(error) => Err(error).with_context(|| format!("moving {} to {}", old.display(), root.display())),
-    }
+        Err(error) => copy_legacy_store(&old, root)
+            .with_context(|| format!("renaming {} to {} failed: {error}", old.display(), root.display())),
+    }?;
+    Ok(true)
 }
 
 /// Stage a fallback copy beside the final directory so a partial copy never
