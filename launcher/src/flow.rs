@@ -121,9 +121,43 @@ pub fn eta_secs(elapsed: u64, fraction: f32) -> Option<u64> {
     (0.02..1.).contains(&fraction).then(|| (elapsed as f32 * (1. - fraction) / fraction).round() as u64)
 }
 
+/// A plain reason for a run that stopped on a known problem with the game files, from the
+/// run's last log lines (newest last), or `None` when nothing in them is recognised.
+pub fn stop_reason(lines: &[String]) -> Option<String> {
+    for l in lines.iter().rev() {
+        let t = l.trim();
+        if let Some(rest) = t.strip_prefix("missing dlls") {
+            // "missing dlls   A.dll, B.dll not in <game>, and neither ... the package is incomplete; ..."
+            let rest = rest.trim_start();
+            let names = rest.split(" not in ").next().unwrap_or(rest).trim();
+            return Some(format!(
+                "The game folder is missing {names}: the game package is incomplete. Copy every file of the package into the game folder, then run Verify game files."
+            ));
+        }
+        if t.contains("malformed image") || t.contains("extends beyond file bounds") {
+            return Some("The game's executable is incomplete or damaged, so it cannot start. Run Verify game files; if it passes, copy the game folder again from its source.".into());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_dlls_are_named_plainly() {
+        let lines = vec![
+            "title          7952987A, sa".to_string(),
+            r"missing dlls   XboxBvhBuilder.dll not in <game>, and neither the host nor ScarlettPort provides it: the package is incomplete; copy every file of the package next to the executable".into(),
+            "Error: the title's own DLLs are missing: ...".into(),
+            "Game ended. Stopped (exit code 1).".into(),
+        ];
+        let r = stop_reason(&lines).unwrap();
+        assert!(r.contains("missing XboxBvhBuilder.dll:") && r.contains("Verify"), "{r}");
+        assert!(stop_reason(&["Error: malformed image: section '.text' needs ...".into()]).unwrap().contains("Verify"));
+        assert_eq!(stop_reason(&["Game ended. Stopped (exit code 1).".into()]), None);
+    }
 
     fn inp<'a>(game: bool, pre: bool, built: &'a str, rt: Option<&'a str>) -> Inputs<'a> {
         Inputs { game_complete: game, precompiling: pre, built_hash: built, runtime_hash: rt, inline_shaders: false }

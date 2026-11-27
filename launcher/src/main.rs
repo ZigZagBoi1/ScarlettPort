@@ -322,6 +322,8 @@ pub struct Launcher {
     pub minimized_for_game: bool,
     /// The last Play run ended with an error: offer to send a report.
     pub crash_prompt: bool,
+    /// A plain reason the last Play run stopped (missing or damaged game files), if known.
+    pub stop_reason: Option<String>,
     pub local_hash: Option<String>,
     pub local_desc: String,
     pub verify: Option<verify::Report>,
@@ -492,6 +494,7 @@ impl Launcher {
             crash_report: None,
             minimized_for_game: false,
             crash_prompt: false,
+            stop_reason: None,
             local_hash: None,
             local_desc: String::new(),
             verify: None,
@@ -1435,6 +1438,7 @@ impl Launcher {
             return;
         }
         let what = match self.crash_report.as_ref().and_then(|r| r.file_name()) {
+            _ if self.stop_reason.is_some() => self.stop_reason.clone().unwrap_or_default(),
             Some(n) => format!("The game crashed. Its crash report was saved ({}).", n.to_string_lossy()),
             None => "The game stopped with an error.".to_string(),
         };
@@ -1525,9 +1529,24 @@ impl Launcher {
                         Some(c) => format!("Stopped (exit code {c})."),
                         None => "Stopped.".to_string(),
                     };
-                    self.status = if self.crash_report.is_some() { "The game crashed - a report was saved.".to_string() } else { note.clone() };
+                    // A known problem with the game files reads as that, not as a crash (#341).
+                    let reason = if kind == RunKind::Play && code.is_some_and(|c| c != 0) {
+                        let lines: Vec<String> = self.logs.iter().rev().take(400).map(|(t, _)| t.clone()).collect::<Vec<_>>().into_iter().rev().collect();
+                        flow::stop_reason(&lines)
+                    } else {
+                        None
+                    };
+                    self.stop_reason = reason.clone();
+                    self.status = match &reason {
+                        Some(r) => r.clone(),
+                        None if self.crash_report.is_some() => "The game crashed - a report was saved.".to_string(),
+                        None => note.clone(),
+                    };
                     let what = if kind == RunKind::Play { "Game" } else { "World pipeline build" };
                     self.log(format!("{what} ended. {note}"), if code == Some(0) { LogKind::Info } else { LogKind::Error });
+                    if let Some(r) = reason {
+                        self.log(r, LogKind::Error);
+                    }
                 }
                 Message::Build(p) => self.build = Some(p),
                 Message::BuildEnded(r) => {
