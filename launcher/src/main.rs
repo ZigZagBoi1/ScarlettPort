@@ -5,6 +5,7 @@
 mod art;
 mod cli;
 mod display;
+mod dlss;
 mod pages;
 mod perf;
 mod presets;
@@ -235,6 +236,10 @@ pub enum Message {
     UpdateFound(Result<Option<update::Release>, String>),
     UpdateProgress(u64, u64),
     UpdateDone(Result<String, String>),
+    /// NVIDIA's licence for the DLSS files, the fetch's progress and its end.
+    DlssLicence(Result<String, String>),
+    DlssProgress(u64, u64),
+    DlssDone(Result<(), String>),
     Picked(Option<PathBuf>),
     PickedExe(Option<PathBuf>),
     PickedCache(Option<PathBuf>),
@@ -276,6 +281,10 @@ pub struct Launcher {
     pub update: Option<update::Release>,
     pub update_note: String,
     pub update_busy: bool,
+    /// NVIDIA's licence shown before the DLSS files are fetched (Settings, Game features).
+    pub dlss_licence: Option<String>,
+    pub dlss_note: String,
+    pub dlss_busy: bool,
     /// Restart into the update as soon as it is downloaded ("Update now").
     pub restart_after_update: bool,
     pub report_note: String,
@@ -456,6 +465,9 @@ impl Launcher {
             update: None,
             update_note: update::staged().map(|v| format!("{v} is downloaded and will be used the next time you start the launcher.")).unwrap_or_default(),
             update_busy: false,
+            dlss_licence: None,
+            dlss_note: String::new(),
+            dlss_busy: false,
             restart_after_update: false,
             report_note: String::new(),
             game_scroll: 0.,
@@ -602,6 +614,31 @@ impl Launcher {
                 let _ = ptx.send(Message::UpdateProgress(got, total));
             });
             let _ = tx.send(Message::UpdateDone(r.map(|_| rel.version.clone())));
+        });
+    }
+
+    /// Fetches NVIDIA's licence for the DLSS files, to show it before anything else.
+    pub fn dlss_ask(&mut self) {
+        self.dlss_busy = true;
+        self.dlss_note = "Getting NVIDIA's licence…".into();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Message::DlssLicence(dlss::licence()));
+        });
+    }
+
+    /// The licence was accepted: fetches the DLSS files from NVIDIA's GitHub into the data folder.
+    pub fn dlss_download(&mut self) {
+        self.dlss_licence = None;
+        self.dlss_busy = true;
+        self.dlss_note = "Downloading from NVIDIA…".into();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let ptx = tx.clone();
+            let r = dlss::download(Box::new(move |got, total| {
+                let _ = ptx.send(Message::DlssProgress(got, total));
+            }));
+            let _ = tx.send(Message::DlssDone(r));
         });
     }
 
@@ -1633,6 +1670,27 @@ impl Launcher {
                     if restart {
                         self.restart_into_update(ctx);
                     }
+                }
+                Message::DlssLicence(r) => {
+                    self.dlss_busy = false;
+                    match r {
+                        Ok(text) => {
+                            self.dlss_note.clear();
+                            self.dlss_licence = Some(text);
+                        }
+                        Err(e) => self.dlss_note = format!("Could not get NVIDIA's licence: {e}"),
+                    }
+                }
+                Message::DlssProgress(got, total) => {
+                    self.dlss_note = format!("Downloading from NVIDIA… {} of about {}", game::human(got), game::human(total));
+                }
+                Message::DlssDone(r) => {
+                    self.dlss_busy = false;
+                    self.dlss_note = match r {
+                        Ok(()) => format!("NVIDIA's DLSS files are in {}.", dlss::dir().display()),
+                        Err(e) => format!("The DLSS files did not arrive: {e}"),
+                    };
+                    self.log(self.dlss_note.clone(), LogKind::Info);
                 }
                 Message::Picked(p) => {
                     self.folder_busy = false;

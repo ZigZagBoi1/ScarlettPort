@@ -304,6 +304,61 @@ impl Launcher {
 
             ui.add_space(4.);
             let r = Self::take(ui, w, 22.);
+            caption(&p, pos2(r.min.x, r.min.y + 4.), Align2::LEFT_TOP, "NVIDIA DLSS");
+            let have = crate::dlss::installed();
+            let r = me.feature_row(
+                ui,
+                w,
+                "DLSS files",
+                if have { "NVIDIA Streamline and DLSS are in the data folder (from NVIDIA's GitHub)." } else { "Not shipped with ScarlettPort: fetched from NVIDIA's GitHub (about 61 MB) once you accept NVIDIA's licence." },
+                false,
+                false,
+                200.,
+            );
+            let b = Rect::from_min_size(pos2(r.max.x - 14. - 180., r.center().y - 16.), egui::vec2(180., 32.));
+            let label = if have { "Fetch again" } else { "Get from NVIDIA" };
+            if button(ui, b, "dlss-get", label, Kind::Secondary, !me.dlss_busy && me.dlss_licence.is_none(), None) {
+                me.dlss_ask();
+            }
+            if !me.dlss_note.is_empty() {
+                let r = Self::take(ui, w, 22.);
+                p.text(pos2(r.min.x + 4., r.center().y), Align2::LEFT_CENTER, fit(ui, &me.dlss_note, font(12., "regular"), w - 8.), font(12., "regular"), TEXT_MUTED);
+            }
+            if let Some(text) = me.dlss_licence.clone() {
+                let r = Self::take(ui, w, 300.);
+                card(&p, r, LINE);
+                p.text(pos2(r.min.x + 18., r.min.y + 18.), Align2::LEFT_CENTER, "NVIDIA's licence for Streamline and DLSS", font(14.5, "semibold"), TEXT);
+                let body = Rect::from_min_max(pos2(r.min.x + 18., r.min.y + 34.), pos2(r.max.x - 18., r.max.y - 52.));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
+                    egui::ScrollArea::vertical().id_salt("dlss-licence").max_height(body.height()).auto_shrink([false, false]).show(ui, |ui| {
+                        ui.label(egui::RichText::new(text).font(font(11.5, "regular")).color(TEXT_MUTED));
+                    });
+                });
+                let y = r.max.y - 34.;
+                if button(ui, Rect::from_min_size(pos2(r.min.x + 18., y - 16.), egui::vec2(200., 32.)), "dlss-accept", "Accept and download", Kind::Primary, true, None) {
+                    me.dlss_download();
+                }
+                if button(ui, Rect::from_min_size(pos2(r.min.x + 228., y - 16.), egui::vec2(140., 32.)), "dlss-full", "Full licence", Kind::Ghost, true, None) {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(crate::dlss::licence_url()));
+                }
+                if button(ui, Rect::from_min_size(pos2(r.max.x - 18. - 110., y - 16.), egui::vec2(110., 32.)), "dlss-cancel", "Cancel", Kind::Ghost, true, None) {
+                    me.dlss_licence = None;
+                }
+            }
+            ui.scope(|ui| {
+                if !have {
+                    ui.disable();
+                    ui.set_opacity(0.45);
+                }
+                let r = me.feature_row(ui, w, "DLSS upscaling", "NVIDIA DLSS Super Resolution in place of the game's upscaling, at the scale picked (SCARLETT_DLSS, SCARLETT_DLSS_MODE). RTX cards only; others keep the usual upscaler.", true, ch(&|x| x.dlss.clone()), 430.);
+                let sel = tuning::DLSS_MODES.iter().position(|m| *m == t.dlss);
+                if let Some(k) = segs(ui, r.max.x - 14., r.center().y, "ft-dlss", &["Off", "Quality", "Balanced", "Perf.", "DLAA"], sel, &[have; 5], 80.) {
+                    t.dlss = tuning::DLSS_MODES[k].into();
+                }
+            });
+
+            ui.add_space(4.);
+            let r = Self::take(ui, w, 22.);
             caption(&p, pos2(r.min.x, r.min.y + 4.), Align2::LEFT_TOP, "Launcher");
             let r = me.feature_row(ui, w, "Discord presence", "Shows ScarlettPort and what you are doing in your Discord status. Applies at once.", false, false, 70.);
             let mut d = me.config.discord;

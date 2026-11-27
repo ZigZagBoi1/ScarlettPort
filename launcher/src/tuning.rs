@@ -23,6 +23,9 @@ pub struct Tuning {
     pub quality: String,
     pub sharpness: f32,
     pub framegen: bool,
+    /// NVIDIA DLSS Super Resolution in place of the title's upscaling: "" (off), "quality",
+    /// "balanced", "performance" or "dlaa". Only with NVIDIA's files fetched (`crate::dlss`).
+    pub dlss: String,
     /// Adds `scarlett_gpu::host=info` to the log level so the run log has frame times
     /// (the performance readout). Off keeps the log at play.ps1's `warn`.
     pub perf_log: bool,
@@ -56,6 +59,7 @@ impl Default for Tuning {
             quality: "quality".into(),
             sharpness: 0.2,
             framegen: false,
+            dlss: String::new(),
             perf_log: false,
             ray_tracing: false,
             overlay: false,
@@ -71,6 +75,7 @@ pub const HINTS: [&str; 3] = ["off", "auto", "always"];
 pub const UPSCALERS: [&str; 4] = ["", "title", "stretch", "fsr"];
 pub const QUALITIES: [&str; 5] = ["native", "quality", "balanced", "performance", "ultra"];
 pub const CAPS: [u32; 3] = [0, 30, 60];
+pub const DLSS_MODES: [&str; 5] = ["", "quality", "balanced", "performance", "dlaa"];
 
 /// Every key the launcher owns in `scarlett.toml`, including the ones it writes only in some
 /// states. [`merge_toml`] drops the managed keys it is not asked to write, so turning a feature
@@ -138,6 +143,11 @@ impl Tuning {
                 v.push(("SCARLETT_UPSCALE_SHARPNESS", num(self.sharpness)));
                 v.push(("SCARLETT_FRAMEGEN", if self.framegen { "1" } else { "0" }.to_string()));
             }
+        }
+        if !self.dlss.is_empty() && crate::dlss::installed() {
+            v.push(("SCARLETT_DLSS", "1".to_string()));
+            v.push(("SCARLETT_DLSS_MODE", self.dlss.clone()));
+            v.push(("SCARLETT_STREAMLINE_DIR", crate::dlss::dir().display().to_string()));
         }
         if self.ray_tracing {
             v.push(("SCARLETT_BVH_BUILDER", "1".to_string()));
