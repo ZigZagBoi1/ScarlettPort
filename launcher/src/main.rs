@@ -126,6 +126,9 @@ pub struct Config {
     /// Check GitHub Releases for a newer launcher at start.
     #[serde(default = "yes")]
     pub auto_update: bool,
+    /// Minimize the launcher while the game runs and bring it back when the game ends.
+    #[serde(default = "yes")]
+    pub minimize_on_play: bool,
     /// Play preset: "stable", "experimental" or "custom" (`presets`).
     #[serde(default = "default_preset")]
     pub preset: String,
@@ -196,6 +199,7 @@ impl Default for Config {
             slow_secs: default_slow_secs(),
             discord: true,
             auto_update: true,
+            minimize_on_play: true,
             preset: default_preset(),
             runtime_mode: default_runtime(),
             local_exe: String::new(),
@@ -314,6 +318,10 @@ pub struct Launcher {
     pub play_since: Option<std::time::SystemTime>,
     /// The crash report written by the last Play run, if it crashed.
     pub crash_report: Option<PathBuf>,
+    /// The launcher minimized itself for the running game (restored when it ends).
+    pub minimized_for_game: bool,
+    /// The last Play run ended with an error: offer to send a report.
+    pub crash_prompt: bool,
     pub local_hash: Option<String>,
     pub local_desc: String,
     pub verify: Option<verify::Report>,
@@ -482,6 +490,8 @@ impl Launcher {
             save_note: String::new(),
             play_since: None,
             crash_report: None,
+            minimized_for_game: false,
+            crash_prompt: false,
             local_hash: None,
             local_desc: String::new(),
             verify: None,
@@ -1319,13 +1329,19 @@ impl Launcher {
 
     pub fn stage(&self) -> flow::Stage {
         let (built_hash, runtime_hash) = self.shader_hashes();
-        flow::stage(&flow::Inputs {
+        let stage = flow::stage(&flow::Inputs {
             game_complete: self.game_complete(),
             precompiling: self.running == Some(RunKind::Precompile),
             built_hash: &built_hash,
             runtime_hash: runtime_hash.as_deref(),
             inline_shaders: false,
-        })
+        });
+        // World: "ready" also needs the cache prepared for this driver and preset, as the
+        // Shaders view and Play check it, or the two disagree after a driver or preset change.
+        if stage == flow::Stage::Ready && self.world_selected() && !self.prepared() {
+            return flow::Stage::ShadersNotBuilt;
+        }
+        stage
     }
 
     pub fn world(&self) -> flow::World {
@@ -1392,6 +1408,46 @@ impl Launcher {
         ctx.request_repaint();
     }
 
+    /// Minimizes the launcher while the game runs; restores it (and offers a report after a crash) when it ends.
+    fn follow_game(&mut self, ctx: &egui::Context) {
+        let playing = self.running == Some(RunKind::Play);
+        if playing && self.config.minimize_on_play && !self.minimized_for_game {
+            self.minimized_for_game = true;
+            self.crash_prompt = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
+        if !playing && self.minimized_for_game {
+            self.minimized_for_game = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        if !self.crash_prompt || playing {
+            return;
+        }
+        let what = match self.crash_report.as_ref().and_then(|r| r.file_name()) {
+            Some(n) => format!("The game crashed. Its crash report was saved ({}).", n.to_string_lossy()),
+            None => "The game stopped with an error.".to_string(),
+        };
+        let mut send = false;
+        let mut close = false;
+        egui::Modal::new(egui::Id::new("crash-prompt")).show(ctx, |ui| {
+            ui.set_width(420.);
+            ui.heading("The game stopped");
+            ui.label(what);
+            ui.label("Sending a report opens a prefilled GitHub issue with your GPU, driver, CPU, RAM, Windows version, fps and the last log lines (your name and folders removed). You can read and edit it before you submit; nothing is sent until you do.");
+            ui.horizontal(|ui| {
+                send = ui.button("Send crash report").clicked();
+                close = ui.button("Not now").clicked();
+            });
+        });
+        if send {
+            self.hardware_report(ctx);
+        }
+        if send || close {
+            self.crash_prompt = false;
+        }
+    }
+
     fn pump(&mut self, ctx: &egui::Context) {
         if self.journal.is_none_or(|(t, _)| t.elapsed().as_secs() >= 2) {
             let len = if self.game_ok { game::journal_len(std::path::Path::new(&self.config.game_path)) } else { None };
@@ -1433,6 +1489,9 @@ impl Launcher {
                             self.config.world_len = l;
                             self.save();
                         }
+                    }
+                    if kind == RunKind::Play && code.is_some_and(|c| c != 0) {
+                        self.crash_prompt = true;
                     }
                     if kind == RunKind::Play && code != Some(0) {
                         let since = self.play_since.unwrap_or(std::time::UNIX_EPOCH);
@@ -1683,6 +1742,7 @@ impl eframe::App for Launcher {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pump(ctx);
+        self.follow_game(ctx);
         self.refresh_header(ctx);
         self.update_presence();
         self.draw(ctx);

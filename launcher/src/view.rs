@@ -1155,6 +1155,19 @@ impl Launcher {
         }
 
         let r = Rect::from_min_size(pos2(c.min.x, y), vec2(w, 58.));
+        y += 66.;
+        p.rect_filled(r, RADIUS_MD, BG_100);
+        p.rect_stroke(r, RADIUS_MD, Stroke::new(1.0_f32, LINE), egui::StrokeKind::Inside);
+        p.text(pos2(r.min.x + 18., r.center().y - 9.), Align2::LEFT_CENTER, "Minimize while playing", font(15., "semibold"), TEXT);
+        let sub = "Hides the launcher while the game runs and brings it back when the game closes or crashes.";
+        p.text(pos2(r.min.x + 18., r.center().y + 10.), Align2::LEFT_CENTER, fit(ui, sub, font(12., "regular"), w - 100.), font(12., "regular"), TEXT_MUTED);
+        let mut on = self.config.minimize_on_play;
+        if switch(ui, Rect::from_center_size(pos2(r.max.x - 44., r.center().y), vec2(40., 24.)), "min-play", &mut on) {
+            self.config.minimize_on_play = on;
+            self.save();
+        }
+
+        let r = Rect::from_min_size(pos2(c.min.x, y), vec2(w, 58.));
         p.rect_filled(r, RADIUS_MD, BG_100);
         p.rect_stroke(r, RADIUS_MD, Stroke::new(1.0_f32, LINE), egui::StrokeKind::Inside);
         p.text(pos2(r.min.x + 18., r.center().y - 9.), Align2::LEFT_CENTER, "Hardware report", font(15., "semibold"), TEXT);

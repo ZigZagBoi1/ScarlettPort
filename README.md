@@ -77,6 +77,8 @@ Hardware reports from testers. These are **their own measurements**, not ours.
 - **RTX 3070 8 GB + Ryzen 7 5700X**, v0.5.2: 1 h 20 min without a crash, 8.5 fps in the world, 30 in menus (warm cache). [#106](https://github.com/ZigZagBoi1/ScarlettPort/issues/106)
 - **RTX 3060 + Core i5-11400**, v0.5.2: 9.1 fps average (2.9-30). [#109](https://github.com/ZigZagBoi1/ScarlettPort/issues/109)
 - **RTX 5060 8 GB + Core i5-14400F**, v0.5.2: up to 15 fps in the prologue, about 8 in the police scene. [#107](https://github.com/ZigZagBoi1/ScarlettPort/issues/107)
+- **RTX 5070 Ti + Ryzen 5 7600X**, v0.5.3: 12.8 fps average in the jail scene. [#138](https://github.com/ZigZagBoi1/ScarlettPort/issues/138)
+- **RTX 3070 8 GB**, v0.5.3: 9.3 fps world median, up from 8.3 on v0.5.2. [#118](https://github.com/ZigZagBoi1/ScarlettPort/issues/118)
 - **RTX 4070 Ti + Core i5-13600KF**, v0.5.1: 13.4 fps average (3.3-30.1). [#76](https://github.com/ZigZagBoi1/ScarlettPort/issues/76)
 - **RTX 4060 Laptop 8 GB + Core i9-13980HX**, v0.5.1: 5-7 fps in the cell, 3-4 walking (215 ms of 275 on the GPU). [#68](https://github.com/ZigZagBoi1/ScarlettPort/issues/68)
 - **RTX 4070 12 GB + Ryzen 9 3900X**, v0.5.0: whole prologue played, 3-6 fps in the world, 30 fps in menus. [#56](https://github.com/ZigZagBoi1/ScarlettPort/issues/56)
@@ -96,6 +98,10 @@ Hardware reports from testers. These are **their own measurements**, not ours.
 | [#106](https://github.com/ZigZagBoi1/ScarlettPort/issues/106) | RTX 3070 8 GB | Ryzen 7 5700X | 0.5.2 | 8.5 fps in the world, 80 min without a crash |
 | [#109](https://github.com/ZigZagBoi1/ScarlettPort/issues/109) | RTX 3060 | Core i5-11400 | 0.5.2 | 9.1 fps average |
 | [#107](https://github.com/ZigZagBoi1/ScarlettPort/issues/107) | RTX 5060 8 GB | Core i5-14400F | 0.5.2 | up to 15 fps in the prologue |
+| [#138](https://github.com/ZigZagBoi1/ScarlettPort/issues/138) | RTX 5070 Ti | Ryzen 5 7600X | 0.5.3 | 12.8 fps average in the jail scene |
+| [#118](https://github.com/ZigZagBoi1/ScarlettPort/issues/118) | RTX 3070 8 GB | Ryzen 7 5700X | 0.5.3 | 9.3 fps world median (8.3 on 0.5.2), 30 in menus |
+| [#137](https://github.com/ZigZagBoi1/ScarlettPort/issues/137) | RTX 3080 10 GB | Windows 10 | 0.5.3 | about 7 fps in the world, 30 in menus |
+| [#117](https://github.com/ZigZagBoi1/ScarlettPort/issues/117) | RTX 4070 12 GB |  | 0.5.2 | 5-7 fps through the prologue |
 | [#76](https://github.com/ZigZagBoi1/ScarlettPort/issues/76) | RTX 4070 Ti | Core i5-13600KF | 0.5.1 | 13.4 fps average (3.3-30.1) |
 | [#68](https://github.com/ZigZagBoi1/ScarlettPort/issues/68) | RTX 4060 Laptop 8 GB | Core i9-13980HX | 0.5.1 | 5-7 fps in the cell, 3-4 walking |
 | [#56](https://github.com/ZigZagBoi1/ScarlettPort/issues/56) | RTX 4070 12 GB | Ryzen 9 3900X | 0.5.0 | 3-6 fps in the world, whole prologue |
