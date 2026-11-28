@@ -61,6 +61,22 @@
 //! card. Other pipelines, and loads from the library, still overlap.
 //! `SCARLETT_MESH_MAKE_ONE=0`: overlapping, as before; `=1`: one at a time
 //! on every card.
+//!
+//! One pipeline is made by one thread at a time ([`making`]); a thread
+//! asking for a name another thread is making waits, then loads it.
+//! Different title pipelines often have one host pipeline (their shaders
+//! translate to the same code), and the workers made them at once: each
+//! missed the name in the library, made the pipeline, and all but the
+//! first found the name taken at their store. That store's E_INVALIDARG
+//! is what tells a description that differs (see [`why_made`]), so each
+//! was reported as one, and the second was stored again under the second
+//! name. A first start on an Intel Arc B570 (#537) warned for three title
+//! pipelines with one name within 40 µs, and other reports (#565, #594,
+//! #520) the same. Within one build a name is only ever made from one
+//! description, so these were never a description that differs; the next
+//! start loaded them, but each was compiled once per thread, for up to
+//! 2 s each for a mesh+pixel pipeline.
+//! `SCARLETT_LIBRARY_MAKE_TWICE=1`: made at once, as before.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -440,6 +456,45 @@ fn same_name(name: &str) -> MutexGuard<'static, ()> {
     LOADING[at % LOADING.len()].lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Held by the thread that loads, makes and stores the pipeline named
+/// `name`, from its load to its store: another thread asking for the same
+/// name waits for it, then loads what it stored (see the module's notes).
+/// `None` with `SCARLETT_LIBRARY_MAKE_TWICE=1`.
+fn making(name: &str) -> Option<Making> {
+    static ON: OnceLock<bool> = OnceLock::new();
+    let on = *ON.get_or_init(|| !std::env::var_os("SCARLETT_LIBRARY_MAKE_TWICE").is_some_and(|v| v == "1"));
+    on.then(|| Making::new(name))
+}
+
+/// The names being made now, and the signal that one of them is done.
+static MAKING: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+static MADE_ONE: std::sync::Condvar = std::sync::Condvar::new();
+
+/// A name this thread makes; the name is free again once it is dropped.
+struct Making(String);
+
+impl Making {
+    /// Waits while another thread makes `name`, then takes it.
+    fn new(name: &str) -> Making {
+        let mut names = MAKING.lock().unwrap_or_else(|e| e.into_inner());
+        while names.as_ref().is_some_and(|n| n.contains(name)) {
+            names = MADE_ONE.wait(names).unwrap_or_else(|e| e.into_inner());
+        }
+        names.get_or_insert_with(HashSet::new).insert(name.to_owned());
+        Making(name.to_owned())
+    }
+}
+
+impl Drop for Making {
+    fn drop(&mut self) {
+        let mut names = MAKING.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = names.as_mut() {
+            n.remove(&self.0);
+        }
+        MADE_ONE.notify_all();
+    }
+}
+
 /// With `SCARLETT_LIBRARY_LOCK=1`: held by every library call, as before.
 fn one_call() -> Option<MutexGuard<'static, ()>> {
     static ON: OnceLock<bool> = OnceLock::new();
@@ -583,6 +638,9 @@ pub(crate) fn pipeline(
         MADE.fetch_add(1, Ordering::Relaxed);
         return create();
     };
+    // Up to the store: a thread that asks for this name meanwhile would
+    // miss it, make it again and find the name taken.
+    let _making = making(name);
     let began = std::time::Instant::now();
     let loaded = {
         let _all = one_call();
@@ -1021,6 +1079,27 @@ mod tests {
     }
 
     #[test]
+    fn a_name_being_made_waits_and_others_do_not() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let first = Making::new("making test a");
+        let (took, waited) = mpsc::channel();
+        let second = std::thread::spawn(move || {
+            let _again = Making::new("making test a");
+            took.send(()).unwrap();
+        });
+        // Another name is taken at once while the first is held.
+        drop(Making::new("making test b"));
+        assert!(
+            waited.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the same name was taken while another thread made it"
+        );
+        drop(first);
+        waited.recv_timeout(Duration::from_secs(5)).expect("the name taken once the first was done");
+        second.join().unwrap();
+    }
+
+    #[test]
     fn a_library_not_mapped_is_replaced() {
         assert!(replaces_mapped(false));
     }
@@ -1342,6 +1421,57 @@ void ms(out vertices V v[3], out indices uint3 t[1]) {
         load(&third, second, true).unwrap_or_else(|e| panic!("{kind}: second name refused: {e}"));
         drop((third, again));
         drop((bytes, bytes2));
+    }
+
+    /// Threads that ask for one pipeline at once make it once: the others
+    /// load it, and none finds the name taken (#537: each was made, then
+    /// warned about as a description that differs).
+    #[test]
+    fn one_pipeline_asked_for_at_once_is_made_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let Some(host) = crate::host::host() else {
+            return; // no host GPU here
+        };
+        if super::library().is_none() {
+            eprintln!("no host pipeline library: skipped");
+            return;
+        }
+        let device = host.device.clone();
+        let cs = fxc(COMPUTE, s!("cs"), s!("cs_5_1"));
+        // SAFETY: compiled code carrying its root signature.
+        let root: ID3D12RootSignature = unsafe { device.CreateRootSignature(0, &cs) }.unwrap();
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let name = format!("made once test {unique}");
+        let made = AtomicUsize::new(0);
+        let differed = super::DIFFERED.load(Ordering::Relaxed);
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    let desc = D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                        // SAFETY: a borrowed pointer the description never releases.
+                        pRootSignature: unsafe { std::mem::transmute_copy(&root) },
+                        CS: code(&cs),
+                        ..Default::default()
+                    };
+                    super::pipeline(
+                        &name,
+                        // SAFETY: the description points at live data.
+                        |library, name| unsafe { library.LoadComputePipeline(name, &desc) },
+                        || {
+                            made.fetch_add(1, Ordering::SeqCst);
+                            // A compile long enough for the others to ask.
+                            std::thread::sleep(std::time::Duration::from_millis(300));
+                            // SAFETY: as above.
+                            unsafe { device.CreateComputePipelineState(&desc) }
+                        },
+                    )
+                    .expect("made or loaded");
+                });
+            }
+        });
+        // Made once: the other three loaded it.
+        assert_eq!(made.load(Ordering::SeqCst), 1, "made once per thread");
+        assert_eq!(super::DIFFERED.load(Ordering::Relaxed), differed, "warned as a description that differs");
     }
 
     #[test]
