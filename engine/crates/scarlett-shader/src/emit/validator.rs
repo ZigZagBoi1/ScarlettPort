@@ -3,7 +3,8 @@
 //! container hash we compute (`container::hash`).
 //!
 //! The DLL is found at `SCARLETT_DXIL` if set, else the newest Windows SDK's
-//! `bin\<version>\x64\dxil.dll`, else wherever `LoadLibrary` finds it.
+//! `bin\<version>\x64\dxil.dll` that is new enough ([`NEWEST_MODEL_FROM`]),
+//! else wherever `LoadLibrary` finds it.
 
 use std::ffi::c_void;
 use std::path::PathBuf;
@@ -125,7 +126,8 @@ pub struct Validator {
 unsafe impl Send for Validator {}
 
 impl Validator {
-    /// Where `dxil.dll` is looked for.
+    /// Where `dxil.dll` is looked for: an SDK whose validator is too old
+    /// is passed over, so its `dxc.exe` is not used either.
     pub fn default_path() -> Option<PathBuf> {
         if let Some(p) = std::env::var_os("SCARLETT_DXIL") {
             return Some(p.into());
@@ -138,7 +140,10 @@ impl Validator {
             .filter(|p| p.exists())
             .collect();
         versions.sort();
-        versions.pop()
+        versions
+            .into_iter()
+            .rev()
+            .find(|p| Self::load(Some(p)).is_ok())
     }
 
     /// Loads `path`'s validator (or `dxil.dll` from the DLL search path).
