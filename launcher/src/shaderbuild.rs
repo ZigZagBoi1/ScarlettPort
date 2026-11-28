@@ -432,6 +432,7 @@ fn world_split(job: &Job) -> Result<String, String> {
         let mut tick = Instant::now();
         let dir = shader_dir(job);
         let mut counted = Instant::now();
+        let mut stuck = None;
         let out = run(cmd, job, None, |l| {
             let reported = engine::parse_shaders(l).or_else(|| engine::parse_prepare_named(l).filter(|(n, _, _)| *n == "shaders").map(|(_, d, t)| {
                 if t > 0 {
@@ -445,6 +446,14 @@ fn world_split(job: &Job) -> Result<String, String> {
                 p.total = p.total.max(p.done);
                 p.current = "translating shaders".into();
                 p.current_since = Instant::now();
+            }
+            // While nothing finishes the engine names what it is on, and its watchdog ends a
+            // run stuck there (#550).
+            if let Some(on) = engine::parse_shaders_on(l) {
+                p.current = on.to_string();
+            }
+            if let Some(on) = engine::parse_shaders_stuck(l) {
+                stuck = Some(on.to_string());
             }
             // Between progress lines: count the translations landing in the cache folder.
             if counted.elapsed() >= Duration::from_secs(3) {
@@ -470,6 +479,13 @@ fn world_split(job: &Job) -> Result<String, String> {
             }
         })?;
         match out {
+            Outcome::Exit(_) if stuck.is_some() => {
+                return Err(format!(
+                    "Shader translation got stuck ({}) and was stopped. The {} shaders done so far are kept; press Play and the rest translate in game. Please report the shader named in Logs.",
+                    stuck.unwrap_or_default(),
+                    p.done
+                ));
+            }
             Outcome::Exit(Some(0)) if engine::too_few_shaders(p.done) => {
                 return Err(format!(
                     "Preparation translated only {} shaders (about {} expected) from {}: wrong game folder, or the engine cannot read it. Nothing was marked as prepared; see Logs.",

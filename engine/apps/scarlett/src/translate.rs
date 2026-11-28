@@ -431,6 +431,13 @@ pub fn run(
     Ok(())
 }
 
+/// The exit code of a `scarlett shaders` run its watchdog stopped
+/// ([`Progress::tick`]): nothing finished for the stall time.
+const STUCK_EXIT: i32 = 3;
+
+/// Reasons shaders do not translate → how many, and the first one's hash.
+type Failed = BTreeMap<String, (usize, String)>;
+
 /// Every shader found into the cache runs translate from.
 pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
     let cfg = scarlett_core::Config::load()?;
@@ -439,15 +446,80 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
     let paths = crate::default_paths(paths)?;
     let threads = worker_threads(jobs);
     let started = std::time::Instant::now();
+    // `SCARLETT_SHADERS_STALL_SECONDS=<n>`: stop the run when no shader
+    // finished and no file was begun for n seconds (0: never), so one
+    // shader that never ends cannot hold the game back (#550).
+    let stall = std::env::var("SCARLETT_SHADERS_STALL_SECONDS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(120);
+    let progress = Progress::new(started, stall.saturating_mul(1000));
+    let stuck = |on: &str, done: usize, failed: &Failed| {
+        println!(
+            "stuck on {on}: no shader finished for {stall} s; stopped so the game can start (the rest translate when first used)"
+        );
+        print_summary(done, failed, started);
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        std::process::exit(STUCK_EXIT);
+    };
+    let (done, failed) = precompile_files(
+        || crate::shader::shader_files(&paths, false),
+        threads,
+        &progress,
+        stuck,
+        scarlett_hle::modules::d3d12x::precompile,
+    );
+    print_summary(done, &failed, started);
+    if done > 0 && std::env::var_os("SCARLETT_TRANSLATE_ONLY").is_none() {
+        let _ = std::fs::write(shader_dir.join(".translator"), scarlett_hle::SHADER_TRANSLATOR);
+    }
+    Ok(())
+}
+
+/// `scarlett shaders`'s summary (what the launcher parses), then why the
+/// others do not translate.
+fn print_summary(done: usize, failed: &Failed, started: std::time::Instant) {
+    println!(
+        "{} shaders in the cache, {} do not translate, {:.0} s",
+        done,
+        failed.values().map(|f| f.0).sum::<usize>(),
+        started.elapsed().as_secs_f64()
+    );
+    for (why, (n, hash)) in failed {
+        println!("  {n:>5}  {why}  (e.g. {hash})");
+    }
+}
+
+/// The containers of `files` through `precompile` on `threads` threads,
+/// with `progress` ticking beside them: how many are in the cache, and why
+/// the others are not. `stuck` is told what the run is on, and the counts
+/// so far, when nothing finished for the progress's stall time.
+fn precompile_files(
+    files: impl FnOnce() -> Vec<PathBuf>,
+    threads: usize,
+    progress: &Progress,
+    stuck: impl Fn(&str, usize, &Failed) + Sync,
+    precompile: impl Fn(&[u8]) -> Result<bool, String> + Sync,
+) -> (usize, Failed) {
     let seen = Mutex::new(HashSet::new());
     let done = AtomicUsize::new(0);
-    let failed = Mutex::new(BTreeMap::<String, (usize, String)>::new());
-    let progress = Progress::new(started);
+    let failed = Mutex::new(Failed::new());
     std::thread::scope(|outer| {
         // A line at least once a second, also while a large file is read
         // and nothing is translated yet, so a launcher can tell it works.
-        outer.spawn(|| progress.tick(|| done.load(Ordering::Relaxed)));
-        for path in crate::shader::shader_files(&paths, false) {
+        outer.spawn(|| {
+            progress.tick(
+                || done.load(Ordering::Relaxed),
+                |on| stuck(on, done.load(Ordering::Relaxed), &lock(&failed)),
+            )
+        });
+        // The ticker ends however this does: a panic that left it running
+        // would keep the scope waiting for it, and the run would print the
+        // same count forever (#550).
+        let _stop = StopOnDrop(progress);
+        for path in files() {
+            progress.reading(&path);
             let Some(data) = crate::shader::read_shader_carrier(&path) else {
                 continue;
             };
@@ -462,14 +534,22 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
                             if !lock(&seen).insert(hash) {
                                 continue;
                             }
-                            match scarlett_hle::modules::d3d12x::precompile(&bytes) {
+                            let hex = hash.to_hex();
+                            let hex = &hex[..16];
+                            progress.begin(format!("#{hex} in {}{}", path.display(), job.label()));
+                            // A translator panic is that shader's failure;
+                            // the others go on.
+                            let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| precompile(&bytes)))
+                                .unwrap_or_else(|panic| Err(format!("the translator panicked: {}", panic_text(&*panic))));
+                            progress.end();
+                            match made {
                                 Ok(_) => {
                                     let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                                     progress.count(n);
                                 }
                                 Err(why) => {
                                     let mut failed = lock(&failed);
-                                    failed.entry(why).or_insert_with(|| (0, hash.to_hex()[..16].to_owned())).0 += 1;
+                                    failed.entry(why).or_insert_with(|| (0, hex.to_owned())).0 += 1;
                                 }
                             }
                         }
@@ -477,23 +557,18 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
                 }
             });
         }
-        progress.stop();
     });
     let failed = failed.into_inner().unwrap_or_else(|e| e.into_inner());
-    let done = done.load(Ordering::Relaxed);
-    println!(
-        "{} shaders in the cache, {} do not translate, {:.0} s",
-        done,
-        failed.values().map(|f| f.0).sum::<usize>(),
-        started.elapsed().as_secs_f64()
-    );
-    if done > 0 && std::env::var_os("SCARLETT_TRANSLATE_ONLY").is_none() {
-        let _ = std::fs::write(shader_dir.join(".translator"), scarlett_hle::SHADER_TRANSLATOR);
-    }
-    for (why, (n, hash)) in failed {
-        println!("  {n:>5}  {why}  (e.g. {hash})");
-    }
-    Ok(())
+    (done.into_inner(), failed)
+}
+
+/// A panic's message, as the default hook prints it.
+fn panic_text(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("no message")
 }
 
 fn translate(
@@ -1016,25 +1091,44 @@ mod tests {
 
 /// Progress of `scarlett shaders` (and `prepare`'s first step): the line
 /// `<n> shaders in the cache, <s> s` (what the launcher parses) every
-/// [`Progress::EVERY`] shaders and at least once a second.
+/// [`Progress::EVERY`] shaders and at least once a second. When no shader
+/// finished for [`Progress::NOTE_AFTER_MS`], the line ends with what the
+/// run is on: `12 shaders in the cache, 709 s (reading <file>)`.
 struct Progress {
     started: std::time::Instant,
     /// Milliseconds since `started` of the last line.
     last: std::sync::atomic::AtomicU64,
     printed: AtomicUsize,
     stopped: std::sync::atomic::AtomicBool,
+    /// Milliseconds since `started` of the last shader finished, and of
+    /// the last shader finished or file begun.
+    finished: std::sync::atomic::AtomicU64,
+    moved: std::sync::atomic::AtomicU64,
+    /// No movement for this long (0: never) and [`Progress::tick`] tells
+    /// its `stuck` what the run is on.
+    stall_ms: u64,
+    /// The file being looked for or read, and the shaders being translated
+    /// by the threads on them, oldest first.
+    file: Mutex<String>,
+    on: Mutex<Vec<(std::thread::ThreadId, String)>>,
 }
 
 impl Progress {
     const EVERY: usize = 100;
     const MAX_QUIET_MS: u64 = 1000;
+    const NOTE_AFTER_MS: u64 = 10_000;
 
-    fn new(started: std::time::Instant) -> Self {
+    fn new(started: std::time::Instant, stall_ms: u64) -> Self {
         Self {
             started,
             last: std::sync::atomic::AtomicU64::new(0),
             printed: AtomicUsize::new(0),
             stopped: std::sync::atomic::AtomicBool::new(false),
+            finished: std::sync::atomic::AtomicU64::new(0),
+            moved: std::sync::atomic::AtomicU64::new(0),
+            stall_ms,
+            file: Mutex::new("looking for shader files".into()),
+            on: Mutex::new(Vec::new()),
         }
     }
 
@@ -1042,35 +1136,84 @@ impl Progress {
         self.started.elapsed().as_millis() as u64
     }
 
-    fn line(&self, n: usize) {
+    fn line(&self, n: usize, note: Option<String>) {
         use std::io::Write;
         self.last.store(self.now_ms(), Ordering::Relaxed);
         // Never a smaller count after a larger one (threads race to print).
         let n = self.printed.fetch_max(n, Ordering::Relaxed).max(n);
+        let note = note.map(|on| format!(" ({on})")).unwrap_or_default();
         let mut out = std::io::stdout().lock();
-        let _ = writeln!(out, "{n} shaders in the cache, {:.0} s", self.started.elapsed().as_secs_f64());
+        let _ = writeln!(out, "{n} shaders in the cache, {:.0} s{note}", self.started.elapsed().as_secs_f64());
         let _ = out.flush();
     }
 
     /// A shader done, `n` in all.
     fn count(&self, n: usize) {
         if due(n, self.now_ms(), self.last.load(Ordering::Relaxed)) {
-            self.line(n);
+            self.line(n, None);
         }
     }
 
-    /// Until [`Progress::stop`]: a line whenever a second went by without one.
-    fn tick(&self, done: impl Fn() -> usize) {
+    /// `path` is read next.
+    fn reading(&self, path: &Path) {
+        *lock(&self.file) = format!("reading {}", path.display());
+        self.moved.store(self.now_ms(), Ordering::Relaxed);
+    }
+
+    /// This thread translates `what` until [`Progress::end`].
+    fn begin(&self, what: String) {
+        lock(&self.on).push((std::thread::current().id(), what));
+    }
+
+    fn end(&self) {
+        let me = std::thread::current().id();
+        lock(&self.on).retain(|(id, _)| *id != me);
+        let now = self.now_ms();
+        self.finished.store(now, Ordering::Relaxed);
+        self.moved.store(now, Ordering::Relaxed);
+    }
+
+    /// What the run is on: the shader translated longest, or the file.
+    fn doing(&self) -> String {
+        let on = lock(&self.on);
+        match on.first() {
+            Some((_, what)) if on.len() > 1 => format!("translating {what} and {} more", on.len() - 1),
+            Some((_, what)) => format!("translating {what}"),
+            None => lock(&self.file).clone(),
+        }
+    }
+
+    /// Until [`Progress::stop`]: a line whenever a second went by without
+    /// one, and `stuck` called once with what the run is on when nothing
+    /// moved for the stall time.
+    fn tick(&self, done: impl Fn() -> usize, stuck: impl Fn(&str)) {
+        let mut told = false;
         while !self.stopped.load(Ordering::Relaxed) {
             std::thread::sleep(std::time::Duration::from_millis(100));
-            if self.now_ms().saturating_sub(self.last.load(Ordering::Relaxed)) >= Self::MAX_QUIET_MS {
-                self.line(done().max(self.printed.load(Ordering::Relaxed)));
+            let now = self.now_ms();
+            let since = |at: &std::sync::atomic::AtomicU64| now.saturating_sub(at.load(Ordering::Relaxed));
+            if !told && self.stall_ms > 0 && since(&self.moved) >= self.stall_ms {
+                told = true;
+                stuck(&self.doing());
+            }
+            if since(&self.last) >= Self::MAX_QUIET_MS {
+                let note = (since(&self.finished) >= Self::NOTE_AFTER_MS).then(|| self.doing());
+                self.line(done().max(self.printed.load(Ordering::Relaxed)), note);
             }
         }
     }
 
     fn stop(&self) {
         self.stopped.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Stops a [`Progress`]'s ticker when dropped, also while unwinding.
+struct StopOnDrop<'a>(&'a Progress);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.stop();
     }
 }
 
@@ -1152,6 +1295,88 @@ mod warm_tests {
         let expired = Cell::new(false);
         let files = crate::shader::shader_files_until(&paths, false, || expired.replace(true));
         assert!(files.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod precompile_tests {
+    use super::{PathBuf, Progress, precompile_files};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// Three 32-byte containers with no parts, told apart by byte 4.
+    fn shader(n: u8) -> [u8; 32] {
+        let mut shader = [0u8; 32];
+        shader[..4].copy_from_slice(b"DXBC");
+        shader[4] = n;
+        shader[20] = 1;
+        shader[24] = 32;
+        shader
+    }
+
+    fn carrier(dir: &std::path::Path) -> PathBuf {
+        let path = dir.join("shaders.dxbc");
+        std::fs::write(&path, [shader(0), shader(1), shader(2)].concat()).unwrap();
+        path
+    }
+
+    /// `body` on a thread of its own: a run that never ends fails the test
+    /// instead of hanging it.
+    fn within<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(body());
+        });
+        rx.recv_timeout(Duration::from_secs(60)).expect("the run did not end")
+    }
+
+    /// Before #550's fix a panic left the ticker running, and the run
+    /// printed the same count forever.
+    #[test]
+    fn a_translator_panic_is_one_failure_and_the_run_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = carrier(dir.path());
+        let (done, failed) = within(move || {
+            let progress = Progress::new(Instant::now(), 0);
+            let stuck = |_: &str, _: usize, _: &super::Failed| unreachable!("no stall time");
+            precompile_files(|| vec![path], 2, &progress, stuck, |bytes| {
+                if bytes[4] == 1 {
+                    panic!("authored test panic");
+                }
+                Ok(false)
+            })
+        });
+        assert_eq!(done, 2);
+        let failed: Vec<_> = failed.into_iter().map(|(why, (n, _))| (why, n)).collect();
+        assert_eq!(failed, [("the translator panicked: authored test panic".to_owned(), 1)]);
+    }
+
+    #[test]
+    fn a_shader_that_never_ends_is_named_after_the_stall_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = carrier(dir.path());
+        let (told, done) = within(move || {
+            let release = AtomicBool::new(false);
+            let told = Mutex::new(Vec::new());
+            let progress = Progress::new(Instant::now(), 300);
+            let stuck = |on: &str, _: usize, _: &super::Failed| {
+                told.lock().unwrap().push(on.to_owned());
+                release.store(true, Ordering::Relaxed);
+            };
+            let (done, _) = precompile_files(|| vec![path], 3, &progress, stuck, |bytes| {
+                while bytes[4] == 1 && !release.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Ok(true)
+            });
+            (told.into_inner().unwrap(), done)
+        });
+        assert_eq!(done, 3);
+        let hash = blake3::hash(&shader(1)).to_hex()[..16].to_owned();
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].starts_with(&format!("translating #{hash} in ")), "{}", told[0]);
+        assert!(told[0].ends_with("shaders.dxbc@0x20"), "{}", told[0]);
     }
 }
 

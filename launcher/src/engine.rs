@@ -95,6 +95,19 @@ pub fn parse_shaders_failed(line: &str) -> Option<u64> {
     rest.split_once(" do not translate")?.0.trim().parse().ok()
 }
 
+/// What `scarlett shaders` is on while no shader finishes (runtimes after 0.5.7):
+/// `12 shaders in the cache, 709 s (reading D:/game/x.rpf)` -> `reading D:/game/x.rpf`.
+pub fn parse_shaders_on(line: &str) -> Option<&str> {
+    let (_, rest) = line.trim().split_once(" shaders in the cache, ")?;
+    rest.split_once(" s (")?.1.strip_suffix(')')
+}
+
+/// `scarlett shaders` stopped by its watchdog: `stuck on translating #0123456789abcdef in
+/// <file>@0x20: no shader finished for 120 s; ...` -> `translating #0123456789abcdef in <file>@0x20`.
+pub fn parse_shaders_stuck(line: &str) -> Option<&str> {
+    Some(line.trim().strip_prefix("stuck on ")?.split_once(": no shader finished for ")?.0)
+}
+
 /// `scarlett warm`'s plan: `120 pipelines known, 20 made before (f), 0 bad; 100 to make, 8 processes` -> 100.
 pub fn parse_warm_plan(line: &str) -> Option<u64> {
     let (_, rest) = line.split_once(" bad; ")?;
@@ -323,6 +336,16 @@ mod tests {
         assert_eq!(parse_shaders(end), Some(26084));
         assert_eq!(parse_shaders_failed(end), Some(3));
         assert_eq!(parse_shaders_failed("4000 shaders in the cache, 37 s"), None);
+        // #550: the line names what the run is on while nothing finishes, and the watchdog's.
+        let quiet = "12 shaders in the cache, 709 s (reading D:/my s (copy)/x.rpf)";
+        assert_eq!(parse_shaders(quiet), Some(12));
+        assert_eq!(parse_shaders_failed(quiet), None);
+        assert_eq!(parse_shaders_on(quiet), Some("reading D:/my s (copy)/x.rpf"));
+        assert_eq!(parse_shaders_on("4000 shaders in the cache, 37 s"), None);
+        assert_eq!(parse_shaders_on(end), None);
+        let stuck = "stuck on translating #0123456789abcdef in D:/game/x.rpf@0x20: no shader finished for 120 s; stopped so the game can start (the rest translate when first used)";
+        assert_eq!(parse_shaders_stuck(stuck), Some("translating #0123456789abcdef in D:/game/x.rpf@0x20"));
+        assert_eq!(parse_shaders_stuck(quiet), None);
         // v0.4.8 on an empty or unreadable folder: exit 0 with 0, or 29 shaders.
         assert!(too_few_shaders(0) && too_few_shaders(29));
         assert!(!too_few_shaders(26_084) && !too_few_shaders(20_000));
