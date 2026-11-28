@@ -417,6 +417,25 @@ pub fn translate(container: &[u8]) -> Result<HostShader, ShaderError> {
     }
 }
 
+/// Why a warm-up passes `container` over rather than counting it as a
+/// shader that does not translate, if it should: its native code is only
+/// merged stages (LS-HS, ES-GS), which is what tessellation and geometry
+/// shaders run as. A run never asks for one alone: host pipelines are made
+/// of vertex, mesh, pixel and compute programs only, and one with any other
+/// stage is refused before its shaders are translated. [`translate`] still
+/// refuses such a container. Anything else, a container without native
+/// code included, is `None`.
+pub fn passed_over(container: &[u8]) -> Option<&'static str> {
+    let c = Container::parse(container).ok()?;
+    let dxil = c.part(FourCC::DXIL).or(c.part(FourCC::ACCC))?;
+    let programs = crate::native_programs(dxil.data).ok()?;
+    crate::merged_only(&programs).then_some(PASSED_OVER_MERGED)
+}
+
+/// [`passed_over`]'s reason.
+pub const PASSED_OVER_MERGED: &str =
+    "only hull, domain or geometry stages (LS-HS, ES-GS), which no host pipeline is made with";
+
 fn translate_plain(container: &[u8]) -> Result<HostShader, ShaderError> {
     let c = Container::parse(container)?;
     let dxil = c
@@ -425,12 +444,7 @@ fn translate_plain(container: &[u8]) -> Result<HostShader, ShaderError> {
         .ok_or(ShaderError::Malformed("no DXIL part"))?;
     let native = crate::native_programs(dxil.data)?
         .into_iter()
-        .find(|p| {
-            matches!(
-                p.stage,
-                HwStage::Vs | HwStage::Ps | HwStage::Cs | HwStage::Ms
-            )
-        })
+        .find(|p| p.stage.translated())
         .ok_or(ShaderError::Unsupported {
             offset: 0,
             what: "a container without a vertex, pixel, compute or mesh program",
@@ -1069,6 +1083,30 @@ mod tests {
     use super::bitcode::Attr;
     use super::lower::LOOP_LIMIT;
     use super::parse_loop_limit;
+
+    #[test]
+    fn merged_stages_are_passed_over_and_nothing_else() {
+        use crate::native::tests::{fssm, part, xbch};
+        use crate::{FourCC, HwStage, ShaderError, dxbc};
+        let container = |programs: &[(HwStage, &[u8])]| {
+            let data = part(&[(0x0d, &xbch(&fssm(programs)))]);
+            dxbc::build(&[(FourCC::DXIL, &data)])
+        };
+        let hull = container(&[(HwStage::Hs, &[0; 8])]);
+        assert_eq!(super::passed_over(&hull), Some(super::PASSED_OVER_MERGED));
+        // The runtime still refuses it, as before.
+        assert!(matches!(
+            super::translate(&hull),
+            Err(ShaderError::Unsupported { offset: 0, .. })
+        ));
+        // A vertex program beside a geometry stage is translated, and a
+        // container without native code is a failure, not passed over.
+        let es_vs = container(&[(HwStage::Es, &[0; 8]), (HwStage::Vs, &[0; 8])]);
+        assert_eq!(super::passed_over(&es_vs), None);
+        let empty = dxbc::build(&[(FourCC::DXIL, &[0u8; 0x20][..])]);
+        assert_eq!(super::passed_over(&empty), None);
+        assert_eq!(super::passed_over(b"not a container"), None);
+    }
 
     /// The LLVM text `dxc -dumpbin` prints for a DXIL container, when dxc
     /// is installed.

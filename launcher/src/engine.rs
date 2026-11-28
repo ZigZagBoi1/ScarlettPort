@@ -323,6 +323,8 @@ mod tests {
         assert_eq!(parse_shaders(end), Some(26084));
         assert_eq!(parse_shaders_failed(end), Some(3));
         assert_eq!(parse_shaders_failed("4000 shaders in the cache, 37 s"), None);
+        let passed = "25782 shaders in the cache, 5 do not translate, 198 passed over, 171 s";
+        assert_eq!((parse_shaders(passed), parse_shaders_failed(passed)), (Some(25782), Some(5)));
         // v0.4.8 on an empty or unreadable folder: exit 0 with 0, or 29 shaders.
         assert!(too_few_shaders(0) && too_few_shaders(29));
         assert!(!too_few_shaders(26_084) && !too_few_shaders(20_000));

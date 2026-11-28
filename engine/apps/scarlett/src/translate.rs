@@ -442,6 +442,9 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
     let seen = Mutex::new(HashSet::new());
     let done = AtomicUsize::new(0);
     let failed = Mutex::new(BTreeMap::<String, (usize, String)>::new());
+    // Containers a run never translates alone (merged geometry stages):
+    // listed with their reason, not counted as failures.
+    let passed = Mutex::new(BTreeMap::<&'static str, (usize, String)>::new());
     let progress = Progress::new(started);
     std::thread::scope(|outer| {
         // A line at least once a second, also while a large file is read
@@ -462,15 +465,16 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
                             if !lock(&seen).insert(hash) {
                                 continue;
                             }
+                            if let Some(why) = scarlett_shader::emit::passed_over(&bytes) {
+                                tally(&mut lock(&passed), why, &hash);
+                                continue;
+                            }
                             match scarlett_hle::modules::d3d12x::precompile(&bytes) {
                                 Ok(_) => {
                                     let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                                     progress.count(n);
                                 }
-                                Err(why) => {
-                                    let mut failed = lock(&failed);
-                                    failed.entry(why).or_insert_with(|| (0, hash.to_hex()[..16].to_owned())).0 += 1;
-                                }
+                                Err(why) => tally(&mut lock(&failed), why, &hash),
                             }
                         }
                     });
@@ -480,20 +484,39 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
         progress.stop();
     });
     let failed = failed.into_inner().unwrap_or_else(|e| e.into_inner());
+    let passed = passed.into_inner().unwrap_or_else(|e| e.into_inner());
     let done = done.load(Ordering::Relaxed);
-    println!(
-        "{} shaders in the cache, {} do not translate, {:.0} s",
-        done,
-        failed.values().map(|f| f.0).sum::<usize>(),
-        started.elapsed().as_secs_f64()
-    );
+    println!("{}", summary(done, &failed, &passed, started.elapsed().as_secs_f64()));
     if done > 0 && std::env::var_os("SCARLETT_TRANSLATE_ONLY").is_none() {
         let _ = std::fs::write(shader_dir.join(".translator"), scarlett_hle::SHADER_TRANSLATOR);
     }
     for (why, (n, hash)) in failed {
         println!("  {n:>5}  {why}  (e.g. {hash})");
     }
+    for (why, (n, hash)) in passed {
+        println!("  {n:>5}  passed over: {why}  (e.g. {hash})");
+    }
     Ok(())
+}
+
+/// Counts one more container under `why`, keeping the first one's hash.
+fn tally<K: Ord>(reasons: &mut BTreeMap<K, (usize, String)>, why: K, hash: &blake3::Hash) {
+    reasons.entry(why).or_insert_with(|| (0, hash.to_hex()[..16].to_owned())).0 += 1;
+}
+
+/// The warm-up's last line, which the launcher reads (`N shaders in the
+/// cache, F do not translate`): containers passed over are named after the
+/// failures, so they are not among them.
+fn summary<A, B>(
+    done: usize,
+    failed: &BTreeMap<A, (usize, String)>,
+    passed: &BTreeMap<B, (usize, String)>,
+    seconds: f64,
+) -> String {
+    let failed: usize = failed.values().map(|f| f.0).sum();
+    let passed: usize = passed.values().map(|f| f.0).sum();
+    let passed = if passed > 0 { format!(", {passed} passed over") } else { String::new() };
+    format!("{done} shaders in the cache, {failed} do not translate{passed}, {seconds:.0} s")
 }
 
 fn translate(
@@ -985,6 +1008,26 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    /// The summary keeps the launcher's form; passed-over containers come
+    /// after the failures and are not among them.
+    #[test]
+    fn summary_names_passed_over_containers_apart() {
+        use scarlett_shader::emit::PASSED_OVER_MERGED;
+        use std::collections::BTreeMap;
+        let failed = BTreeMap::from([("descriptor", (5, "002e93a6cc2aa355".to_owned()))]);
+        let mut passed = BTreeMap::<&str, (usize, String)>::new();
+        let line = super::summary(25782, &failed, &passed, 171.2);
+        assert_eq!(line, "25782 shaders in the cache, 5 do not translate, 171 s");
+        let hash = blake3::hash(b"hull");
+        super::tally(&mut passed, PASSED_OVER_MERGED, &hash);
+        super::tally(&mut passed, PASSED_OVER_MERGED, &blake3::hash(b"other"));
+        assert_eq!(passed[PASSED_OVER_MERGED], (2, hash.to_hex()[..16].to_owned()));
+        assert_eq!(
+            super::summary(25782, &failed, &passed, 171.2),
+            "25782 shaders in the cache, 5 do not translate, 2 passed over, 171 s"
+        );
+    }
+
     /// No `--jobs` is every logical core on the three paths, `--warm`
     /// included, and never fewer than one worker.
     #[test]

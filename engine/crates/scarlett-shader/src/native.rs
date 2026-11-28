@@ -158,6 +158,20 @@ impl HwStage {
             HwStage::Vs | HwStage::Ps | HwStage::Cs => index,
         }
     }
+
+    /// A stage the translator makes a host shader of: vertex, pixel, compute
+    /// or mesh. The merged stages (LS-HS, ES-GS) are what tessellation and
+    /// geometry shaders run as; host pipelines are not made with them.
+    pub fn translated(self) -> bool {
+        matches!(self, HwStage::Vs | HwStage::Ps | HwStage::Cs | HwStage::Ms)
+    }
+}
+
+/// Whether `programs` are only merged stages: a hull, domain or geometry
+/// shader (or a vertex shader compiled for tessellation alone), which no
+/// host pipeline is made with. False when there are none.
+pub fn merged_only(programs: &[NativeProgram]) -> bool {
+    !programs.is_empty() && programs.iter().all(|p| !p.stage.translated())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -859,7 +873,7 @@ fn bytes(data: &[u8], offset: u64, len: u64) -> Option<&[u8]> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const VS_CODE: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -890,7 +904,7 @@ mod tests {
     }
 
     /// FSSM blob with `programs` as (stage, code) pairs.
-    fn fssm(programs: &[(HwStage, &[u8])]) -> Vec<u8> {
+    pub(crate) fn fssm(programs: &[(HwStage, &[u8])]) -> Vec<u8> {
         let mut payload = GRAPHICS_SLOT_COUNT.to_le_bytes().to_vec();
         payload.resize(slot(HwStage::Cs) + 8, 0);
         for (_, at) in SLOTS {
@@ -918,7 +932,7 @@ mod tests {
         out
     }
 
-    fn xbch(unpacked: &[u8]) -> Vec<u8> {
+    pub(crate) fn xbch(unpacked: &[u8]) -> Vec<u8> {
         let mut buf = vec![0u8; zlib_rs::compress_bound(unpacked.len())];
         let (stream, rc) =
             zlib_rs::compress_slice(&mut buf, unpacked, zlib_rs::DeflateConfig::new(6));
@@ -932,7 +946,7 @@ mod tests {
     }
 
     /// `DXIL` part data: program header, XDAT index, then the blobs.
-    fn part(blobs: &[(u32, &[u8])]) -> Vec<u8> {
+    pub(crate) fn part(blobs: &[(u32, &[u8])]) -> Vec<u8> {
         let mut out = vec![0u8; XDAT_OFFSET];
         out.extend_from_slice(b"XDAT");
         out.extend_from_slice(&(blobs.len() as u32).to_le_bytes());
@@ -986,6 +1000,21 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn merged_stages_alone_are_told_apart() {
+        let found = |programs: &[(HwStage, &[u8])]| {
+            native_programs(&part(&[(KIND_NATIVE, &xbch(&fssm(programs)))])).unwrap()
+        };
+        assert!(merged_only(&found(&[(HwStage::Hs, &VS_CODE)])));
+        let ls_gs = found(&[(HwStage::Ls, &VS_CODE), (HwStage::Gs, &PS_CODE)]);
+        assert!(merged_only(&ls_gs));
+        let gs_vs = found(&[(HwStage::Gs, &VS_CODE), (HwStage::Vs, &PS_CODE)]);
+        assert!(!merged_only(&gs_vs));
+        assert!(!merged_only(&found(&[(HwStage::Ms, &VS_CODE)])));
+        // No native code at all (the PC layout) is not a merged stage.
+        assert!(!merged_only(&[]));
     }
 
     #[test]
