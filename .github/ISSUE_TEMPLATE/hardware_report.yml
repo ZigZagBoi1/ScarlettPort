@@ -20,11 +20,11 @@ body:
       label: CPU, RAM, Windows build
     validations:
       required: true
-  - type: dropdown
+  - type: textarea
     id: runtime
     attributes:
       label: Runtime
-      options: [XCL, ScarlettPort runtime]
+      description: Keep the details filled in by the launcher. For a manual report, enter the launcher version and the engine you used (ScarlettPort or XCL).
     validations:
       required: true
   - type: input
