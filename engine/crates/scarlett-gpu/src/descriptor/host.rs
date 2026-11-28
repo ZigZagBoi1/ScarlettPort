@@ -70,14 +70,34 @@ impl Slots {
         out
     }
 
+    /// In a spread sweep, visit every changed slot (including removals) and
+    /// this pass's fraction of the live buffer slots. Fold the bitmaps before
+    /// enumerating them so a changed slot in the periodic set is looked up once.
+    fn part_and_changes(&self, part: u32, changed: &Self) -> Vec<u32> {
+        const ROUND: u64 = crate::draw::HEAP_ROUND;
+        const { assert!(ROUND < 64 && 64 % ROUND == 0) };
+        // Bit 0 of every group of ROUND bits, repeated across a bitmap word.
+        const FIRST: u64 = u64::MAX / ((1u64 << ROUND) - 1);
+        let mask = FIRST << part;
+        let mut out = Vec::new();
+        for (n, (live, dirty)) in self.0.iter().zip(&changed.0).enumerate() {
+            // Drain before reading live membership. A racing write is either
+            // in this sweep or remains in the changed bitmap for the next one.
+            let writes = Self::take_word(dirty);
+            Self::of(n, writes | (live.load(Ordering::Acquire) & mask), &mut out, &|_| true);
+        }
+        out
+    }
+
+    fn take_word(bits: &AtomicU64) -> u64 {
+        if bits.load(Ordering::Acquire) == 0 { 0 } else { bits.swap(0, Ordering::AcqRel) }
+    }
+
     /// All of them, and none is left.
     fn take(&self) -> Vec<u32> {
-        use std::sync::atomic::Ordering::{AcqRel, Acquire};
         let mut out = Vec::new();
         for (n, bits) in self.0.iter().enumerate() {
-            if bits.load(Acquire) != 0 {
-                Self::of(n, bits.swap(0, AcqRel), &mut out, &|_| true);
-            }
+            Self::of(n, Self::take_word(bits), &mut out, &|_| true);
         }
         out
     }
@@ -2764,10 +2784,16 @@ impl HostHeap {
         self.buffers.all(|_| true)
     }
 
-    /// Of [`HostHeap::buffer_slots`], those of one of `parts` parts: every
-    /// slot is in the same part each time.
-    pub(crate) fn buffer_slots_of(&self, part: u32, parts: u32) -> Vec<u32> {
-        self.buffers.all(|slot| slot % parts == part)
+    /// Changed slots plus the current part of the periodic live-slot sweep.
+    pub(crate) fn buffer_slots_of(&self, part: u32) -> Vec<u32> {
+        #[cfg(feature = "diagnostics")]
+        if crate::ab::pick("SCARLETT_MASKED_SWEEP") == Some(false) {
+            let changed = self.buffer_changes();
+            let mut slots = self.buffers.all(|s| s % crate::draw::HEAP_ROUND as u32 == part);
+            slots.extend(changed);
+            return slots;
+        }
+        self.buffers.part_and_changes(part, &self.changed)
     }
 
     /// The title slots whose buffer view was written, or went, since the
@@ -5875,6 +5901,32 @@ mod tests {
         assert!(set.remove(64) && !set.remove(64) && !set.remove(5));
         assert_eq!(set.take(), [0, 63, 130, 199]);
         assert!(set.take().is_empty());
+    }
+
+    #[test]
+    fn spread_sweep_visits_each_changed_or_periodic_slot_once() {
+        // Exercise overlapping bits, a removal, repeated writes and a partial final word.
+        for part in 0..16 {
+            let live = Slots::new(151);
+            let changed = Slots::new(151);
+            for slot in 0..151 {
+                if slot % 3 != 0 {
+                    live.put(slot);
+                }
+                if slot % 5 == 0 {
+                    changed.put(slot);
+                    changed.put(slot);
+                }
+            }
+            let mut selected = live.part_and_changes(part, &changed);
+            selected.sort_unstable();
+            let expected: Vec<_> = (0..151).filter(|s| s % 5 == 0 || (s % 3 != 0 && s % 16 == part)).collect();
+            assert_eq!(selected, expected);
+            assert!(changed.take().is_empty());
+            changed.put(64);
+            let selected = live.part_and_changes(part, &changed);
+            assert_eq!(selected.iter().filter(|&&s| s == 64).count(), 1);
+        }
     }
 
     /// A slot a draw read through a table leaves the queue; the title's
