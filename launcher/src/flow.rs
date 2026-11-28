@@ -121,11 +121,16 @@ pub fn eta_secs(elapsed: u64, fraction: f32) -> Option<u64> {
     (0.02..1.).contains(&fraction).then(|| (elapsed as f32 * (1. - fraction) / fraction).round() as u64)
 }
 
-/// A plain reason for a run that stopped on a known problem with the game files, from the
-/// run's last log lines (newest last), or `None` when nothing in them is recognised.
+/// A plain reason for a run that stopped on a known problem with the game files or the PC's
+/// memory, from the run's last log lines (newest last), or `None` when nothing in them is
+/// recognised.
 pub fn stop_reason(lines: &[String]) -> Option<String> {
     for l in lines.iter().rev() {
         let t = l.trim();
+        // The engine's lines when Windows refuses memory (#583), and the heap's (#54).
+        if t.contains("out of memory for programs") || t.contains("refused for want of memory") || t.contains("failed (out of memory)") {
+            return Some("Windows ran out of memory for programs (RAM + page file) while the game ran. Set a larger fixed page file, 32-48 GB on an SSD (see the README), restart the PC, then play again.".into());
+        }
         if let Some(rest) = t.strip_prefix("missing dlls") {
             // "missing dlls   A.dll, B.dll not in <game>, and neither ... the package is incomplete; ..."
             let rest = rest.trim_start();
@@ -157,6 +162,18 @@ mod tests {
         assert!(r.contains("missing XboxBvhBuilder.dll:") && r.contains("Verify"), "{r}");
         assert!(stop_reason(&["Error: malformed image: section '.text' needs ...".into()]).unwrap().contains("Verify"));
         assert_eq!(stop_reason(&["Game ended. Stopped (exit code 1).".into()]), None);
+    }
+
+    #[test]
+    fn running_out_of_memory_points_to_the_page_file() {
+        for l in [
+            "WARN scarlett_gpu::residency: no upload buffer of 4194304 bytes: Windows has run out of memory for programs (RAM + page file: 15.9 of 16.0 GB committed); ...",
+            "WARN scarlett_gpu::residency: 212 more allocations refused for want of memory in the last 10 s",
+            "ScarlettPort: an allocation of 46080 bytes failed (out of memory). Windows commit: ...",
+        ] {
+            let r = stop_reason(&[l.to_string(), "Game ended. Stopped (exit code -1073740791).".into()]).unwrap();
+            assert!(r.contains("page file") && r.contains("README"), "{r}");
+        }
     }
 
     fn inp<'a>(game: bool, pre: bool, built: &'a str, rt: Option<&'a str>) -> Inputs<'a> {

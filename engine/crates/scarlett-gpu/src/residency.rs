@@ -28,6 +28,119 @@ pub(crate) fn allocation_error(error: &windows::core::Error) {
     }
 }
 
+/// How often refusals after the first are summed up in one line.
+const SUMMARY_MS: u64 = 10_000;
+
+/// Host buffers Windows refused for want of memory (`E_OUTOFMEMORY`), counted
+/// so that the log says it once with the cause and then sums the rest up:
+/// players' logs ended in hundreds of identical "no upload buffer" lines a
+/// millisecond apart, and the cause, the PC's RAM plus page file running
+/// out, was named nowhere (issue #583).
+struct Refusals {
+    told: bool,
+    /// Refusals since the last line.
+    count: u64,
+    /// When the first of those came.
+    since: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Tell {
+    /// The first refusal of the run: say what ran out and what to do.
+    First,
+    /// `count` more in the last `secs` seconds.
+    Summary { count: u64, secs: u64 },
+    Quiet,
+}
+
+impl Refusals {
+    const fn new() -> Self {
+        Self { told: false, count: 0, since: 0 }
+    }
+
+    /// One more refusal at `now` (ms).
+    fn refused(&mut self, now: u64) -> Tell {
+        if !self.told {
+            self.told = true;
+            return Tell::First;
+        }
+        if self.count == 0 {
+            self.since = now;
+        }
+        self.count += 1;
+        self.due(now)
+    }
+
+    /// The refusals not yet told, once [`SUMMARY_MS`] have passed since the first of them.
+    fn due(&mut self, now: u64) -> Tell {
+        let elapsed = now.saturating_sub(self.since);
+        if self.count == 0 || elapsed < SUMMARY_MS {
+            return Tell::Quiet;
+        }
+        Tell::Summary { count: std::mem::take(&mut self.count), secs: elapsed / 1000 }
+    }
+}
+
+static REFUSALS: std::sync::Mutex<Refusals> = std::sync::Mutex::new(Refusals::new());
+
+fn refusals() -> std::sync::MutexGuard<'static, Refusals> {
+    REFUSALS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn gb(bytes: u64) -> f64 {
+    bytes as f64 / GIB as f64
+}
+
+/// The line for the first refusal, with the system commit (`used` of `limit`
+/// bytes; both 0 when it could not be read).
+fn first_line(what: &str, size: u64, used: u64, limit: u64) -> String {
+    let commit = if limit == 0 {
+        "RAM + page file".to_string()
+    } else {
+        format!("RAM + page file: {:.1} of {:.1} GB committed", gb(used), gb(limit))
+    };
+    format!(
+        "no {what} of {size} bytes: Windows has run out of memory for programs ({commit}); \
+         a bigger page file (README) keeps the game going. Idle host caches are kept short while it lasts, \
+         and later refusals for want of memory are summed up every {} s",
+        SUMMARY_MS / 1000
+    )
+}
+
+fn summary_line(count: u64, secs: u64) -> String {
+    let s = if count == 1 { "" } else { "s" };
+    format!("{count} more allocation{s} refused for want of memory in the last {secs} s")
+}
+
+/// Whether `error` is Windows refusing memory for a host buffer (`what`, of
+/// `size` bytes). If it is, it is counted and told here and the caller says
+/// nothing more; any other error the caller logs as before. The first one
+/// also keeps idle host caches short, as [`commit_tight`] does, until the
+/// once-per-second sample finds commit back below 80 % of its limit.
+pub(crate) fn out_of_memory(error: &windows::core::Error, what: &str, size: u64) -> bool {
+    allocation_error(error);
+    if error.code() != windows::Win32::Foundation::E_OUTOFMEMORY {
+        return false;
+    }
+    let tell = refusals().refused(crate::host::coarse_ms());
+    match tell {
+        Tell::First => {
+            COMMIT_TIGHT.store(true, Ordering::Relaxed);
+            let (used, limit) = memory_status()
+                .map_or((0, 0), |s| (s.ullTotalPageFile.saturating_sub(s.ullAvailPageFile), s.ullTotalPageFile));
+            tracing::warn!(
+                commit_used_mib = used >> 20,
+                commit_limit_mib = limit >> 20,
+                "{}",
+                first_line(what, size, used, limit)
+            );
+        }
+        Tell::Summary { count, secs } => tracing::warn!("{}", summary_line(count, secs)),
+        Tell::Quiet => {}
+    }
+    true
+}
+
 thread_local! {
     static STAGING_DEFERRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -127,6 +240,10 @@ pub(crate) fn commit_tight() -> bool {
 
 /// Called by the once-per-second submission sweep. A failed sample keeps the last good state.
 pub(crate) fn refresh() {
+    // Refusals that came in a burst and then stopped are still summed up.
+    if let Tell::Summary { count, secs } = refusals().due(crate::host::coarse_ms()) {
+        tracing::warn!("{}", summary_line(count, secs));
+    }
     let Some(status) = memory_status() else { return };
     let (physical, commit) = (status.ullAvailPhys, status.ullAvailPageFile);
     HEADROOM.store(physical.min(commit), Ordering::Relaxed);
@@ -220,6 +337,38 @@ mod tests {
         assert!(!next_commit_tight(true, 100 * GIB, 21 * GIB));
         // A 48 GiB PC with 45 GiB committed and RAM still free.
         assert!(next_commit_tight(false, 48 * GIB, 3 * GIB));
+    }
+
+    #[test]
+    fn the_first_refusal_is_told_and_the_rest_summed_up_every_10_s() {
+        let mut r = Refusals::new();
+        assert_eq!(r.due(50_000), Tell::Quiet);
+        assert_eq!(r.refused(1_000), Tell::First);
+        // A burst: counted, not told one by one.
+        for t in 1_001..1_301 {
+            assert_eq!(r.refused(t), Tell::Quiet);
+        }
+        assert_eq!(r.due(11_000), Tell::Quiet);
+        assert_eq!(r.refused(11_001), Tell::Summary { count: 301, secs: 10 });
+        // The burst stops: the sweep tells the rest 10 s after the first of them.
+        assert_eq!(r.refused(12_000), Tell::Quiet);
+        assert_eq!(r.refused(12_500), Tell::Quiet);
+        assert_eq!(r.due(21_999), Tell::Quiet);
+        assert_eq!(r.due(22_000), Tell::Summary { count: 2, secs: 10 });
+        assert_eq!(r.due(40_000), Tell::Quiet);
+        // One long after counts from when it came, not from the last line.
+        assert_eq!(r.refused(100_000), Tell::Quiet);
+        assert_eq!(r.due(110_000), Tell::Summary { count: 1, secs: 10 });
+    }
+
+    #[test]
+    fn the_first_line_names_the_commit_and_the_page_file() {
+        let l = first_line("upload buffer", 4_194_304, 15 * GIB + GIB / 2, 16 * GIB);
+        assert!(l.starts_with("no upload buffer of 4194304 bytes: Windows has run out of memory for programs"), "{l}");
+        assert!(l.contains("(RAM + page file: 15.5 of 16.0 GB committed)") && l.contains("bigger page file (README)"), "{l}");
+        assert!(first_line("shared buffer", 65_536, 0, 0).contains("(RAM + page file);"));
+        assert_eq!(summary_line(1, 10), "1 more allocation refused for want of memory in the last 10 s");
+        assert_eq!(summary_line(300, 12), "300 more allocations refused for want of memory in the last 12 s");
     }
 
     #[test]

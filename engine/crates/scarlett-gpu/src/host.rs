@@ -9127,7 +9127,9 @@ impl Host {
         match made {
             Ok(()) => buffer,
             Err(e) => {
-                tracing::warn!(error = %e, size, "no read-back buffer");
+                if !crate::residency::out_of_memory(&e, "read-back buffer", size) {
+                    tracing::warn!(error = %e, size, "no read-back buffer");
+                }
                 None
             }
         }
@@ -9181,8 +9183,9 @@ impl Host {
         match made {
             Ok(()) => Some((buffer?, data.cast())),
             Err(e) => {
-                crate::residency::allocation_error(&e);
-                tracing::warn!(error = %e, size, "no upload buffer");
+                if !crate::residency::out_of_memory(&e, "upload buffer", size) {
+                    tracing::warn!(error = %e, size, "no upload buffer");
+                }
                 None
             }
         }
@@ -10077,7 +10080,9 @@ impl Host {
         match made {
             Ok(()) => Some((buffer?, data.cast())),
             Err(e) => {
-                tracing::warn!(error = %e, size, "no shared buffer");
+                if !crate::residency::out_of_memory(&e, "shared buffer", size) {
+                    tracing::warn!(error = %e, size, "no shared buffer");
+                }
                 None
             }
         }
