@@ -3418,6 +3418,19 @@ pub(crate) fn settle_for_fence() {
     settle_now(WHY_FENCE);
 }
 
+/// Whether, with the relay, a submission sent ahead leaves the reset of
+/// landed lists to the helper thread instead of doing it on the submitting
+/// thread (`SCARLETT_LAND_ASIDE`, on unless `0`; live with `SCARLETT_AB`).
+/// The relay already tells the helper after each landing; the submitting
+/// thread then did the same work first, inline, after every submission:
+/// 14 to 31 ms a frame of the chain to the present in two `SCARLETT_TIMELINE`
+/// windows of world play (RTX 3060 Ti, 224 lists a frame).
+/// What waits is only when a host list goes back to the pool; one taken
+/// before it is back is made new ([`crate::list`]'s `fresh_list`).
+fn land_aside() -> bool {
+    crate::toggled!("SCARLETT_LAND_ASIDE")
+}
+
 /// Resets the host lists of settled flights and keeps them for reuse, as
 /// a queue does for the lists it ran (`crate::list::recycle`).
 fn land() {
@@ -5446,6 +5459,13 @@ impl Host {
             LINE_MOVED.notify_one();
         }
         drop(submitted);
+        if relay() && land_aside() {
+            // The helper resets and keeps them ([`late_helper`]), off the
+            // submitting thread.
+            line().poke = true;
+            LINE_MOVED.notify_one();
+            return;
+        }
         let _landing = crate::timeline::span("landed lists reset and given back");
         land();
     }
