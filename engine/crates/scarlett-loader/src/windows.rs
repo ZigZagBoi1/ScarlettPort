@@ -188,11 +188,45 @@ fn map_dll(
         return Ok(());
     }
     let original = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    // A title's DLLs are x64 like the title. A 32-bit one beside it was put
+    // there by hand (a copy from SysWOW64, #508) and stopped the run; passed
+    // over, its imports go to the host or ScarlettPort as they would without it.
+    if let Some(what) = foreign_dll(&original) {
+        tracing::warn!("{} is {what}, not the title's: passed over", path.display());
+        return Ok(());
+    }
     let prepared = prepare(&original).with_context(|| format!("preparing {}", path.display()))?;
     let image = load(&prepared, dirs.1).with_context(|| format!("loading {}", path.display()))?;
     map_imports(&image.info, dirs, wanted, seen, loaded)?;
     loaded.push((name, image));
     Ok(())
+}
+
+/// What a well-formed PE that is no x64 image is ("a 32-bit DLL"); `None`
+/// for an x64 image, and for a file whose headers do not read as a PE at
+/// all, which [`prepare`] then reports as damaged.
+fn foreign_dll(bytes: &[u8]) -> Option<String> {
+    const MACHINE_I386: u16 = 0x014c;
+    const MACHINE_ARM64: u16 = 0xaa64;
+    const MAGIC_PE32: u16 = 0x10b;
+    const MAGIC_PE32_PLUS: u16 = 0x20b;
+    let u16_at = |at: usize| Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?));
+    let lfanew = u32::from_le_bytes(bytes.get(0x3c..0x40)?.try_into().ok()?) as usize;
+    if !bytes.starts_with(b"MZ") || bytes.get(lfanew..lfanew.checked_add(4)?)? != b"PE\0\0" {
+        return None;
+    }
+    // The machine follows the signature; the optional header's magic, the
+    // 20-byte file header.
+    let machine = u16_at(lfanew + 4)?;
+    let magic = u16_at(lfanew + 24)?;
+    match (machine, magic) {
+        (scarlett_pe::MACHINE_AMD64, MAGIC_PE32_PLUS) => None,
+        (MACHINE_I386, _) | (_, MAGIC_PE32) => Some("a 32-bit DLL".into()),
+        (MACHINE_ARM64, _) => Some("an ARM64 DLL".into()),
+        _ => Some(format!(
+            "a DLL for another processor (machine {machine:#06x})"
+        )),
+    }
 }
 
 /// Resolves through `inner`, then through the exports of the title's DLLs.

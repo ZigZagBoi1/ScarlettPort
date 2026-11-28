@@ -126,6 +126,18 @@ pub fn eta_secs(elapsed: u64, fraction: f32) -> Option<u64> {
 pub fn stop_reason(lines: &[String]) -> Option<String> {
     for l in lines.iter().rev() {
         let t = l.trim();
+        // The run's command line: what is older belongs to an earlier run (#508 blamed the
+        // second run's stop on the first one's missing DLLs).
+        if t.starts_with("> ") {
+            break;
+        }
+        if t.starts_with("not a title") {
+            // The runtime found Windows' own DLLs among the executable's imports (#508).
+            return Some(format!(
+                "{exe} in the game folder is not the game: it imports Windows' own DLLs, as a PC program does (it may be a renamed copy of this launcher). Put the {exe} of your own copy of the game in its place. Copying Windows' DLLs into the game folder does not help.",
+                exe = crate::GAME_EXE
+            ));
+        }
         if let Some(rest) = t.strip_prefix("missing dlls") {
             // "missing dlls   A.dll, B.dll not in <game>, and neither ... the package is incomplete; ..."
             let rest = rest.trim_start();
@@ -157,6 +169,33 @@ mod tests {
         assert!(r.contains("missing XboxBvhBuilder.dll:") && r.contains("Verify"), "{r}");
         assert!(stop_reason(&["Error: malformed image: section '.text' needs ...".into()]).unwrap().contains("Verify"));
         assert_eq!(stop_reason(&["Game ended. Stopped (exit code 1).".into()]), None);
+    }
+
+    #[test]
+    fn a_pc_program_is_not_blamed_on_the_package() {
+        // #508: the launcher renamed to the game's executable.
+        let lines = vec![
+            r"> <game>\runtime\ScarlettPort-Runtime.exe run <game>\game_scarlett_master.exe --execute".to_string(),
+            "not a title    game_scarlett_master.exe imports USER32.dll, gdi32.dll: Windows' own DLLs, not the game package's. ...".into(),
+            "Error: game_scarlett_master.exe is not an Xbox Series title: ...".into(),
+        ];
+        let r = stop_reason(&lines).unwrap();
+        assert!(r.contains("is not the game") && r.contains("does not help"), "{r}");
+        assert!(!r.contains("Copy every file"), "{r}");
+    }
+
+    #[test]
+    fn an_earlier_run_does_not_explain_this_one() {
+        // #508: the second run stopped on a 32-bit DLL and was told the first run's reason.
+        let lines = vec![
+            "> ScarlettPort-Runtime.exe run game_scarlett_master.exe --execute".to_string(),
+            r"missing dlls   XINPUT1_4.dll not in <game>, and neither the host nor ScarlettPort provides it: ...".into(),
+            "Game ended. Stopped (exit code 1).".into(),
+            "> ScarlettPort-Runtime.exe run game_scarlett_master.exe --execute".into(),
+            "Error: something else".into(),
+        ];
+        assert_eq!(stop_reason(&lines), None);
+        assert!(stop_reason(&lines[..3]).unwrap().contains("missing XINPUT1_4.dll"));
     }
 
     fn inp<'a>(game: bool, pre: bool, built: &'a str, rt: Option<&'a str>) -> Inputs<'a> {

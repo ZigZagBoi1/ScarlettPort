@@ -132,7 +132,31 @@ pub fn run(
         .collect();
     let mapped: Vec<&str> = dlls.iter().map(|(name, _)| name.as_str()).collect();
     let absent = absent_title_dlls(&imported, &mapped, &wanted);
-    if !absent.is_empty() {
+    let windows = windows_dlls(&absent, &in_system32);
+    if !windows.is_empty() {
+        // USER32.dll, gdi32.dll, opengl32.dll: what a PC program imports, and
+        // no Xbox Series title does. #508 was the launcher itself, renamed to
+        // the title's executable; the package was blamed, and the player
+        // copied Windows' 32-bit DLLs into the game folder.
+        let exe_name = exe.file_name().unwrap_or_default().to_string_lossy();
+        let message = format!(
+            "{exe_name} imports {}: {}, not the game package's. A PC program \
+             imports such DLLs and an Xbox Series title does not, so {exe_name} looks like a PC \
+             program (a renamed copy of the launcher, say), not the title's executable. \
+             Copying Windows' DLLs into {} does not help; put the title's own executable there",
+            windows.join(", "),
+            if windows.len() == 1 {
+                "one of Windows' own DLLs"
+            } else {
+                "Windows' own DLLs"
+            },
+            title_dir.display(),
+        );
+        println!("not a title    {message}");
+        if execute && matches!(unimplemented, Unimplemented::Trap) {
+            anyhow::bail!("{exe_name} is not an Xbox Series title: {message}");
+        }
+    } else if !absent.is_empty() {
         let message = format!(
             "{} not in {}, and neither the host nor ScarlettPort provides {}: the package is \
              incomplete; copy every file of the package next to the executable",
@@ -330,6 +354,25 @@ fn absent_title_dlls(
     absent
 }
 
+/// The DLLs among `absent` that Windows itself has (`system`): not files a
+/// game package is missing, whatever the title's folder holds.
+#[cfg(any(windows, test))]
+fn windows_dlls<'a>(absent: &'a [String], system: &dyn Fn(&str) -> bool) -> Vec<&'a str> {
+    absent
+        .iter()
+        .map(String::as_str)
+        .filter(|dll| system(dll))
+        .collect()
+}
+
+/// Whether Windows has `dll` in System32 (we are a 64-bit process, so that
+/// is the real System32, not SysWOW64).
+#[cfg(windows)]
+fn in_system32(dll: &str) -> bool {
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+    Path::new(&root).join("System32").join(dll).is_file()
+}
+
 /// Title DLLs the title loads itself (`LoadLibrary`) that nothing imports,
 /// e.g. The title's upscaler behind its FidelityFX loader.
 #[cfg(windows)]
@@ -490,6 +533,28 @@ mod absent_tests {
         let wanted = |dll: &str| dll.starts_with("Title");
         assert!(absent_title_dlls(&["Title.dll", "Host.dll"], &["TITLE.DLL"], &wanted).is_empty());
         assert!(absent_title_dlls(&[], &[], &wanted).is_empty());
+    }
+
+    #[test]
+    fn windows_own_dlls_are_told_apart_from_the_package() {
+        // #508: the launcher renamed to the title's executable. Its USER32.dll
+        // and opengl32.dll are absent as the package's XboxBvhBuilder.dll is.
+        let system = |dll: &str| ["USER32.dll", "opengl32.dll"].contains(&dll);
+        let absent = ["USER32.dll", "XboxBvhBuilder.dll", "opengl32.dll"].map(String::from);
+        assert_eq!(
+            super::windows_dlls(&absent, &system),
+            ["USER32.dll", "opengl32.dll"]
+        );
+        let package = ["XboxBvhBuilder.dll", "Bink2Scarlett.dll"].map(String::from);
+        assert!(super::windows_dlls(&package, &system).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn system32_is_where_windows_dlls_are_looked_for() {
+        assert!(super::in_system32("USER32.dll"));
+        assert!(super::in_system32("opengl32.dll"));
+        assert!(!super::in_system32("XboxBvhBuilder.dll"));
     }
 }
 
