@@ -86,6 +86,9 @@ pub fn install(ctx: &egui::Context) {
         s.interaction.tooltip_delay = 0.35;
         s.spacing.tooltip_width = 260.;
         s.animation_time = QUICK;
+        // A solid, always-sized scrollbar in the gutter the pages already reserve,
+        // instead of egui's default thin floating bar that was easy to miss (#525).
+        s.spacing.scroll = egui::style::ScrollStyle::solid();
     });
 }
 
