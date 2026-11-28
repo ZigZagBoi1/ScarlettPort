@@ -155,8 +155,9 @@ Hardware reports from testers. These are **their own measurements**, not ours.
 **Requirements**
 
 - Windows 10/11 x64
+- A CPU with AVX2 (most CPUs from 2013 on; older Xeons and pre-Haswell Intel CPUs can't run it)
 - DirectX 12 GPU with Shader Model 6.6 and mesh shaders (RTX 20-series / RX 6000 or newer)
-- 32 GB RAM recommended
+- 32 GB RAM recommended; with 16 GB, set a large fixed page file on an SSD (32-48 GB), since running out of memory is the most common crash
 - Your own game files (your own dump of your own copy)
 
 <sub>The release is built by CI from this repo, is not code-signed, and lists SHA-256 checksums in its notes.</sub>
@@ -473,6 +474,9 @@ After a launcher or runtime update the launcher marks the shaders as needing a r
 
 **Does the launcher go online?**
 Only for what you see: with "Updates" on it asks GitHub Releases at start whether a newer launcher exists. An update downloads only when you click it, into an `update` folder beside the launcher, is checked against the release's SHA-256 list, and is swapped in on the next start; the replaced version is kept in `previous` for a rollback. "Send report" opens a prefilled GitHub hardware-report issue in your browser (your user name and folders are removed from the log). Discord status talks only to the Discord app on your PC.
+
+**Shader build or the game fails with 0xC0000135**
+That code means Windows couldn't find a DLL the program needs. Usually your antivirus quarantined one of our files (see "My antivirus says it's a Trojan" above), or the Microsoft Visual C++ Redistributable (x64) is missing. Install it from Microsoft, restore anything quarantined, extract the release ZIP again and run Verify.
 
 **Will auto-update trigger antivirus?**
 It can. Unsigned apps that download and replace executables can get SmartScreen or antivirus warnings until a release has built up reputation. Our updater only acts when you click it, checks every file against the SHA-256 list, keeps the replaced version in `previous`, and never uses `%TEMP%`. It updates only the launcher and its bundled `runtime` folder; a local build you picked is never touched. If your antivirus flags a release, please report it as a false positive: [Microsoft's submission page](https://www.microsoft.com/en-us/wdsi/filesubmission).
