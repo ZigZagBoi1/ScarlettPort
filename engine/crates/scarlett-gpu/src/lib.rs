@@ -130,3 +130,35 @@ pub use watch::{
     title_memory_remapping, title_memory_splitting, title_memory_unmapping, title_memory_written,
     writing as kernel_will_write,
 };
+
+/// The unit tests opt into the Agility SDK as `scarlett` does: Windows 10's
+/// own D3D12 refuses root signatures with the heaps directly indexed (shader
+/// model 6.6) as "The parameter is incorrect". The test executable loads
+/// `.\D3D12\D3D12Core.dll` beside it (`deps\D3D12` in the target folder,
+/// which `build.rs` fills from `scarlett.exe`'s; without one the OS runtime
+/// is used as before).
+#[cfg(all(test, scarlett_agility_tests))]
+mod agility_opt_in {
+    /// Linker directives: MSVC's link.exe exports `#[no_mangle]` statics of
+    /// an executable only when told to, and a build script's link arguments
+    /// do not reach a library's unit-test executable.
+    #[cfg(target_env = "msvc")]
+    #[used]
+    #[unsafe(link_section = ".drectve")]
+    static EXPORTS: [u8; 56] = *b" /EXPORT:D3D12SDKVersion,DATA /EXPORT:D3D12SDKPath,DATA ";
+
+    #[repr(transparent)]
+    pub struct SdkPath(*const u8);
+    // SAFETY: a pointer to a constant string.
+    unsafe impl Sync for SdkPath {}
+
+    #[used]
+    #[unsafe(no_mangle)]
+    #[allow(non_upper_case_globals)]
+    pub static D3D12SDKVersion: u32 = 614;
+
+    #[used]
+    #[unsafe(no_mangle)]
+    #[allow(non_upper_case_globals)]
+    pub static D3D12SDKPath: SdkPath = SdkPath(c".\\D3D12\\".as_ptr().cast());
+}

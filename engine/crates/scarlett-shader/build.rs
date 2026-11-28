@@ -2,7 +2,8 @@
 //! (`scarlett-gpu`'s `shader_cache`): a rebuilt executable whose translator did
 //! not change keeps its cached translations. Also lists every `SCARLETT_*`
 //! switch the translator reads, whose values join the key at run time.
-//! Reads only this crate's `src` folder; writes nothing but cargo directives.
+//! Reads only this crate's `src` folder; writes nothing but cargo directives,
+//! and the Agility SDK's two DLLs beside the unit-test executable (below).
 
 use std::path::{Path, PathBuf};
 
@@ -31,7 +32,40 @@ fn fnv(state: &mut [u64; 2], bytes: &[u8]) {
     }
 }
 
+/// The unit tests opt into the Agility SDK (`bench_tests`)
+/// only when its `D3D12` folder is beside the test executable (in `deps`):
+/// with the opt-in and no folder, D3D12 refuses to start at all. A folder
+/// that `setup-scarlett.ps1` put beside `scarlett.exe` is copied there.
+fn agility_for_tests() {
+    println!("cargo:rustc-check-cfg=cfg(scarlett_agility_tests)");
+    let Some(out) = std::env::var_os("OUT_DIR").map(PathBuf::from) else {
+        return;
+    };
+    // <target>/<profile>/build/<crate>-<hash>/out
+    let Some(profile) = out.ancestors().nth(3) else {
+        return;
+    };
+    let (beside, deps) = (profile.join("D3D12"), profile.join("deps").join("D3D12"));
+    // Only paths that exist (cargo runs this again on every build for one
+    // that does not): a folder put there later takes `cargo clean -p scarlett-shader`.
+    for dll in [beside.join("D3D12Core.dll"), deps.join("D3D12Core.dll")] {
+        if dll.exists() {
+            println!("cargo:rerun-if-changed={}", dll.display());
+        }
+    }
+    if !deps.join("D3D12Core.dll").exists() && beside.join("D3D12Core.dll").exists() {
+        let _ = std::fs::create_dir_all(&deps);
+        for dll in ["D3D12Core.dll", "d3d12SDKLayers.dll"] {
+            let _ = std::fs::copy(beside.join(dll), deps.join(dll));
+        }
+    }
+    if deps.join("D3D12Core.dll").exists() {
+        println!("cargo:rustc-cfg=scarlett_agility_tests");
+    }
+}
+
 fn main() {
+    agility_for_tests();
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=Cargo.toml");

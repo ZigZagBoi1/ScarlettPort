@@ -1441,6 +1441,7 @@ void ms(out vertices V v[3], out indices uint3 t[1]) {
                 ps: Sub<D3D12_SHADER_BYTECODE>,
                 raster: Sub<D3D12_RASTERIZER_DESC>,
                 targets: Sub<D3D12_RT_FORMAT_ARRAY>,
+                topology: Sub<D3D12_PRIMITIVE_TOPOLOGY_TYPE>,
             }
             let mroot: ID3D12RootSignature = device.CreateRootSignature(0, &ms).unwrap();
             let stream = |other: bool| {
@@ -1471,6 +1472,13 @@ void ms(out vertices V v[3], out indices uint3 t[1]) {
                     targets: Sub(
                         D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS,
                         formats,
+                    ),
+                    // As `mesh_pipeline` names it: without a topology the
+                    // library refuses to load a stored mesh pipeline with
+                    // the very stream it was made from (E_INVALIDARG).
+                    topology: Sub(
+                        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY,
+                        D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
                     ),
                 }
             };

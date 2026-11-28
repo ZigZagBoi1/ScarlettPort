@@ -12,12 +12,20 @@
 //!
 //! Windows 10's own D3D12 has no SM 6.6: the test executable opts into the
 //! Agility SDK as `scarlett` does, which takes `.\D3D12\D3D12Core.dll` beside
-//! it (copy `target\release\D3D12` to `target\release\deps\D3D12`) and, with
-//! MSVC's linker, `RUSTFLAGS="-C link-arg=/EXPORT:D3D12SDKVersion,DATA -C
-//! link-arg=/EXPORT:D3D12SDKPath,DATA"` (a target folder of its own).
+//! it (`target\release\deps\D3D12`, which `build.rs` fills from
+//! `target\release\D3D12`). Without that folder it does not opt in (D3D12
+//! would not start at all) and the card's tests run on the OS runtime.
 
 use super::host::{DISPATCH_REPEAT, Dispatch, Host, RAW_UAV_IN_SYSTEM_MEMORY, Root, View};
 use crate::native::RootType;
+
+/// Linker directives: MSVC's link.exe exports `#[no_mangle]` statics of an
+/// executable only when told to, and a build script's link arguments do not
+/// reach a library's unit-test executable.
+#[cfg(all(target_env = "msvc", scarlett_agility_tests))]
+#[used]
+#[unsafe(link_section = ".drectve")]
+static EXPORTS: [u8; 56] = *b" /EXPORT:D3D12SDKVersion,DATA /EXPORT:D3D12SDKPath,DATA ";
 
 #[repr(transparent)]
 pub struct SdkPath(*const u8);
