@@ -309,7 +309,7 @@ mod tests {
         let (g, c) = (Path::new("D:/dump"), Path::new("F:/c"));
         let mut cfg = crate::Config::default();
         (cfg.raytracing, cfg.debug_view, cfg.auto_menu) = (true, true, true);
-        let mut t = crate::tuning::Tuning { full_textures: true, hdr: true, pad_ps: true, rumble: false, frame_cap: 30, upscaler: "fsr".into(), ray_tracing: true, overlay: true, ..Default::default() };
+        let mut t = crate::tuning::Tuning { full_textures: true, hdr: true, pad_ps: true, rumble: false, frame_cap: 30, upscaler: "fsr".into(), ray_tracing: true, overlay: true, gpu: "1".into(), ..Default::default() };
         t.kbm_hints = "off".into();
         let mut set: Vec<&str> = Vec::new();
         for e in [stable_env(g, c), look_env(g, c), experimental_env(g, c), crate::engine::world_env(&cfg, g, "F:/c"), t.env(true)] {

@@ -40,6 +40,9 @@ pub struct Tuning {
     pub friendly: bool,
     /// Leaves two logical cores to the desktop while the game plays (PCs with 6 or more).
     pub free_cores: bool,
+    /// The card the game runs on (SCARLETT_ADAPTER): its index in the run log's list of cards,
+    /// or a piece of its name. Empty: the runtime's own choice.
+    pub gpu: String,
 }
 
 impl Default for Tuning {
@@ -63,6 +66,7 @@ impl Default for Tuning {
             mouse_sensitivity: 1.0,
             friendly: true,
             free_cores: true,
+            gpu: String::new(),
         }
     }
 }
@@ -149,6 +153,9 @@ impl Tuning {
             v.push(("SCARLETT_MOUSE_LOOK", "0".to_string()));
         } else if (self.mouse_sensitivity - d.mouse_sensitivity).abs() > 0.001 {
             v.push(("SCARLETT_MOUSE_LOOK", num(self.mouse_sensitivity)));
+        }
+        if !self.gpu.trim().is_empty() {
+            v.push(("SCARLETT_ADAPTER", self.gpu.trim().to_string()));
         }
         v
     }
@@ -309,7 +316,14 @@ mod tests {
         assert_eq!(e.len(), 2);
         // Settings saved before these existed load with them off.
         let old: Tuning = serde_json::from_str(r#"{"hdr": true}"#).unwrap();
-        assert!(old.hdr && !old.ray_tracing && !old.overlay);
+        assert!(old.hdr && !old.ray_tracing && !old.overlay && old.gpu.is_empty());
+    }
+
+    #[test]
+    fn graphics_card() {
+        assert!(Tuning { gpu: "  ".into(), ..Tuning::default() }.env(false).is_empty());
+        let t = Tuning { gpu: " RTX 5060 ".into(), ..Tuning::default() };
+        assert_eq!(t.env(false), vec![("SCARLETT_ADAPTER", "RTX 5060".to_string())]);
     }
 
     #[test]

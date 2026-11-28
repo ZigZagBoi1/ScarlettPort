@@ -252,6 +252,8 @@ impl Launcher {
             sw(ui, r, "ft-friendly", &mut t.friendly);
             let r = me.feature_row(ui, w, "Leave 2 cores for the desktop", "The game runs on every logical core but two (on PCs with 6 or more), so clicks and other apps stay quick. Off lets the game use every core.", false, false, 70.);
             sw(ui, r, "ft-cores", &mut t.free_cores);
+            let r = me.feature_row(ui, w, "Graphics card", "For a PC with two cards: the number the run log gives the card, or a piece of its name (SCARLETT_ADAPTER). Empty: the one with the most memory.", true, ch(&|x| x.gpu.clone()), 260.);
+            text_field(ui, Rect::from_min_size(pos2(r.max.x - 254., r.center().y - 22.), vec2(240., 44.)), "ft-gpu", &mut t.gpu, "e.g. 5060 (empty: auto)", None, true);
             let r = me.feature_row(ui, w, "Keyboard hints", "The on-screen key legend for keyboard and mouse (SCARLETT_KBM_HINTS, [game] kbm_hints).", true, ch(&|x| x.kbm_hints.clone()), 260.);
             let sel = tuning::HINTS.iter().position(|h| *h == t.kbm_hints);
             if let Some(k) = segs(ui, r.max.x - 14., r.center().y, "ft-hints", &["Off", "Auto", "Always"], sel, &[true; 3], 76.) {

@@ -950,16 +950,31 @@ fn create() -> windows::core::Result<Host> {
             D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device)?;
             tracing::info!("host device on the software adapter (WARP)");
         } else {
-            // The high-performance adapter, as Windows' graphics preference
-            // asks: the default adapter on an Optimus laptop is the iGPU.
-            match high_performance_adapter() {
-                Some((adapter, name)) if D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device).is_ok() => {
-                    tracing::info!(adapter = %name, "host device on the high-performance adapter");
+            // The card `SCARLETT_ADAPTER` names, else the one with the most
+            // memory of its own (#274, #577; see [`adapter`]); every card
+            // seen is named, so a report says which there were.
+            let seen = adapter::hardware();
+            for (i, (_, s)) in seen.iter().enumerate() {
+                tracing::info!(index = i, adapter = %s.name, memory_mb = s.memory >> 20, monitor = s.display, "a card the host device could be made on");
+            }
+            let asked = std::env::var(adapter::ENV).ok();
+            let choice = adapter::choose(&seen.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>(), asked.as_deref());
+            if choice.unmatched {
+                tracing::warn!(asked = asked.as_deref().unwrap_or_default(), "SCARLETT_ADAPTER names none of the cards above (give its index or a piece of its name); chosen as if it were not set");
+            }
+            for (n, &i) in choice.order.iter().enumerate() {
+                let (adapter, s) = &seen[i];
+                if D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_0, &mut device).is_ok() {
+                    let why = if n == 0 { choice.why.says() } else { "the cards before it in the choice could not make a device" };
+                    tracing::info!(index = i, adapter = %s.name, why, "host device on this card (SCARLETT_ADAPTER=<index or a piece of the name> picks another)");
+                    break;
                 }
-                _ => {
-                    device = None;
-                    D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
-                }
+                tracing::warn!(index = i, adapter = %s.name, "no host device could be made on this card; the next one is tried");
+                device = None;
+            }
+            if device.is_none() {
+                D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
+                tracing::info!("host device on Windows' default adapter: none of the cards listed took it");
             }
             // Whether a GPU hang ends the run or freezes the PC (#1054).
             crate::tdr::log();
@@ -3874,6 +3889,7 @@ fn late_line(frames: f64) {
     }
 }
 
+mod adapter;
 pub(crate) mod aside;
 pub(crate) mod awake;
 mod card_steps;
@@ -11246,25 +11262,5 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
         assert_eq!(ram_idle_ms(Some(0)), 2_000);
         // Missing falls back to normal
         assert_eq!(ram_idle_ms(None), 10_000);
-    }
-}
-
-
-/// The first hardware adapter by high-performance preference, with its name;
-/// `None` when DXGI cannot rank adapters, which keeps the default adapter.
-fn high_performance_adapter() -> Option<(windows::Win32::Graphics::Dxgi::IDXGIAdapter1, String)> {
-    use windows::Win32::Graphics::Dxgi::*;
-    // SAFETY: plain DXGI factory and adapter queries.
-    unsafe {
-        let factory: IDXGIFactory6 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).ok()?;
-        (0..8).find_map(|i| {
-            let adapter: IDXGIAdapter1 = factory.EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE).ok()?;
-            let desc = adapter.GetDesc1().ok()?;
-            if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
-                return None;
-            }
-            let n = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
-            Some((adapter, String::from_utf16_lossy(&desc.Description[..n])))
-        })
     }
 }

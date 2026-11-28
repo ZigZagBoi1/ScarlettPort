@@ -331,6 +331,7 @@ The on/off switches below (`...=1`) are off when unset or set to `0`.
 | `SCARLETT_SKIP_PIPELINES=<hash>,...` | omit draws and dispatches, including indirect ones, whose pipeline contains a listed 16-digit shader hash |
 | `SCARLETT_GPU_TIMING=1` | with the above, each list of a submission run and timed on its own; slow lists logged with their slowest commands |
 | `SCARLETT_D3D12_WARP=1` | host device on the software adapter (slow; cannot reset the driver) |
+| `SCARLETT_ADAPTER=<n or name>` | host device on that card: its index in the log's "a card the host device could be made on" lines, or a piece of its name (`5060`, `rtx 3070`); unset, the card with the most memory of its own, then one with a monitor (not a debugging switch: works in a plain build) |
 | `SCARLETT_SHADER_LOOP_LIMIT=<n>` | translated shader loops stop after `n` iterations per lane instead of 2^20 (own shader cache entries); if a lower `n` makes world frames much faster, loops hitting the limit are what makes them slow |
 | `SCARLETT_AUDIO_CAPTURE=<file.wav>` | records what the title plays (our process only) |
 | `SCARLETT_XMA_DUMP=<dir>` | saves the first 32 XMA voices' context and input |
