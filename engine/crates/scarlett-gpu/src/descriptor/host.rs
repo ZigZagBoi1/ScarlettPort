@@ -124,6 +124,106 @@ impl Made {
 
 static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+
+/// The record of which dynamic slots are taken, a word per 64 of them: a
+/// table asks for a run thousands of times a frame, and the search reads 64
+/// slots a load instead of a `bool` each.
+struct Taken {
+    words: Vec<u64>,
+    len: usize,
+}
+
+impl Taken {
+    fn new(len: usize) -> Self {
+        Taken { words: vec![0; len.div_ceil(64)], len }
+    }
+
+    /// (Read by [`slot_story`], which the diagnostics feature keeps.)
+    #[allow(dead_code)]
+    fn is_taken(&self, at: usize) -> Option<bool> {
+        (at < self.len).then(|| self.words[at / 64] & (1 << (at % 64)) != 0)
+    }
+
+    /// Takes `n` slots from `first` (a run `first_run` gave).
+    fn take(&mut self, first: usize, n: usize) {
+        for at in first..first + n {
+            self.words[at / 64] |= 1 << (at % 64);
+        }
+    }
+
+    /// Gives `n` slots back from `first`: how many of them were taken.
+    fn release(&mut self, first: usize, n: usize) -> u32 {
+        let mut given = 0;
+        for at in first..(first + n).min(self.len) {
+            let bit = 1u64 << (at % 64);
+            let word = &mut self.words[at / 64];
+            if *word & bit != 0 {
+                *word &= !bit;
+                given += 1;
+            }
+        }
+        given
+    }
+
+    /// The first run of `n` free slots in `[from, to)`, crossing neither end.
+    fn first_run(&self, n: usize, from: usize, to: usize) -> Option<usize> {
+        let to = to.min(self.len);
+        if n == 0 || from >= to || to - from < n {
+            return None;
+        }
+        // The free slots in a row ending just before `at`, and where they
+        // began: a run may cross a word, so both are carried over.
+        let (mut run, mut start) = (0usize, from);
+        let mut at = from;
+        while at < to {
+            let base = at / 64 * 64;
+            // The free bits of this word in `[at, to)`, shifted so bit 0 is
+            // slot `at`: bits before `at` (the first word only; a later word
+            // begins at its first bit) and bits at `to` are not free here.
+            let mut free = !self.words[at / 64];
+            if to - base < 64 {
+                free &= (1u64 << (to - base)) - 1;
+            }
+            free >>= at - base;
+            while free != 0 {
+                // Taken slots end the run.
+                let gap = free.trailing_zeros() as usize;
+                if gap > 0 {
+                    run = 0;
+                    at += gap;
+                    free >>= gap;
+                    if free == 0 {
+                        break;
+                    }
+                }
+                let slots = free.trailing_ones() as usize;
+                if run == 0 {
+                    start = at;
+                }
+                run += slots;
+                if run >= n {
+                    // Where the run began, not the last `n` of a longer one.
+                    return Some(start);
+                }
+                at += slots;
+                // A whole free word (a run of more than 64): its bits are
+                // all spent, and the run carries into the next word.
+                if slots == 64 {
+                    break;
+                }
+                free >>= slots;
+            }
+            // The run carries past the word only if its free bits reached
+            // the word's end; taken bits left in the word end it.
+            if at < base + 64 {
+                run = 0;
+            }
+            at = base + 64;
+        }
+        None
+    }
+}
+
 pub(crate) struct HostHeap {
     /// Identity of this host heap instance, checked by [`release`] so a stale
     /// list resetting after a title heap was replaced at the same address does
@@ -176,7 +276,7 @@ pub(crate) struct HostHeap {
     kept: Box<[Mutex<Option<ID3D12Resource>>]>,
     /// Where the search for free dynamic slots starts, and which are taken
     /// (by lists not yet reset).
-    next: Mutex<(u32, Vec<bool>)>,
+    next: Mutex<(u32, Taken)>,
     /// How many dynamic slots are free (changed under `next`'s lock): with
     /// fewer than a table needs, the search is not made. Once the world
     /// had taken them all, every later table of the frame searched every
@@ -1426,7 +1526,7 @@ pub(crate) fn slot_story(slot: u32) -> String {
         let mut text = if index < host.count {
             format!("title slot {index}, made from {}", host.describe_slot(index).unwrap_or_default())
         } else {
-            let taken = host.next.lock().unwrap_or_else(|e| e.into_inner()).1.get((index - host.count) as usize).copied();
+            let taken = host.next.lock().unwrap_or_else(|e| e.into_inner()).1.is_taken((index - host.count) as usize);
             format!("dynamic slot {} (taken {taken:?})", index - host.count)
         };
         if twin {
@@ -1719,7 +1819,7 @@ impl HostHeap {
             waiting: Mutex::default(),
             away: Mutex::default(),
             kept: (0..count + extra).map(|_| Mutex::new(None)).collect(),
-            next: Mutex::new((0, vec![false; extra as usize])),
+            next: Mutex::new((0, Taken::new(extra as usize))),
             free: std::sync::atomic::AtomicU32::new(extra),
             too_long: std::sync::atomic::AtomicU32::new(u32::MAX),
             strides,
@@ -1844,22 +1944,15 @@ impl HostHeap {
         let cursor = *next as usize;
         let end = self.dynamic as usize;
         let second_end = cursor.saturating_add(n.saturating_sub(1)).min(end);
-        let starts = (cursor..end).chain(0..second_end);
-        let mut run = 0;
-        let mut found = None;
-        let mut last = usize::MAX;
-        for at in starts.take(if enough { usize::MAX } else { 0 }) {
-            // A run cannot wrap past the end.
-            if at != last.wrapping_add(1) {
-                run = 0;
-            }
-            last = at;
-            run = if taken[at] { 0 } else { run + 1 };
-            if run == n {
-                found = Some(at + 1 - n);
-                break;
-            }
-        }
+        let found = if enough {
+            taken.first_run(n, cursor, end).or_else(|| {
+                // A run cannot wrap past the end: the search from the start
+                // stops where that run would have had to cross it.
+                if cursor > 0 { taken.first_run(n, 0, second_end) } else { None }
+            })
+        } else {
+            None
+        };
         let Some(first) = found else {
             if enough {
                 self.too_long.fetch_min(n as u32, std::sync::atomic::Ordering::Relaxed);
@@ -1876,7 +1969,7 @@ impl HostHeap {
         };
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::DynamicNs, started.elapsed().as_nanos() as u64);
-        taken[first..first + n].fill(true);
+        taken.take(first, n);
         self.free.fetch_sub(n as u32, std::sync::atomic::Ordering::Relaxed);
         *next = ((first + n) % end) as u32;
         Some(self.count + first as u32)
@@ -2900,11 +2993,11 @@ impl HostHeap {
         };
         let mut guard = self.next.lock().unwrap_or_else(|e| e.into_inner());
         let end = (at + n).min(self.dynamic) as usize;
-        if let Some(slots) = guard.1.get_mut(at as usize..end) {
-            let given = slots.iter().filter(|taken| **taken).count() as u32;
+        let start = at as usize;
+        if start < end {
+            let given = guard.1.release(start, end - start);
             self.free.fetch_add(given, std::sync::atomic::Ordering::Relaxed);
             self.too_long.store(u32::MAX, std::sync::atomic::Ordering::Relaxed);
-            slots.fill(false);
         }
     }
 
@@ -5973,6 +6066,87 @@ mod tests {
         let last = first + heap.dynamic - 1;
         heap.release(heap.id(), last, 1);
         assert_eq!(heap.dynamic(2), None);
+    }
+
+    #[test]
+    fn bitset_search_finds_what_the_bool_scan_found() {
+        fn old_scan(taken: &[bool], cursor: usize, n: usize) -> Option<usize> {
+            let end = taken.len();
+            let second_end = cursor.saturating_add(n.saturating_sub(1)).min(end);
+            let mut run = 0;
+            let mut last = usize::MAX;
+            for at in (cursor..end).chain(0..second_end) {
+                if at != last.wrapping_add(1) {
+                    run = 0;
+                }
+                last = at;
+                run = if taken[at] { 0 } else { run + 1 };
+                if run == n {
+                    return Some(at + 1 - n);
+                }
+            }
+            None
+        }
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut random = move |bound: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % bound as u64) as usize
+        };
+        for _ in 0..20_000 {
+            let len = 1 + random(300);
+            let mut taken = Taken::new(len);
+            let mut bools = vec![false; len];
+            for at in 0..len {
+                if random(100) < 35 {
+                    taken.take(at, 1);
+                    bools[at] = true;
+                }
+            }
+            let cursor = random(len);
+            let n = 1 + random(12);
+            let end = len;
+            let second_end = cursor.saturating_add(n - 1).min(end);
+            let found = taken.first_run(n, cursor, end).or_else(|| {
+                if cursor > 0 { taken.first_run(n, 0, second_end) } else { None }
+            });
+            let old = old_scan(&bools, cursor, n);
+            if found != old {
+                let bits: String = (0..len).map(|at| if bools[at] { '1' } else { '0' }).collect();
+                let ours: String =
+                    (0..len).map(|at| if taken.is_taken(at).unwrap() { '1' } else { '0' }).collect();
+                let runs: Vec<usize> = (0..=len.saturating_sub(n)).filter(|&s| (s..s + n).all(|i| !bools[i])).collect();
+                let direct = taken.first_run(n, 0, second_end);
+                let at_found: String =
+                    (found.unwrap()..(found.unwrap() + n).min(len)).map(|i| if bools[i] { '1' } else { '0' }).collect();
+                panic!("len {len} cursor {cursor} n {n} found {found:?} old {old:?} direct {direct:?}\nruns {runs:?}\nat found {at_found}\nbools {bits}\ntaken {ours}");
+            }
+        }
+    }
+
+    #[test]
+    fn taken_finds_runs_a_word_at_a_time() {
+        let mut taken = Taken::new(200);
+        // A free run that crosses a word boundary is one run.
+        taken.take(0, 60);
+        taken.take(70, 130);
+        assert_eq!(taken.first_run(10, 0, 200), Some(60));
+        assert_eq!(taken.first_run(11, 0, 200), None);
+        // The run ends where the range does.
+        assert_eq!(taken.first_run(1, 0, 60), None);
+        assert_eq!(taken.first_run(1, 60, 200), Some(60));
+        // A word of only taken slots does not join the runs on either side.
+        taken.take(60, 10);
+        assert_eq!(taken.first_run(1, 190, 200), None);
+        // What is given back is free again; how much of it was taken is said.
+        assert_eq!(taken.release(58, 4), 4);
+        assert_eq!(taken.is_taken(58), Some(false));
+        assert_eq!(taken.is_taken(62), Some(true));
+        assert_eq!(taken.release(58, 4), 0);
+        assert_eq!(taken.first_run(2, 0, 200), Some(58));
+        // Past the end nothing is taken.
+        assert_eq!(taken.is_taken(200), None);
     }
 
     #[test]

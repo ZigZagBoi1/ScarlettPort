@@ -97,8 +97,30 @@ pub(crate) fn limited_host_ram() -> bool {
     *LIMITED.get_or_init(|| memory_status().is_some_and(|s| s.ullTotalPhys <= 32 * GIB))
 }
 
-fn next_pressure(was: bool, physical: u64, commit: u64) -> bool {
-    if was {
+/// Total physical memory, 0 if the system does not say; for the lines
+/// below.
+fn total_phys() -> u64 {
+    static TOTAL: OnceLock<u64> = OnceLock::new();
+    *TOTAL.get_or_init(|| memory_status().map_or(0, |status| status.ullTotalPhys))
+}
+
+/// The free memory and commit at which pressure turns on, and at which it
+/// turns off again.
+///
+/// A host of 16 GB keeps 400 MiB to 1.2 GiB of free physical memory in
+/// standby through Open World, so the 3 GiB/4 GiB lines turned pressure on in
+/// the first minute of a session and never off: every sweep wiped the idle
+/// pools, and the texture pass was refused for the rest of the run. On hosts
+/// of up to 20 GB the lines are the sizes that fit there; a larger host keeps
+/// the old ones, where free memory really does say something.
+fn next_pressure_for_host(was: bool, physical: u64, commit: u64, total: u64) -> bool {
+    if total != 0 && total <= 20 * GIB {
+        if was {
+            physical < 640 * MIB || commit < 2560 * MIB
+        } else {
+            physical <= 384 * MIB || commit <= 1792 * MIB
+        }
+    } else if was {
         physical < 5 * GIB || commit < 6 * GIB
     } else {
         physical <= 3 * GIB || commit <= 4 * GIB
@@ -123,6 +145,10 @@ fn next_commit_tight(was: bool, total: u64, available: u64) -> bool {
 /// later use (spare scratch, idle copies, idle host lists) are kept short.
 pub(crate) fn commit_tight() -> bool {
     COMMIT_TIGHT.load(Ordering::Relaxed)
+}
+
+fn next_pressure(was: bool, physical: u64, commit: u64) -> bool {
+    next_pressure_for_host(was, physical, commit, total_phys())
 }
 
 /// Called by the once-per-second submission sweep. A failed sample keeps the last good state.
@@ -224,12 +250,28 @@ mod tests {
 
     #[test]
     fn either_constraint_enters_pressure_and_both_must_recover() {
-        assert!(next_pressure(false, 12 * GIB, 4 * GIB));
-        assert!(next_pressure(false, 3 * GIB, 16 * GIB));
-        assert!(next_pressure(true, 4 * GIB, 7 * GIB));
-        assert!(next_pressure(true, 6 * GIB, 5 * GIB));
-        assert!(!next_pressure(true, 5 * GIB, 6 * GIB));
-        assert!(!next_pressure(false, 4 * GIB, 5 * GIB));
+        let large = 32 * GIB;
+        assert!(next_pressure_for_host(false, 12 * GIB, 4 * GIB, large));
+        assert!(next_pressure_for_host(false, 3 * GIB, 16 * GIB, large));
+        assert!(next_pressure_for_host(true, 4 * GIB, 7 * GIB, large));
+        assert!(next_pressure_for_host(true, 6 * GIB, 5 * GIB, large));
+        assert!(!next_pressure_for_host(true, 5 * GIB, 6 * GIB, large));
+        assert!(!next_pressure_for_host(false, 4 * GIB, 5 * GIB, large));
+    }
+
+    #[test]
+    fn a_sixteen_gib_host_enters_pressure_only_below_its_own_lines() {
+        let host = 16 * GIB;
+        // Free memory a 16 GB host keeps in standby does not enter pressure
+        // while commit is free, and does not keep it on once both recover.
+        assert!(!next_pressure_for_host(false, 700 * MIB, 6 * GIB, host));
+        assert!(!next_pressure_for_host(true, 700 * MIB, 3 * GIB, host));
+        assert!(next_pressure_for_host(false, 300 * MIB, 6 * GIB, host));
+        assert!(next_pressure_for_host(false, 2 * GIB, 1700 * MIB, host));
+        // Nothing recovers until both are back over the exit lines.
+        assert!(next_pressure_for_host(true, 700 * MIB, 2000 * MIB, host));
+        assert!(next_pressure_for_host(true, 500 * MIB, 3 * GIB, host));
+        assert!(!next_pressure_for_host(true, 640 * MIB, 2560 * MIB, host));
     }
 
     #[test]

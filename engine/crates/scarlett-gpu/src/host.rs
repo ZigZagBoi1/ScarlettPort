@@ -75,7 +75,24 @@ unsafe impl Sync for Host {}
 /// releases reach the host at once, from its own threads, while the host
 /// runs a submission: freeing there is a GPU page fault on the freed
 /// texture (a device hang).
-static RETIRED: Mutex<std::collections::VecDeque<(u64, Retired)>> = Mutex::new(std::collections::VecDeque::new());
+///
+/// In parts, one to a thread: a descriptor slot's old resource is let go
+/// thousands of times a frame, and one queue for all the threads took a lock
+/// each of those from every one of them.
+const RETIRED_PARTS: usize = 16;
+static RETIRED: [Mutex<std::collections::VecDeque<(u64, Retired)>>; RETIRED_PARTS] =
+    [const { Mutex::new(std::collections::VecDeque::new()) }; RETIRED_PARTS];
+
+/// The part of [`RETIRED`] the calling thread queues to.
+fn retired_part() -> &'static Mutex<std::collections::VecDeque<(u64, Retired)>> {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    thread_local! {
+        static PART: usize = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % RETIRED_PARTS;
+    }
+    // (A thread that ends may come here after its locals are gone.)
+    &RETIRED[PART.try_with(|part| *part).unwrap_or(0)]
+}
+
 /// Submissions started and finished (waited for).
 static STARTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static FINISHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -477,23 +494,81 @@ pub(crate) fn retire<T: 'static>(object: T) {
         return;
     }
     RETIREMENTS[1].fetch_add(1, Ordering::Relaxed);
-    RETIRED
+    retired_part()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .push_back((started, Retired::Any(Box::new(object))));
 }
 
-/// [`retire`] for a resource.
-pub(crate) fn retire_resource(object: ID3D12Resource) {
-    let queued = crate::queue::queued();
-    let started = STARTED.load(Ordering::Acquire) + queued;
-    if bury_lag() == 0 && started <= FINISHED.load(Ordering::Acquire) {
-        RETIREMENTS[0].fetch_add(1, Ordering::Relaxed);
-        drop(object);
+const RETIRE_BATCH: usize = 64;
+
+/// A batch is also put in after this long, so a thread that writes a slot's
+/// resource and then goes quiet holds no texture of the title's for long.
+const RETIRE_MS: u64 = 100;
+
+// Resources retired by this thread and not yet queued: a slot's old
+// resource is let go thousands of times a frame, and a lock and two atomics
+// each was the cost. Queued a batch at a time, or at once under pressure.
+thread_local! {
+    static RETIRE_TLS: RetireBuf = const {
+        RetireBuf { items: std::cell::RefCell::new(Vec::new()), last: std::cell::Cell::new(0) }
+    };
+}
+
+struct RetireBuf {
+    items: std::cell::RefCell<Vec<ID3D12Resource>>,
+    /// When this thread last put its batch into [`RETIRED`].
+    last: std::cell::Cell<u64>,
+}
+
+impl Drop for RetireBuf {
+    fn drop(&mut self) {
+        // (Not through `RETIRE_TLS`, which is being destroyed.)
+        if let Ok(mut items) = self.items.try_borrow_mut() {
+            flush_retired(&mut items);
+        }
+    }
+}
+
+fn flush_retired(items: &mut Vec<ID3D12Resource>) {
+    if items.is_empty() {
         return;
     }
-    RETIREMENTS[1].fetch_add(1, Ordering::Relaxed);
-    RETIRED.lock().unwrap_or_else(|e| e.into_inner()).push_back((started, Retired::Resource(object)));
+    let queued = crate::queue::queued();
+    let started = STARTED.load(Ordering::Acquire) + queued;
+    let n = items.len() as u64;
+    if bury_lag() == 0 && started <= FINISHED.load(Ordering::Acquire) {
+        RETIREMENTS[0].fetch_add(n, Ordering::Relaxed);
+        items.clear();
+        return;
+    }
+    RETIREMENTS[1].fetch_add(n, Ordering::Relaxed);
+    let mut part = retired_part().lock().unwrap_or_else(|e| e.into_inner());
+    part.reserve(items.len());
+    for object in items.drain(..) {
+        part.push_back((started, Retired::Resource(object)));
+    }
+}
+
+/// Puts what this thread retired and has not queued into [`RETIRED`] at once.
+pub(crate) fn flush_retired_tls() {
+    RETIRE_TLS.with(|buf| {
+        flush_retired(&mut buf.items.borrow_mut());
+        buf.last.set(crate::host::coarse_ms());
+    });
+}
+
+/// [`retire`] for a resource.
+pub(crate) fn retire_resource(object: ID3D12Resource) {
+    let now = coarse_ms();
+    let due = RETIRE_TLS.with(|buf| {
+        let mut items = buf.items.borrow_mut();
+        items.push(object);
+        items.len() >= RETIRE_BATCH || now.saturating_sub(buf.last.get()) >= RETIRE_MS
+    });
+    if due || crate::residency::critical_commit() {
+        flush_retired_tls();
+    }
 }
 
 /// How many submissions later than it could (the last one that may use it
@@ -515,14 +590,12 @@ fn bury_lag() -> u64 {
 /// those is dropped a little later than it could be.
 fn bury(finished: u64) {
     let finished = finished.saturating_sub(bury_lag());
-    let done: Vec<(u64, Retired)> = {
-        let mut retired = RETIRED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut done: Vec<(u64, Retired)> = Vec::new();
+    for part in &RETIRED {
+        let mut retired = part.lock().unwrap_or_else(|e| e.into_inner());
         let n = retired.iter().take_while(|(at, _)| *at <= finished).count();
-        if n == 0 {
-            return;
-        }
-        retired.drain(..n).collect()
-    };
+        done.extend(retired.drain(..n));
+    }
     drop(done);
 }
 
