@@ -337,7 +337,7 @@ pub struct Launcher {
     pub log_filter: String,
     /// The last run's log tail (from its file) when nothing ran in this session.
     pub last_log: Vec<String>,
-    pub run_log: Option<(PathBuf, std::fs::File)>,
+    pub run_log: Option<(PathBuf, perf::RunLog)>,
     /// Seconds of the UTC day when the current Play run started (for "time to world").
     pub run_tod: Option<f64>,
     pub perf: Option<perf::Perf>,
@@ -871,7 +871,8 @@ impl Launcher {
             self.tuning_at_start = Some(self.config.tuning.clone());
             self.run_tod = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| (d.as_secs_f64()).rem_euclid(86400.));
             let path = perf::new_log();
-            self.run_log = std::fs::File::create(&path).ok().map(|f| (path, f));
+            let limit = perf::run_log_limit(std::env::var("SCARLETT_RUN_LOG_MB").ok().as_deref());
+            self.run_log = std::fs::File::create(&path).ok().map(|f| (path, perf::RunLog::new(f, limit)));
             self.log(format!("> {} {}  [{} preset, {}]", exe.display(), args.join(" "), presets::label(&self.config.preset), self.build_label()), LogKind::Info);
             self.log(format!("  env: {}", env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ")), LogKind::Info);
             return self.spawn(cmd, kind);
@@ -1490,8 +1491,7 @@ impl Launcher {
                     parse_line(&t, &self.tx);
                     if self.running == Some(RunKind::Play) {
                         if let Some((_, f)) = &mut self.run_log {
-                            use std::io::Write;
-                            let _ = writeln!(f, "{t}");
+                            f.line(&t);
                         }
                     }
                     self.log(t, k);

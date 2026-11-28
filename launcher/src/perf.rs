@@ -148,6 +148,113 @@ pub fn new_log() -> PathBuf {
     dir.join(format!("run-{}.log", crate::saves::now_stamp()))
 }
 
+/// Run log size in MB when `SCARLETT_RUN_LOG_MB` does not say (#511: a long session's log grew to
+/// 53 MB, too big to attach to a report or to read).
+pub const RUN_LOG_MB: u64 = 10;
+
+/// The run log's size limit in bytes from `SCARLETT_RUN_LOG_MB`: unset or unreadable is
+/// [`RUN_LOG_MB`], `0` or `off` keeps every line.
+pub fn run_log_limit(asked: Option<&str>) -> Option<u64> {
+    match asked.map(str::trim) {
+        Some("0") | Some("off") => None,
+        Some(v) => Some(v.parse::<u64>().ok().filter(|&n| n > 0).unwrap_or(RUN_LOG_MB).saturating_mul(1 << 20)),
+        None => Some(RUN_LOG_MB << 20),
+    }
+}
+
+/// A play run's log file with a size limit: the first quarter of the limit keeps the start of
+/// the session (startup, the time to the world), the rest keeps a rolling tail (the last frames
+/// and the crash). Once the tail outgrows its share, the file is cut back to the start, a line
+/// that says how much was left out, and the newest half of the tail, so the file on disk is
+/// always whole and never above the limit by more than a line.
+pub struct RunLog {
+    file: std::fs::File,
+    head_max: u64,
+    tail_max: u64,
+    /// Bytes of the start of the session in the file.
+    head: u64,
+    /// The start is full: every later line goes to the tail.
+    tailing: bool,
+    /// The newest lines, up to half the tail's share.
+    recent: std::collections::VecDeque<String>,
+    recent_bytes: u64,
+    /// Bytes and lines of the tail in the file now (after the start and the marker).
+    in_file: u64,
+    file_lines: u64,
+    left_out_lines: u64,
+    left_out_bytes: u64,
+}
+
+impl RunLog {
+    /// `limit` in bytes, `None` for no limit.
+    pub fn new(file: std::fs::File, limit: Option<u64>) -> Self {
+        let limit = limit.unwrap_or(u64::MAX);
+        RunLog {
+            file,
+            head_max: limit / 4,
+            tail_max: limit - limit / 4,
+            head: 0,
+            tailing: false,
+            recent: Default::default(),
+            recent_bytes: 0,
+            in_file: 0,
+            file_lines: 0,
+            left_out_lines: 0,
+            left_out_bytes: 0,
+        }
+    }
+
+    pub fn line(&mut self, text: &str) {
+        use std::io::Write;
+        let n = text.len() as u64 + 1;
+        if !self.tailing && self.head + n <= self.head_max {
+            self.head += n;
+            let _ = writeln!(self.file, "{text}");
+            return;
+        }
+        self.tailing = true;
+        let _ = writeln!(self.file, "{text}");
+        self.in_file += n;
+        self.file_lines += 1;
+        self.recent.push_back(text.to_string());
+        self.recent_bytes += n;
+        while self.recent_bytes > self.tail_max / 2 && self.recent.len() > 1 {
+            let old = self.recent.pop_front().unwrap_or_default();
+            self.recent_bytes -= old.len() as u64 + 1;
+        }
+        if self.in_file > self.tail_max {
+            self.cut();
+        }
+    }
+
+    /// Cuts the file back to the start, the marker and the recent lines.
+    fn cut(&mut self) {
+        use std::io::{Seek, SeekFrom, Write};
+        self.left_out_lines += self.file_lines - self.recent.len() as u64;
+        self.left_out_bytes += self.in_file - self.recent_bytes;
+        let mut out = String::with_capacity(self.recent_bytes as usize + 128);
+        out.push_str(&self.marker());
+        out.push('\n');
+        for l in &self.recent {
+            out.push_str(l);
+            out.push('\n');
+        }
+        let _ = self.file.set_len(self.head);
+        let _ = self.file.seek(SeekFrom::Start(self.head));
+        let _ = self.file.write_all(out.as_bytes());
+        self.in_file = self.recent_bytes;
+        self.file_lines = self.recent.len() as u64;
+    }
+
+    fn marker(&self) -> String {
+        format!(
+            "--- {:.1} MB of log lines ({} lines) left out here; SCARLETT_RUN_LOG_MB=0 keeps them all ---",
+            self.left_out_bytes as f64 / (1u64 << 20) as f64,
+            self.left_out_lines
+        )
+    }
+}
+
 pub fn last_log() -> Option<PathBuf> {
     let mut logs: Vec<PathBuf> = std::fs::read_dir(logs_dir()).ok()?.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "log")).collect();
     logs.sort();
@@ -188,5 +295,67 @@ mod tests {
         assert_eq!(p.avg_fps, Some(4.));
         assert!(p.line().unwrap().contains("worst frame 263 ms"));
         assert_eq!(parse(["nothing"], None).line(), None);
+    }
+
+    fn run_log_file(name: &str) -> (PathBuf, std::fs::File) {
+        let dir = std::env::temp_dir().join(format!("scarlett-runlog-{}-{name}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("run.log");
+        let f = std::fs::File::create(&path).unwrap();
+        (path, f)
+    }
+
+    #[test]
+    fn run_log_limit_reads_the_switch() {
+        assert_eq!(run_log_limit(None), Some(RUN_LOG_MB << 20));
+        assert_eq!(run_log_limit(Some("25")), Some(25 << 20));
+        assert_eq!(run_log_limit(Some("0")), None);
+        assert_eq!(run_log_limit(Some("off")), None);
+        assert_eq!(run_log_limit(Some("lots")), Some(RUN_LOG_MB << 20));
+        assert_eq!(run_log_limit(Some("99999999999999999")), Some(u64::MAX));
+    }
+
+    #[test]
+    fn run_log_keeps_start_and_end_under_the_limit() {
+        let (path, f) = run_log_file("cap");
+        let limit = 64 * 1024;
+        let mut log = RunLog::new(f, Some(limit));
+        let total = 20_000;
+        for i in 0..total {
+            log.line(&format!("2026-11-25T03:00:00.000Z  INFO scarlett_gpu::host: line {i:06} 20.0 fps, 50.0 ms/frame"));
+            let len = std::fs::metadata(&path).unwrap().len();
+            assert!(len <= limit + 200, "{len} bytes after line {i}");
+        }
+        drop(log);
+        let lines = tail(&path, usize::MAX);
+        assert!(lines[0].contains("line 000000"), "the start is kept");
+        assert_eq!(lines.last().unwrap(), &format!("2026-11-25T03:00:00.000Z  INFO scarlett_gpu::host: line {:06} 20.0 fps, 50.0 ms/frame", total - 1));
+        let marks: Vec<&String> = lines.iter().filter(|l| l.contains("left out here")).collect();
+        assert_eq!(marks.len(), 1);
+        // every line is either in the file or counted by the marker
+        let left_out: usize = marks[0].split('(').nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
+        assert_eq!(lines.len() - 1 + left_out, total);
+        // the start and the tail run on without a gap of their own
+        let k = lines.iter().position(|l| l.contains("left out here")).unwrap();
+        let num = |l: &str| l.split("line ").nth(1).unwrap()[..6].parse::<usize>().unwrap();
+        assert_eq!(num(&lines[k + 1]) - num(&lines[k - 1]) - 1, left_out);
+        assert!(lines.len() - k > 100, "a long tail is kept");
+        // the readout still parses the file
+        assert_eq!(parse(lines.iter().map(String::as_str), None).avg_fps, Some(20.));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn run_log_without_a_limit_keeps_everything() {
+        let (path, f) = run_log_file("all");
+        let mut log = RunLog::new(f, run_log_limit(Some("0")));
+        for i in 0..5000 {
+            log.line(&format!("line {i}"));
+        }
+        drop(log);
+        let lines = tail(&path, usize::MAX);
+        assert_eq!(lines.len(), 5000);
+        assert!(!lines.iter().any(|l| l.contains("left out")));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
