@@ -846,7 +846,20 @@ pub fn on_failure(report: fn(&str) -> !) {
 /// the debug layer's first error, if any (`SCARLETT_D3D12_DEBUG=1` in a
 /// diagnostics build names the command).
 pub(crate) fn fail(what: std::fmt::Arguments) -> ! {
-    let mut text = what.to_string();
+    end(what.to_string(), true)
+}
+
+/// As [`fail`], for `what` D3D12 refused for want of memory (`again`: after
+/// [`let_go_idle_memory`]): says so, with the PC's and the card's memory,
+/// and not that a command may be bad.
+pub(crate) fn fail_out_of_memory(what: &str, again: bool) -> ! {
+    let card = host().and_then(Host::video_memory_groups).map(|[own, shared]| [(own[0], own[1]), (shared[0], shared[1])]);
+    end(oom::text(what, again, oom::commit(), card), false)
+}
+
+/// What a fail says: `text`, the removal reason and the debug layer's first
+/// error, or (`hint`) where a diagnostics build would find the command.
+fn end(mut text: String, hint: bool) -> ! {
     if let Some(host) = host() {
         // SAFETY: a plain query.
         if let Err(e) = unsafe { host.device.GetDeviceRemovedReason() } {
@@ -855,7 +868,7 @@ pub(crate) fn fail(what: std::fmt::Arguments) -> ! {
         }
         match host.log_messages() {
             Some(first) => text.push_str(&format!("; debug layer: {first}")),
-            None if host.messages.is_none() => text.push_str(
+            None if hint && host.messages.is_none() => text.push_str(
                 "; a diagnostics build with SCARLETT_D3D12_DEBUG=1 names the command",
             ),
             None => {}
@@ -1250,7 +1263,7 @@ pub(crate) struct HostList {
     twins: Mutex<std::collections::HashMap<usize, TwinUse>>,
     /// The list that runs those transitions just before this one, made
     /// when the list first has such transitions ([`lazy_prelude`]).
-    prelude: OnceLock<Option<Prelude>>,
+    prelude: OnceLock<Result<Prelude, windows::core::HRESULT>>,
     /// The pipelines the list binds, for reports of slow submissions.
     pipelines: std::sync::Arc<Mutex<std::collections::BTreeSet<String>>>,
     /// What its indirect executions ran, for the report of a removed device.
@@ -2034,6 +2047,14 @@ fn give_chunks(chunks: Vec<(Chunk, u64)>) {
     }
     // Freed outside the lock.
     drop(freed);
+}
+
+/// Before one more try at what D3D12 refused for want of memory: the host
+/// lists and scratch chunks kept idle go, as the sweep lets them go when
+/// memory is short (the lists first: their chunks become spare).
+fn let_go_idle_memory() {
+    crate::list::trim_idle();
+    trim_spare_chunks();
 }
 
 /// Drops spare scratch chunks kept idle when host memory is pressured.
@@ -3880,6 +3901,7 @@ mod card_steps;
 pub(crate) mod indirects;
 #[cfg(feature = "diagnostics")]
 mod panel;
+mod oom;
 mod place;
 mod send;
 pub(crate) use send::{goes_as_words, words_under};
@@ -4227,26 +4249,28 @@ impl Host {
 
     /// An allocator and a closed list for a prelude.
     fn make_prelude(&self) -> Option<Prelude> {
+        self.try_prelude().ok()
+    }
+
+    /// [`Self::make_prelude`], with why there is none; refused for want of
+    /// memory, tried once more after [`let_go_idle_memory`].
+    fn try_prelude(&self) -> Result<Prelude, windows::core::HRESULT> {
         // SAFETY: plain object creation.
-        let made: windows::core::Result<Prelude> = unsafe {
-            (|| {
-                let allocator: ID3D12CommandAllocator =
-                    self.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)?;
-                let list: ID3D12GraphicsCommandList =
-                    self.device
-                        .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None)?;
-                list.Close()?;
-                Ok((allocator, list))
-            })()
+        let make = || unsafe {
+            let allocator: ID3D12CommandAllocator =
+                self.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)?;
+            let list: ID3D12GraphicsCommandList =
+                self.device
+                    .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None)?;
+            list.Close()?;
+            Ok((allocator, list))
         };
+        let made = oom::once_more(make, let_go_idle_memory);
         LISTS[1].fetch_add(1, Ordering::Relaxed);
-        match made {
-            Ok(prelude) => Some(prelude),
-            Err(e) => {
-                tracing::warn!(error = %e, "no host list for a prelude");
-                None
-            }
-        }
+        made.map_err(|e| {
+            tracing::warn!(error = %e, "no host list for a prelude");
+            e.code()
+        })
     }
 
     fn make_list(&self) -> windows::core::Result<HostList> {
@@ -4263,7 +4287,7 @@ impl Host {
             )?;
             let prelude = OnceLock::new();
             if !lazy_prelude() {
-                let _ = prelude.set(self.make_prelude());
+                let _ = prelude.set(self.try_prelude());
             }
             #[cfg(feature = "diagnostics")]
             let notes = std::sync::Arc::<Mutex<Vec<Note>>>::default();
@@ -4911,11 +4935,10 @@ impl Host {
             fail(format_args!("no list, fence or event to fetch what shaders wrote to the card's memory (SCARLETT_RELAY=1)"));
         };
         if f.buffer.as_ref().is_none_or(|b| b.2 < total) {
-            let size = total.next_multiple_of(16 << 20);
-            f.buffer = self.shared_buffer(size).map(|(buffer, data)| (buffer, data as usize, size));
+            self.grow_fetch_buffer(&mut f.buffer, total);
         }
         let Some((buffer, data, _)) = f.buffer.clone() else {
-            fail(format_args!("no memory to fetch what shaders wrote to the card's memory ({total} bytes, SCARLETT_RELAY=1)"));
+            fail_out_of_memory(&format!("no memory to fetch what shaders wrote to the card's memory ({total} bytes, SCARLETT_RELAY=1)"), true);
         };
         f.sent += 1;
         let ((allocator, list), fence, event, sent) = (f.list.clone(), f.fence.clone(), f.event, f.sent);
@@ -5248,11 +5271,10 @@ impl Host {
         let mut written = vec![0usize; plan.ranges.len()];
         if !pieces.is_empty() {
             if work.fetched.as_ref().is_none_or(|f| f.2 < total) {
-                let size = total.next_multiple_of(16 << 20);
-                work.fetched = self.shared_buffer(size).map(|(buffer, data)| (buffer, data as usize, size));
+                self.grow_fetch_buffer(&mut work.fetched, total);
             }
             let Some((fetched, data, _)) = &work.fetched else {
-                fail(format_args!("no memory to fetch what shaders wrote to the card's memory ({total} bytes)"));
+                fail_out_of_memory(&format!("no memory to fetch what shaders wrote to the card's memory ({total} bytes)"), true);
             };
             let waiting = std::time::Instant::now();
             let (allocator, list) = &work.fetch;
@@ -6560,6 +6582,10 @@ impl HostList {
         }
         // SAFETY: our list.
         if let Err(e) = unsafe { self.list.Close() } {
+            // The recorded commands needed more memory than there was.
+            if oom::out_of_memory(&e) {
+                fail_out_of_memory("a host command list did not close", false);
+            }
             fail(format_args!(
                 "a host command list did not close ({e}): a command recorded into it was invalid"
             ));
@@ -6974,12 +7000,15 @@ impl HostList {
         if barriers.is_empty() && syncs.is_empty() {
             return None;
         }
-        let Some((allocator, list)) = self
+        let (allocator, list) = match self
             .prelude
-            .get_or_init(|| host().and_then(|h| h.make_prelude()))
-            .as_ref()
-        else {
-            fail(format_args!("no host list for a state prelude"));
+            .get_or_init(|| host().map_or(Err(windows::Win32::Foundation::E_FAIL), Host::try_prelude))
+        {
+            Ok(prelude) => prelude,
+            Err(code) if *code == windows::Win32::Foundation::E_OUTOFMEMORY => {
+                fail_out_of_memory("no host list for a state prelude", true)
+            }
+            Err(_) => fail(format_args!("no host list for a state prelude")),
         };
         // SAFETY: the prelude is not executing (every submission is waited
         // for); the textures are live.
@@ -6999,6 +7028,9 @@ impl HostList {
             })
         };
         if let Err(e) = recorded {
+            if oom::out_of_memory(&e) {
+                fail_out_of_memory("a host state prelude did not record", false);
+            }
             fail(format_args!("a host state prelude did not record ({e})"));
         }
         list.cast().ok()
@@ -10019,6 +10051,20 @@ impl Host {
             shared[2] >> 20,
             shared[3] >> 20
         );
+    }
+
+    /// `buffer` (a fetch's, idle: its last copy was waited for) in place
+    /// for `total` bytes. Refused: the old one and what the host keeps idle
+    /// go, and it is tried once more; refused again, `buffer` is `None`.
+    fn grow_fetch_buffer(&self, buffer: &mut Option<(ID3D12Resource, usize, u64)>, total: u64) {
+        let size = total.next_multiple_of(16 << 20);
+        let mut made = self.shared_buffer(size);
+        if made.is_none() {
+            *buffer = None;
+            let_go_idle_memory();
+            made = self.shared_buffer(size);
+        }
+        *buffer = made.map(|(b, data)| (b, data as usize, size));
     }
 
     /// A buffer in system memory that the CPU maps (write-back, so reading
