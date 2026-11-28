@@ -251,12 +251,64 @@ pub fn merge_toml(text: &str, keys: &[(&str, &str, String)]) -> String {
 }
 
 /// Writes the managed keys into `path` (created when missing).
-pub fn write_toml(path: &Path, keys: &[(&str, &str, String)]) -> std::io::Result<()> {
-    let old = std::fs::read_to_string(path).unwrap_or_else(|_| "# Written by the ScarlettPort launcher (Settings, Features). Other lines are kept.\n".into());
+///
+/// The Runtime page asks for this on every frame it draws, so an unchanged file is not written
+/// again, and a write goes to a file beside it that is then renamed over it: a crash or a power
+/// cut in the middle leaves the old file, not one full of zero bytes (#555). A file that is not
+/// TOML at all is moved aside to `scarlett.toml.damaged` and a new one is started; the returned
+/// line says so.
+pub fn write_toml(path: &Path, keys: &[(&str, &str, String)]) -> std::io::Result<Option<String>> {
+    const NEW: &str = "# Written by the ScarlettPort launcher (Settings, Features). Other lines are kept.\n";
+    let mut note = None;
+    let (old, there) = match std::fs::read(path) {
+        Err(_) => (NEW.to_string(), false),
+        Ok(bytes) => match toml_text(&bytes) {
+            Some(text) => (text.to_string(), true),
+            None => {
+                let mut aside = path.as_os_str().to_owned();
+                aside.push(".damaged");
+                let aside = std::path::PathBuf::from(aside);
+                std::fs::rename(path, &aside)?;
+                note = Some(format!("{} was damaged (not TOML): it is kept as {} and a new one was written.", path.display(), aside.display()));
+                (NEW.to_string(), false)
+            }
+        },
+    };
+    let new = merge_toml(&old, keys);
+    if there && new == old {
+        return Ok(None);
+    }
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
-    std::fs::write(path, merge_toml(&old, keys))
+    write_atomically(path, new.as_bytes())?;
+    Ok(note)
+}
+
+/// The file's text without a UTF-8 byte-order mark, or `None` when it is not TOML at all (zero
+/// bytes from a write cut short, or anything else that does not parse).
+fn toml_text(bytes: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    text.parse::<toml::Table>().is_ok().then_some(text)
+}
+
+/// Writes `bytes` to a file beside `path`, flushes it to the disk, then renames it over `path`:
+/// whoever reads `path` sees the old file or the new one, never a part.
+fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".tmp-{}", std::process::id()));
+    let tmp = path.with_file_name(name);
+    let res = std::fs::File::create(&tmp).and_then(|mut f| {
+        f.write_all(bytes)?;
+        f.sync_all()
+    });
+    let res = res.and_then(|()| std::fs::rename(&tmp, path));
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
 }
 
 #[cfg(test)]
@@ -274,6 +326,61 @@ mod tests {
     }
 
     use super::*;
+
+    /// A new folder holding `bytes` as `scarlett.toml`, and the file's path.
+    fn toml_file(name: &str, bytes: &[u8]) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("sp-toml-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scarlett.toml");
+        std::fs::write(&path, bytes).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn a_damaged_toml_is_set_aside_and_written_new() {
+        let keys = Tuning { frame_cap: 60, ..Tuning::default() }.toml_keys(false);
+        for (name, bytes) in [("zeros", vec![0u8; 191]), ("garbage", b"\xff\xfe junk [[[".to_vec()), ("text", b"not toml at all\n".to_vec())] {
+            let (dir, path) = toml_file(name, &bytes);
+            let note = write_toml(&path, &keys).unwrap().expect("a line saying so");
+            assert!(note.contains("scarlett.toml.damaged"), "{note}");
+            assert_eq!(std::fs::read(dir.join("scarlett.toml.damaged")).unwrap(), bytes);
+            let new = std::fs::read_to_string(&path).unwrap();
+            assert!(new.contains("[pace]\npace = true\nfps = 60") && !new.contains('\0'), "{new}");
+            assert!(toml_text(new.as_bytes()).is_some());
+            // nothing is left beside it but the two files
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_not_damage() {
+        let (dir, path) = toml_file("bom", b"\xEF\xBB\xBF[controls]\nmouse_sensitivity = 2.0\n");
+        let keys = Tuning::default().toml_keys(false);
+        assert_eq!(write_toml(&path, &keys).unwrap(), None);
+        let new = std::fs::read_to_string(&path).unwrap();
+        assert!(new.contains("[controls]\nmouse_sensitivity = 2.0"), "{new}");
+        assert!(!dir.join("scarlett.toml.damaged").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unchanged_toml_is_not_written_again_and_a_missing_one_is() {
+        let dir = std::env::temp_dir().join(format!("sp-toml-same-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("scarlett.toml");
+        // with no keys, a missing file is still written, as the runtime is pointed at it
+        assert_eq!(write_toml(&path, &[]).unwrap(), None);
+        assert!(path.is_file());
+        let keys = Tuning { frame_cap: 30, ..Tuning::default() }.toml_keys(false);
+        write_toml(&path, &keys).unwrap();
+        let first = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_toml(&path, &keys).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), first);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn defaults_set_nothing() {

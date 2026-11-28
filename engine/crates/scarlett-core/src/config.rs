@@ -52,9 +52,7 @@ impl Config {
             .clone()
             .unwrap_or_else(|| PathBuf::from("scarlett.toml"));
         let file = if path.is_file() {
-            let text = std::fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            Some((path, text))
+            read_config_file(&path)?.map(|paths| (path, paths))
         } else if let Some(p) = explicit {
             anyhow::bail!(
                 "SCARLETT_CONFIG points at {}, which does not exist",
@@ -63,15 +61,8 @@ impl Config {
         } else {
             None
         };
-        let (source, parsed) = match file {
-            Some((path, text)) => {
-                let parsed: FileConfig =
-                    toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-                (Some(path), parsed)
-            }
-            None => (None, FileConfig::default()),
-        };
-        Self::resolve(parsed.paths, source, |k| std::env::var_os(k))
+        let (source, paths) = file.map_or((None, FilePaths::default()), |(p, f)| (Some(p), f));
+        Self::resolve(paths, source, |k| std::env::var_os(k))
     }
 
     fn resolve(
@@ -118,6 +109,53 @@ impl Config {
     pub fn data_subdir(&self, sub: &str) -> Result<PathBuf> {
         subdir(&self.data_dir, "data", sub)
     }
+}
+
+/// The `[paths]` of the config file at `path`, or `None` when the file is damaged.
+///
+/// A crash or a power cut while the file is being written can leave it full of zero bytes
+/// (#555), and then every start stopped on "TOML parse error". A file that is not TOML at all
+/// is moved aside to `scarlett.toml.damaged`, one line says so, and the run goes on with the
+/// defaults (the launcher writes a fresh file at its next start). A file that is TOML but has a
+/// wrong key or value in `[paths]` is not damaged: that still stops the run, with the reason.
+fn read_config_file(path: &Path) -> Result<Option<FilePaths>> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let text = match config_text(&bytes) {
+        Ok(text) => text,
+        Err(why) => {
+            let mut aside = path.as_os_str().to_owned();
+            aside.push(".damaged");
+            let aside = PathBuf::from(aside);
+            match std::fs::rename(path, &aside) {
+                Ok(()) => eprintln!(
+                    "{} was damaged ({why}): it is kept as {} and this run uses the defaults.",
+                    path.display(),
+                    aside.display()
+                ),
+                Err(e) => eprintln!(
+                    "{} was damaged ({why}) and could not be moved aside ({e}): this run uses \
+                     the defaults.",
+                    path.display()
+                ),
+            }
+            return Ok(None);
+        }
+    };
+    let parsed: FileConfig =
+        toml::from_str(text).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(Some(parsed.paths))
+}
+
+/// The file's text without a UTF-8 byte-order mark, or why it is not a TOML file at all.
+fn config_text(bytes: &[u8]) -> std::result::Result<&str, String> {
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    if !bytes.is_empty() && bytes.iter().all(|&b| b == 0) {
+        return Err("it is all zero bytes".into());
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| "it is not text".to_string())?;
+    text.parse::<toml::Table>()
+        .map_err(|e| format!("it is not TOML: {}", e.message().trim()))?;
+    Ok(text)
 }
 
 /// The config file explicitly named by the environment, if any. An empty
@@ -355,6 +393,63 @@ mod tests {
         let parsed: FileConfig = toml::from_str(text).unwrap();
         assert_eq!(parsed.paths.game_dir, Some(PathBuf::from("D:/game")));
         assert!(toml::from_str::<FileConfig>("[paths]\ngame_folder = \"D:/game\"\n").is_err());
+    }
+
+    /// Writes `bytes` as a config file in a new folder and reads it.
+    fn read_bytes(bytes: &[u8]) -> (tempfile::TempDir, PathBuf, Option<FilePaths>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scarlett.toml");
+        std::fs::write(&path, bytes).unwrap();
+        let paths = read_config_file(&path).unwrap();
+        (dir, path, paths)
+    }
+
+    fn damaged(path: &Path) -> PathBuf {
+        path.with_file_name("scarlett.toml.damaged")
+    }
+
+    #[test]
+    fn a_file_of_zero_bytes_is_set_aside() {
+        // What #555 saw: "line 1, column 191" of a line that showed as blank.
+        let (_dir, path, paths) = read_bytes(&[0u8; 191]);
+        assert!(paths.is_none());
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(damaged(&path)).unwrap(), vec![0u8; 191]);
+    }
+
+    #[test]
+    fn garbage_is_set_aside() {
+        let (_dir, path, paths) = read_bytes(b"\xff\xfe not text at all");
+        assert!(paths.is_none() && damaged(&path).is_file());
+        let (_dir, path, paths) = read_bytes(b"this is not toml\n[[[\n");
+        assert!(paths.is_none() && damaged(&path).is_file());
+        // A good start with zeros after it (a write cut short).
+        let (_dir, path, paths) = read_bytes(b"[paths]\ngame_dir = \"D:/g\"\n\0\0\0\0");
+        assert!(paths.is_none() && damaged(&path).is_file());
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_read() {
+        let (_dir, path, paths) = read_bytes(b"\xEF\xBB\xBF[paths]\ngame_dir = \"D:/g\"\n");
+        assert_eq!(paths.unwrap().game_dir, Some(PathBuf::from("D:/g")));
+        assert!(path.is_file() && !damaged(&path).exists());
+    }
+
+    #[test]
+    fn a_blank_file_is_the_defaults_and_stays() {
+        let (_dir, path, paths) = read_bytes(b"\n  \r\n\t\n");
+        assert!(paths.unwrap().game_dir.is_none());
+        assert!(path.is_file() && !damaged(&path).exists());
+    }
+
+    #[test]
+    fn a_wrong_key_still_stops_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scarlett.toml");
+        std::fs::write(&path, "[paths]\ngame_folder = \"D:/g\"\n").unwrap();
+        let err = read_config_file(&path).unwrap_err();
+        assert!(format!("{err:#}").contains("game_folder"), "{err:#}");
+        assert!(path.is_file() && !damaged(&path).exists());
     }
 
     #[test]

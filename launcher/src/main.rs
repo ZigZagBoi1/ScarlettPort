@@ -1136,7 +1136,10 @@ impl Launcher {
             presets::set(&mut env, firstrun::NAME_SWITCH, name);
         }
         let toml = runtime::data_dir().join("scarlett.toml");
-        if tuning::write_toml(&toml, &t.toml_keys(fsr)).is_ok() {
+        if let Ok(note) = tuning::write_toml(&toml, &t.toml_keys(fsr)) {
+            if let Some(note) = note {
+                let _ = self.tx.send(Message::Log(note, LogKind::Info));
+            }
             presets::set(&mut env, "SCARLETT_CONFIG", toml.display().to_string());
         }
         env
