@@ -4960,11 +4960,36 @@ fn unheld(shadow: &Arc<Shadow>) -> bool {
 }
 
 /// Whether copies of memory the title frees go at once
-/// ([`freed_let_go`]); `SCARLETT_FREED_COPIES=keep`: they wait for the idle
-/// sweep, as before.
+/// ([`freed_let_go`]). Off by default: they wait for the idle sweep, as
+/// before. `SCARLETT_FREED_COPIES=drop` turns it on; it is opt-in until a
+/// run shows no reads into memory just released.
 fn freed_drops() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("SCARLETT_FREED_COPIES").as_deref() != Ok("keep"))
+    *ON.get_or_init(|| freed_drops_from(std::env::var("SCARLETT_FREED_COPIES").ok().as_deref()))
+}
+
+/// [`freed_drops`] for a value of `SCARLETT_FREED_COPIES`: only `drop`
+/// turns it on.
+fn freed_drops_from(value: Option<&str>) -> bool {
+    value == Some("drop")
+}
+
+#[cfg(test)]
+mod freed_copies_switch {
+    use super::freed_drops_from;
+
+    #[test]
+    fn keep_is_the_default() {
+        assert!(!freed_drops_from(None));
+        assert!(!freed_drops_from(Some("keep")));
+        assert!(!freed_drops_from(Some("")));
+        assert!(!freed_drops_from(Some("1")));
+    }
+
+    #[test]
+    fn drop_turns_it_on() {
+        assert!(freed_drops_from(Some("drop")));
+    }
 }
 
 /// The keys of `map` (start, length) whose span touches `[at, end)`; a
